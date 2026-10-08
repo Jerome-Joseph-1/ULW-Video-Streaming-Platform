@@ -21,9 +21,13 @@ enum class MediaError : std::uint8_t {
     Refused,
     // The room was closed through this handle; its generation admits nobody again.
     Closed,
-    // The media server supports the call, but this adapter does not implement it yet (group
-    // calls, ADR-0058). Permanent for the build: retrying cannot help.
+    // The media server supports the call, but this adapter does not implement it (ADR-0058).
+    // Permanent for the build: retrying cannot help.
     NotImplemented,
+    // A close found the room still there after deleting it, as often as it tries: something
+    // keeps bringing it back. A later close may succeed; until then the room may admit whoever
+    // holds a credential for it.
+    Remains,
 };
 
 [[nodiscard]] std::string_view to_string(MediaError e) noexcept;
@@ -38,8 +42,9 @@ struct MediaTicket {
     WallTime expires_at;
 };
 
-// One connected device in a room, as the media server reports it. Group calls (M27) read the
-// roster to check that a room holds everyone who was admitted and no one else.
+// One connected device in a room, as the media server reports it. A group call's owner reads the
+// roster to know whether anyone is still in the call, and whether a new device would fit
+// (ADR-0095).
 struct MediaParticipant {
     UserId user;
     DeviceId device;
@@ -105,8 +110,9 @@ public:
     virtual void join(const UserId& user, const DeviceId& device, MediaRole role,
                       TicketDone done) = 0;
     // Who is connected to this generation right now, in no particular order; a ticket that has
-    // been issued but not used does not count. Group calls only (ADR-0058): an adapter without
-    // them reports `NotImplemented`.
+    // been issued but not used does not count, and neither does anything connected that is not
+    // a member (a relay's recorder). A generation the media server has dropped holds nobody.
+    // `Closed` through a handle that was closed.
     virtual void participants(ParticipantsDone done) = 0;
     // Sends what that participant publishes to `target`'s packager, re-encoded for it, until
     // the participant leaves or the generation closes; its leaving is how the packager learns
@@ -120,8 +126,13 @@ public:
                        RelayDone done) = 0;
     // Ends this generation for everyone in it; members' tickets and refreshed credentials stop
     // admitting anyone. Closing a generation the media server has already dropped succeeds.
+    // Succeeds only once the media server no longer lists the room; `Remains` when it still
+    // does after every try.
     virtual void close(MediaDone done) = 0;
 };
+
+// Whether a participant is connected: true while it is, false once it has gone or its room has.
+using PresenceDone = std::move_only_function<void(std::expected<bool, MediaError>) noexcept>;
 
 // Every member runs on the reactor thread, and every callback runs there later, never from
 // inside the call that was given it. Rooms must not outlive their ISfu; destroying the ISfu
@@ -135,6 +146,11 @@ public:
     // Idempotent for one generation. `max_participants` 0 means no limit of the room's own.
     virtual void open_room(const RoomId& room, MediaGeneration generation, MediaRoomKind kind,
                            std::uint16_t max_participants, OpenDone done) = 0;
+    // Whether that device of that user is connected to the generation's room now, as the media
+    // server itself sees it. It never opens the room: a room that is gone holds nobody, and
+    // asking must not bring it back (ADR-0093).
+    virtual void present(const RoomId& room, MediaGeneration generation, const UserId& user,
+                         const DeviceId& device, PresenceDone done) = 0;
 };
 
 } // namespace core::ports

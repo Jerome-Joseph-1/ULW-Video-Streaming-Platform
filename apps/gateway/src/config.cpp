@@ -7,6 +7,7 @@
 #include "http/origin.hpp"
 #include "http/request_parser.hpp"
 #include "infra/auth/local_verifier.hpp"
+#include "infra/auth/service_claim.hpp"
 #include "infra/postgres/connection_string.hpp"
 #include "infra/s3util/credentials.hpp"
 #include "infra/s3util/profile.hpp"
@@ -66,6 +67,10 @@ constexpr std::array kSettings{
     ops::Setting{.env = "JWT_ISSUER", .key = "auth.issuer"},
     ops::Setting{.env = "JWT_AUDIENCE", .key = "auth.audience"},
     ops::Setting{.env = "ULW_JWT_SUBJECT_CLAIM", .key = "auth.subject_claim"},
+    // The operator's backend's tokens (ADR-0097).
+    ops::Setting{.env = "ULW_SERVICE_CLAIM", .key = "auth.service_claim"},
+    ops::Setting{.env = "ULW_SERVICE_SCOPE", .key = "auth.service_scope"},
+    ops::Setting{.env = "ULW_SERVICE_CLIENT_ID", .key = "auth.service_client_id"},
     ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
     ops::Setting{.env = "ULW_ALLOWED_ORIGINS", .key = "auth.allowed_origins"},
     ops::Setting{.env = "ULW_ALLOW_SAME_SITE", .key = "auth.allow_same_site"},
@@ -97,6 +102,9 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_K8S_NAMESPACE", .key = "live.k8s_namespace"},
     ops::Setting{.env = "ULW_K8S_TOKEN_FILE", .key = "live.k8s_token_file"},
     ops::Setting{.env = "ULW_K8S_CA_FILE", .key = "live.k8s_ca_file"},
+    // LiveKit's webhooks (ADR-0093).
+    ops::Setting{.env = "ULW_LIVE_WEBHOOK_PORT", .key = "live.webhook_port"},
+    ops::Setting{.env = "ULW_LIVE_PUBLISHER_GRACE_SECONDS", .key = "live.publisher_grace_seconds"},
     // Not a setting: passed on to a packager the gateway starts as a process.
     ops::Setting{.env = "PATH", .key = ""},
 };
@@ -298,6 +306,16 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
     }
     config.jwt_audience = std::move(rules->audience);
     config.jwt_subject_claim = std::move(rules->subject_claim);
+    const auto claim = lookup(env, "ULW_SERVICE_CLAIM");
+    const auto scope = lookup(env, "ULW_SERVICE_SCOPE");
+    const auto client = lookup(env, "ULW_SERVICE_CLIENT_ID");
+    auto service = infra::auth::read_service_claim(claim, scope, client);
+    if (!service) {
+        return error(service.error().variable, service.error().reason);
+    }
+    config.service_claim = std::move(service->claim);
+    config.service_value = std::move(service->value);
+    config.service_client_id = std::move(service->client_id);
     config.limits.auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token");
     if (const auto list = lookup(env, "ULW_ALLOWED_ORIGINS")) {
         auto origins = http::parse_origin_list(*list);
@@ -587,6 +605,32 @@ std::expected<void, ConfigError> load_kubernetes_runtime(const EnvLookup& env, c
     return {};
 }
 
+// LiveKit's webhooks (ADR-0093): a listener of their own, never the public one, and the grace
+// a publisher that left has to come back.
+std::expected<void, ConfigError> load_webhooks(const EnvLookup& env, Config& config) {
+    LiveConfig& live = config.live;
+    if (lookup(env, "ULW_LIVE_WEBHOOK_PORT")) {
+        const auto port = number<std::uint16_t>(env, "ULW_LIVE_WEBHOOK_PORT", 0, 1, 65'535);
+        if (!port) {
+            return std::unexpected(port.error());
+        }
+        if (*port == config.port) {
+            return error("ULW_LIVE_WEBHOOK_PORT",
+                         "must not be ULW_LISTEN_PORT: webhooks are not served where the public "
+                         "route sends requests");
+        }
+        live.webhook_port = *port;
+    }
+    // A full reconnect of LiveKit's client takes seconds; past five minutes a stream nobody
+    // publishes is not one anybody is waiting for.
+    const auto grace = number<std::uint32_t>(env, "ULW_LIVE_PUBLISHER_GRACE_SECONDS", 10, 1, 300);
+    if (!grace) {
+        return std::unexpected(grace.error());
+    }
+    live.watch.grace = core::Seconds{*grace};
+    return {};
+}
+
 // How many streams, for how long, and who may start one.
 std::expected<void, ConfigError> load_live_limits(const EnvLookup& env, LiveConfig& live) {
     // The packager's own bounds (ADR-0046).
@@ -633,7 +677,7 @@ std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config)
         // Off: nothing else of it may be set, or a deployment would believe it publishes.
         for (const std::string_view name :
              {"LIVEKIT_CLIENT_URL", "ULW_LIVE_PACKAGER", "ULW_LIVE_PACKAGER_SRT",
-              "ULW_LIVE_BROADCASTER_CLAIM"}) {
+              "ULW_LIVE_BROADCASTER_CLAIM", "ULW_LIVE_WEBHOOK_PORT"}) {
             if (lookup(env, name)) {
                 return error(name, "set, but LIVEKIT_API_URL is not");
             }
@@ -767,6 +811,11 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (auto r = load_live(env, config); !r) {
         return std::unexpected(std::move(r.error()));
     }
+    if (config.live.enabled) {
+        if (auto r = load_webhooks(env, config); !r) {
+            return std::unexpected(std::move(r.error()));
+        }
+    }
     return config;
 }
 
@@ -780,6 +829,74 @@ std::expected<void, ConfigError> check_descriptor_budget(const Limits& limits, s
     }
     return {};
 }
+
+namespace {
+
+// ULW_LIVE_WEBHOOK_PORT and ULW_LIVE_PUBLISHER_GRACE_SECONDS as logged: empty while the webhook
+// listener is off.
+std::pair<std::string, std::string> webhook_settings(const LiveConfig& live) {
+    if (live.webhook_port == 0) {
+        return {};
+    }
+    return {std::to_string(live.webhook_port),
+            std::to_string(std::chrono::duration_cast<core::Seconds>(live.watch.grace).count())};
+}
+
+// One line per setting that has a value, secrets redacted, saying where each came from.
+template <std::size_t N>
+void log_values(const std::array<std::pair<std::string_view, std::string>, N>& values,
+                const ops::Settings& layers, ops::Logger& log) {
+    for (const auto& [variable, value] : values) {
+        if (value.empty()) {
+            continue;
+        }
+        const bool secret = std::ranges::any_of(
+            kSettings, [&](const ops::Setting& s) { return s.env == variable && s.secret; });
+        log.info("setting", {{"name", variable},
+                             {"value", secret ? std::string_view("<redacted>") : value},
+                             {"from", ops::to_string(layers.origin(variable))}});
+    }
+}
+
+// The stream service's settings, as logged: empty where live streams are off.
+std::array<std::pair<std::string_view, std::string>, 21> live_values(const LiveConfig& live) {
+    const auto live_value = [&live](std::string value) {
+        return live.enabled ? std::move(value) : std::string{};
+    };
+    const bool process = live.enabled && live.runtime == PackagerRuntime::Process;
+    const bool kubernetes = live.enabled && live.runtime == PackagerRuntime::Kubernetes;
+    const auto k8s_value = [kubernetes](std::string value) {
+        return kubernetes ? std::move(value) : std::string{};
+    };
+    const auto webhook_values = webhook_settings(live);
+    return {{
+        {"LIVEKIT_API_URL", live.livekit_api_url},
+        {"LIVEKIT_CLIENT_URL", live.livekit_client_url},
+        {"LIVEKIT_API_KEY", live.livekit_api_key},
+        {"LIVEKIT_API_SECRET", live.livekit_api_secret},
+        {"ULW_LIVE_PACKAGER_SRT", live.packager_srt},
+        {"ULW_LIVE_PACKAGER", live_value(process ? "process" : "kubernetes")},
+        {"ULW_LIVE_SEGMENT_SECONDS", live_value(std::to_string(live.settings.segment.count()))},
+        {"ULW_LIVE_MAX_STREAMS", live_value(std::to_string(live.settings.max_streams))},
+        {"ULW_LIVE_STREAMS_PER_USER_PER_HOUR",
+         live_value(std::to_string(live.settings.streams_per_user_per_hour))},
+        {"ULW_LIVE_BROADCASTER_CLAIM", broadcaster_setting(live)},
+        {"ULW_LIVE_START_WINDOW_SECONDS",
+         live_value(std::to_string(live.settings.start_window.count()))},
+        {"ULW_LIVE_PACKAGER_BIN", live.packager_binary},
+        {"ULW_LIVE_JOB_TEMPLATE", live.job_template_file},
+        {"ULW_LIVE_PACKAGER_IMAGE_TAG", live.image_tag},
+        {"ULW_LIVE_PACKAGER_PULL_POLICY", k8s_value(live.pull_policy)},
+        {"ULW_LIVE_PACKAGER_SECRET", k8s_value(live.packager_secret)},
+        {"ULW_K8S_API_URL", k8s_value(live.k8s_api_url)},
+        {"ULW_K8S_NAMESPACE", live.k8s_namespace},
+        {"ULW_K8S_TOKEN_FILE", k8s_value(live.k8s_token_file)},
+        {"ULW_LIVE_WEBHOOK_PORT", webhook_values.first},
+        {"ULW_LIVE_PUBLISHER_GRACE_SECONDS", webhook_values.second},
+    }};
+}
+
+} // namespace
 
 void log_effective(const Config& config, const ops::Settings& layers, ops::Logger& log) {
     const auto [storage,
@@ -801,16 +918,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     for (const std::string& origin : config.limits.allowed_origins) {
         origins += (origins.empty() ? "" : ",") + origin;
     }
-    const LiveConfig& live = config.live;
-    const auto live_value = [&live](std::string value) {
-        return live.enabled ? std::move(value) : std::string{};
-    };
-    const bool process = live.enabled && live.runtime == PackagerRuntime::Process;
-    const bool kubernetes = live.enabled && live.runtime == PackagerRuntime::Kubernetes;
-    const auto k8s_value = [kubernetes](std::string value) {
-        return kubernetes ? std::move(value) : std::string{};
-    };
-    const std::array<std::pair<std::string_view, std::string>, 53> values{{
+    const std::array<std::pair<std::string_view, std::string>, 37> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -846,42 +954,16 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"JWT_ISSUER", config.jwt_issuer},
         {"JWT_AUDIENCE", config.jwt_audience},
         {"ULW_JWT_SUBJECT_CLAIM", config.jwt_subject_claim},
+        {"ULW_SERVICE_CLAIM", config.service_value.empty() ? "" : config.service_claim},
+        {"ULW_SERVICE_SCOPE", config.service_value},
+        {"ULW_SERVICE_CLIENT_ID", config.service_client_id},
         {"ULW_AUTH_COOKIE", config.limits.auth_cookie},
         {"ULW_ALLOWED_ORIGINS", origins},
         {"ULW_ALLOW_SAME_SITE", config.limits.allow_same_site ? "1" : ""},
         {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},
-        {"LIVEKIT_API_URL", live.livekit_api_url},
-        {"LIVEKIT_CLIENT_URL", live.livekit_client_url},
-        {"LIVEKIT_API_KEY", live.livekit_api_key},
-        {"LIVEKIT_API_SECRET", live.livekit_api_secret},
-        {"ULW_LIVE_PACKAGER_SRT", live.packager_srt},
-        {"ULW_LIVE_PACKAGER", live_value(process ? "process" : "kubernetes")},
-        {"ULW_LIVE_SEGMENT_SECONDS", live_value(std::to_string(live.settings.segment.count()))},
-        {"ULW_LIVE_MAX_STREAMS", live_value(std::to_string(live.settings.max_streams))},
-        {"ULW_LIVE_STREAMS_PER_USER_PER_HOUR",
-         live_value(std::to_string(live.settings.streams_per_user_per_hour))},
-        {"ULW_LIVE_BROADCASTER_CLAIM", broadcaster_setting(live)},
-        {"ULW_LIVE_START_WINDOW_SECONDS",
-         live_value(std::to_string(live.settings.start_window.count()))},
-        {"ULW_LIVE_PACKAGER_BIN", live.packager_binary},
-        {"ULW_LIVE_JOB_TEMPLATE", live.job_template_file},
-        {"ULW_LIVE_PACKAGER_IMAGE_TAG", live.image_tag},
-        {"ULW_LIVE_PACKAGER_PULL_POLICY", k8s_value(live.pull_policy)},
-        {"ULW_LIVE_PACKAGER_SECRET", k8s_value(live.packager_secret)},
-        {"ULW_K8S_API_URL", k8s_value(live.k8s_api_url)},
-        {"ULW_K8S_NAMESPACE", live.k8s_namespace},
-        {"ULW_K8S_TOKEN_FILE", k8s_value(live.k8s_token_file)},
     }};
-    for (const auto& [variable, value] : values) {
-        if (value.empty()) {
-            continue;
-        }
-        const bool secret = std::ranges::any_of(
-            kSettings, [&](const ops::Setting& s) { return s.env == variable && s.secret; });
-        log.info("setting", {{"name", variable},
-                             {"value", secret ? std::string_view("<redacted>") : value},
-                             {"from", ops::to_string(layers.origin(variable))}});
-    }
+    log_values(values, layers, log);
+    log_values(live_values(config.live), layers, log);
     for (const net::IpNetwork& block : config.limits.trusted_proxies) {
         if (block.prefix_length() < (block.is_v4() ? kWideV4Prefix : kWideV6Prefix)) {
             log.warn("a trusted proxy block this wide lets many peers name any client",

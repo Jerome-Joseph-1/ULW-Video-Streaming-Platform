@@ -7,9 +7,12 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -46,9 +49,59 @@ SELECT id, video_id, owner_id, size_bytes, chunk_size, durable_offset, state,
        (extract(epoch FROM expires_at) * 1000000)::bigint, backend_ref, object_key
   FROM uploads WHERE id = $1)sql";
 
-constexpr Sql kFindVideo = R"sql(
-SELECT id, owner_id, title, state, version, error_reason, duration_ms
-  FROM videos WHERE id = $1 AND deleted_at IS NULL)sql";
+// The video and what the viewer ($2) is to it, in one statement (ADR-0097). Every lookup goes
+// by a primary key: chat_members (room_id, user_id) and video_grants (video_id, user_id). A
+// room shares the video only while it lists both the viewer and the owner: an owner who left
+// the room no longer shares into it. The owner needs neither, and gets false for both.
+constexpr Sql kFindVideoFor = R"sql(
+SELECT v.id, v.owner_id, v.title, v.state, v.version, v.error_reason, v.duration_ms,
+       v.visibility, v.visibility_room,
+       v.owner_id <> $2 AND v.visibility = 'room'
+           AND EXISTS (SELECT 1 FROM chat_members m
+                        WHERE m.room_id = v.visibility_room AND m.user_id = $2)
+           AND EXISTS (SELECT 1 FROM chat_members o
+                        WHERE o.room_id = v.visibility_room AND o.user_id = v.owner_id),
+       v.owner_id <> $2
+           AND EXISTS (SELECT 1 FROM video_grants g WHERE g.video_id = v.id AND g.user_id = $2)
+  FROM videos v WHERE v.id = $1 AND v.deleted_at IS NULL)sql";
+
+// The owner ($2) sets it, and a room only one chat_members lists them in at this moment. $4 is
+// the room's id, or '' for a visibility without one.
+constexpr Sql kSetVisibility = R"sql(
+UPDATE videos SET visibility = $3, visibility_room = NULLIF($4, '')::uuid, updated_at = now()
+ WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL
+   AND ($4 = '' OR EXISTS (SELECT 1 FROM chat_members
+                            WHERE room_id = NULLIF($4, '')::uuid AND user_id = $2))
+RETURNING id, owner_id, title, state, version, error_reason, duration_ms, visibility,
+          visibility_room)sql";
+
+// Why kSetVisibility changed nothing: a video of the owner's (the room was refused) or none.
+constexpr Sql kOwnsVideo =
+    "SELECT 1 FROM videos WHERE id = $1 AND owner_id = $2 AND deleted_at IS NULL";
+
+// Each answers whether the video exists, and grants or revokes in the same statement.
+constexpr Sql kGrantAccess = R"sql(
+WITH video AS (SELECT id FROM videos WHERE id = $1 AND deleted_at IS NULL),
+granted AS (
+    INSERT INTO video_grants (video_id, user_id) SELECT id, $2 FROM video
+    ON CONFLICT (video_id, user_id) DO NOTHING)
+SELECT count(*) FROM video)sql";
+
+constexpr Sql kRevokeAccess = R"sql(
+WITH video AS (SELECT id FROM videos WHERE id = $1 AND deleted_at IS NULL),
+revoked AS (DELETE FROM video_grants WHERE video_id = $1 AND user_id = $2)
+SELECT count(*) FROM video)sql";
+
+// No row: no such video. One row with a NULL user: a video without grants after the cursor.
+// user_id is COLLATE "C", so the order and the cursor are bytewise.
+constexpr Sql kListGrants = R"sql(
+SELECT g.user_id, (extract(epoch FROM g.granted_at) * 1000000)::bigint
+  FROM videos v
+  LEFT JOIN LATERAL (SELECT user_id, granted_at FROM video_grants
+                      WHERE video_id = v.id AND user_id > $2
+                      ORDER BY user_id LIMIT $3) g ON true
+ WHERE v.id = $1 AND v.deleted_at IS NULL
+ ORDER BY g.user_id)sql";
 
 // The video's first transition rides on the progress write, in the same statement.
 constexpr Sql kRecordProgress = R"sql(
@@ -214,6 +267,14 @@ CatalogResult<core::VideoRecord> decode_video(const Result& row) {
     if (!id || !owner || !title || !state || !version) {
         return std::unexpected(CatalogError::Corrupt);
     }
+    const auto kind = row.get(0, 7);
+    if (!kind) {
+        return std::unexpected(CatalogError::Corrupt);
+    }
+    const auto visibility = core::Visibility::from_columns(*kind, row.get(0, 8));
+    if (!visibility) {
+        return std::unexpected(CatalogError::Corrupt);
+    }
     std::optional<core::Millis> duration;
     if (const auto text = row.get(0, 6)) {
         const auto ms = parse_int64(*text);
@@ -229,7 +290,8 @@ CatalogResult<core::VideoRecord> decode_video(const Result& row) {
                              .version = *version,
                              .error_reason = row.get(0, 5).transform(
                                  [](std::string_view reason) { return std::string{reason}; }),
-                             .duration = duration};
+                             .duration = duration,
+                             .visibility = *visibility};
     if (!core::Video::rehydrate(record)) {
         return std::unexpected(CatalogError::Corrupt);
     }
@@ -239,6 +301,141 @@ CatalogResult<core::VideoRecord> decode_video(const Result& row) {
 template <class T> CatalogResult<T> failure(DbError e) {
     return std::unexpected(to_catalog_error(e));
 }
+
+CatalogResult<core::ports::VideoView> decode_view(const Result& row) {
+    auto video = decode_video(row);
+    if (!video) {
+        return std::unexpected(video.error());
+    }
+    const auto member = row.get(0, 9).and_then(parse_bool);
+    const auto granted = row.get(0, 10).and_then(parse_bool);
+    if (!member || !granted) {
+        return std::unexpected(CatalogError::Corrupt);
+    }
+    return core::ports::VideoView{.video = std::move(*video),
+                                  .viewer = {.room_member = *member, .granted = *granted}};
+}
+
+// The count kGrantAccess and kRevokeAccess answer: 1 for a video that exists, 0 for none.
+CatalogResult<void> decode_video_count(const Outcome& outcome) {
+    if (!outcome) {
+        return failure<void>(outcome.error());
+    }
+    if (outcome->get(0, 0).and_then(parse_uint64) != std::uint64_t{1}) {
+        return std::unexpected(CatalogError::NotFound);
+    }
+    return {};
+}
+
+CatalogResult<core::ports::GrantPage> decode_grants(const Outcome& outcome, std::size_t limit) {
+    if (!outcome) {
+        return failure<core::ports::GrantPage>(outcome.error());
+    }
+    if (outcome->rows() == 0) {
+        return std::unexpected(CatalogError::NotFound);
+    }
+    core::ports::GrantPage page;
+    for (int i = 0; i < outcome->rows(); ++i) {
+        if (!outcome->get(i, 0)) {
+            // The one row of a video without grants after the cursor.
+            break;
+        }
+        if (page.grants.size() == limit) {
+            page.more = true;
+            break;
+        }
+        const auto user = domain_at<core::UserId>(*outcome, i, 0);
+        const auto at = outcome->get(i, 1).and_then(parse_int64).and_then(wall_time_from_micros);
+        if (!user || !at) {
+            return std::unexpected(CatalogError::Corrupt);
+        }
+        page.grants.push_back(core::ports::VideoGrant{.user = *user, .granted_at = *at});
+    }
+    return page;
+}
+
+// One statement over a video and a user id it owns, and a row limit when it has one: the
+// statement goes out on a later iteration, and again after a serialization failure, long after
+// the caller's UserId may be gone.
+class VideoUserQuery final : public Operation {
+public:
+    VideoUserQuery(Sql sql, const core::VideoId& video, std::string_view user,
+                   std::optional<std::int64_t> limit, Query::Done done) noexcept
+        : sql_(sql), video_(video), user_(user), limit_(limit), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        Params params;
+        params.add_uuid(video_.uuid()).add_text(user_);
+        if (limit_) {
+            params.add_int(*limit_);
+        }
+        return Statement{.sql = sql_, .params = params};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        done_(std::move(outcome));
+        return std::nullopt;
+    }
+
+    void abandon(DbError error) noexcept override { done_(std::unexpected(error)); }
+
+private:
+    Sql sql_;
+    core::VideoId video_;
+    std::string user_;
+    std::optional<std::int64_t> limit_;
+    Query::Done done_;
+};
+
+// The update, and when it changed nothing, a look at whether the video is the owner's: a
+// refused room and a video that is not theirs answer differently.
+class SetVisibility final : public Operation {
+public:
+    SetVisibility(const core::VideoId& video, const core::UserId& owner,
+                  const core::Visibility& visibility, CatalogCallback<core::VideoRecord> done)
+        : video_(video), owner_(owner.view()), kind_(visibility.kind_name()),
+          room_(visibility.room_id()
+                    .transform([](const core::RoomId& r) { return r.to_string(); })
+                    .value_or(std::string{})),
+          done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        checking_ = false;
+        return Statement{
+            .sql = kSetVisibility,
+            .params =
+                Params{}.add_uuid(video_.uuid()).add_text(owner_).add_text(kind_).add_text(room_)};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(failure<core::VideoRecord>(outcome.error()));
+            return std::nullopt;
+        }
+        if (!checking_) {
+            if (outcome->rows() == 1) {
+                done_(decode_video(*outcome));
+                return std::nullopt;
+            }
+            checking_ = true;
+            return Statement{.sql = kOwnsVideo,
+                             .params = Params{}.add_uuid(video_.uuid()).add_text(owner_)};
+        }
+        done_(std::unexpected(outcome->rows() == 1 ? CatalogError::Forbidden
+                                                   : CatalogError::NotFound));
+        return std::nullopt;
+    }
+
+    void abandon(DbError error) noexcept override { done_(failure<core::VideoRecord>(error)); }
+
+private:
+    core::VideoId video_;
+    std::string owner_;
+    std::string kind_;
+    std::string room_;
+    bool checking_ = false;
+    CatalogCallback<core::VideoRecord> done_;
+};
 
 class CreateUpload final : public Operation {
 public:
@@ -737,11 +934,55 @@ void PgUploadCatalog::abort_upload(const core::UploadId& id, CatalogCallback<voi
     impl_->main_pool().submit(std::make_unique<AbortUpload>(id, std::move(done)));
 }
 
-void PgUploadCatalog::find_video(const core::VideoId& id, CatalogCallback<core::VideoRecord> done) {
-    impl_->main_pool().submit(std::make_unique<Query>(
-        Statement{.sql = kFindVideo, .params = Params{}.add_uuid(id.uuid())},
+void PgUploadCatalog::find_video_for(const core::VideoId& id, const core::UserId& viewer,
+                                     CatalogCallback<core::ports::VideoView> done) {
+    impl_->main_pool().submit(std::make_unique<VideoUserQuery>(
+        kFindVideoFor, id, viewer.view(), std::nullopt,
         [done = std::move(done)](Outcome outcome) mutable noexcept {
-            done(outcome ? decode_video(*outcome) : failure<core::VideoRecord>(outcome.error()));
+            done(outcome ? decode_view(*outcome)
+                         : failure<core::ports::VideoView>(outcome.error()));
+        }));
+}
+
+void PgUploadCatalog::set_visibility(const core::VideoId& id, const core::UserId& owner,
+                                     const core::Visibility& visibility,
+                                     CatalogCallback<core::VideoRecord> done) {
+    impl_->main_pool().submit(
+        std::make_unique<SetVisibility>(id, owner, visibility, std::move(done)));
+}
+
+void PgUploadCatalog::grant_access(const core::VideoId& id, const core::UserId& user,
+                                   CatalogCallback<void> done) {
+    impl_->main_pool().submit(std::make_unique<VideoUserQuery>(
+        kGrantAccess, id, user.view(), std::nullopt,
+        [done = std::move(done)](Outcome outcome) mutable noexcept {
+            // The foreign key refused the row: the video was deleted between the statement's
+            // look and its insert, which is a video that does not exist.
+            if (!outcome && outcome.error() == DbError::Constraint) {
+                done(std::unexpected(CatalogError::NotFound));
+                return;
+            }
+            done(decode_video_count(outcome));
+        }));
+}
+
+void PgUploadCatalog::revoke_access(const core::VideoId& id, const core::UserId& user,
+                                    CatalogCallback<void> done) {
+    impl_->main_pool().submit(std::make_unique<VideoUserQuery>(
+        kRevokeAccess, id, user.view(), std::nullopt,
+        [done = std::move(done)](Outcome outcome) mutable noexcept {
+            done(decode_video_count(outcome));
+        }));
+}
+
+void PgUploadCatalog::list_grants(const core::VideoId& id, std::optional<core::UserId> after,
+                                  std::size_t limit, CatalogCallback<core::ports::GrantPage> done) {
+    // One more than asked, to tell whether more follow. '' sorts before every user id.
+    const std::string_view cursor = after ? after->view() : std::string_view{};
+    impl_->main_pool().submit(std::make_unique<VideoUserQuery>(
+        kListGrants, id, cursor, as_int(limit) + 1,
+        [done = std::move(done), limit](Outcome outcome) mutable noexcept {
+            done(decode_grants(outcome, limit));
         }));
 }
 

@@ -1,0 +1,6 @@
+# The FFI bridge's toolchain (ADR-0044), with the WebAssembly target. The release build runs in
+# the Docker image build.sh pins by digest, whose rustc is this same version.
+[toolchain]
+channel = "1.94.1"
+profile = "minimal"
+targets = ["wasm32-unknown-unknown"]

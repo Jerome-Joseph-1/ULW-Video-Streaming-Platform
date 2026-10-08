@@ -30,6 +30,12 @@
 
 namespace {
 
+using MediaAnswer = rt::StoreResult<std::optional<rt::MediaState>>;
+
+MediaAnswer at(std::uint64_t generation) {
+    return std::optional<rt::MediaState>{rt::MediaState{.generation = generation, .expelled = {}}};
+}
+
 using net::ReactorKind;
 using rt::RouteError;
 using ulw::test::pump_until;
@@ -516,6 +522,46 @@ TEST_P(RoomRouterTest, ANodeThatTakesOverARoomItNeverSawAnswersJoinsWithTheStore
     EXPECT_EQ(join(c, carol), 3U);
     EXPECT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-c"));
     EXPECT_EQ(send(c, carol, "carol", "four"), 4U);
+}
+
+TEST_P(RoomRouterTest, OnlyTheOwnerReadsOrMovesARoomsMediaGeneration) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    const auto media = [&](Node& node, rt::MediaStep step) {
+        std::optional<MediaAnswer> got;
+        node.router->media_generation(room_, rt::MediaChange{.step = step},
+                                      [&](auto r) noexcept { got = r; });
+        EXPECT_TRUE(pump([&] { return got.has_value(); }));
+        return got.value_or(std::unexpected(rt::StoreError::Unavailable));
+    };
+    EXPECT_EQ(a.router->owner_generation(room_), 1U);
+    EXPECT_EQ(b.router->owner_generation(room_), std::nullopt);
+    EXPECT_EQ(media(a, rt::MediaStep::Read), at(1));
+    EXPECT_EQ(media(a, rt::MediaStep::Advance), at(2));
+    // A node that does not own the room asks nothing of the store.
+    EXPECT_EQ(media(b, rt::MediaStep::Advance), MediaAnswer{std::optional<rt::MediaState>{}});
+    EXPECT_EQ(db_.rooms.at(room_).media_generation, 2U);
+
+    // chat-b takes the room while chat-a cannot hear of it, and chat-a moves the generation on
+    // before its next heartbeat: the step is fenced, and chat-a stops owning the room, as after a
+    // fenced append.
+    a.store->deaf = true;
+    db_.take(room_, *core::NodeId::parse("chat-b"));
+    a.store->hold = true;
+    std::optional<MediaAnswer> fenced;
+    a.router->media_generation(room_, rt::MediaChange{.step = rt::MediaStep::Advance},
+                               [&](auto r) noexcept { fenced = r; });
+    a.store->release_held();
+    ASSERT_TRUE(pump([&] { return fenced.has_value(); }));
+    EXPECT_EQ(*fenced, MediaAnswer{std::optional<rt::MediaState>{}});
+    ASSERT_FALSE(a.events.fenced.empty());
+    EXPECT_EQ(a.events.fenced.back().write, rt::OwnerWrite::MediaGeneration);
+    EXPECT_FALSE(a.router->owns(room_));
+    EXPECT_EQ(db_.rooms.at(room_).media_generation, 2U);
 }
 
 TEST_P(RoomRouterTest, AWriteUnderAGenerationThatMovedOnIsFencedAndDeliveredNowhere) {

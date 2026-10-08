@@ -1,4 +1,4 @@
-// The product side of a call, as a deployment runs it: two chat_server nodes of one cluster on a
+// The product side of a call, as a deployment runs it: chat_server nodes (two by default) of one cluster on a
 // scratch database of the local Postgres, configured with the LiveKit run.sh points the suite at,
 // and tokens minted with the build's ulw_devtoken under a key the nodes trust. What
 // direct-call.spec.mjs runs against; no ticket comes from anywhere but chat.
@@ -74,6 +74,13 @@ class Node {
     if (this.child.exitCode === null && this.child.signalCode === null) this.child.kill('SIGTERM');
     return this.exited;
   }
+
+  // As a node failure would end it: no drain, no release of its rooms.
+  async kill() {
+    this.killed = true;
+    this.child.kill('SIGKILL');
+    return this.exited;
+  }
 }
 
 // Polls `check` every 50 ms until it holds, or throws with `what` after `ms`.
@@ -88,7 +95,8 @@ async function until(check, ms, what) {
 
 // `origin` is the page's: the browsers authenticate with the cookie, which chat takes only from
 // a listed origin (docs/integration/chat.md).
-export async function startChat({ origin, nodes: count = 2 }) {
+// `env` adds to the nodes' environment.
+export async function startChat({ origin, nodes: count = 2, env: extra = {} }) {
   const livekit = Object.fromEntries(['LIVEKIT_API_URL', 'LIVEKIT_CLIENT_URL', 'LIVEKIT_API_KEY',
     'LIVEKIT_API_SECRET'].map((name) => {
     if (!process.env[name]) throw new Error(`${name} is not set; run through run.sh`);
@@ -103,7 +111,7 @@ export async function startChat({ origin, nodes: count = 2 }) {
     const codes = await Promise.all(nodes.map((n) => n.stop()));
     psql(postgres, `DROP DATABASE IF EXISTS ${database} WITH (FORCE)`);
     rmSync(work, { recursive: true, force: true });
-    if (codes.some((c) => c !== 0)) {
+    if (codes.some((c, i) => c !== 0 && !nodes[i].killed)) {
       throw new Error(`a chat node exited uncleanly (${codes}):\n` +
         nodes.map((n) => n.output).join('\n'));
     }
@@ -133,8 +141,11 @@ export async function startChat({ origin, nodes: count = 2 }) {
       ULW_DEV_MODE: '1',
       JWT_ISSUER: issuer,
       ULW_ALLOWED_ORIGINS: origin,
+      // The calls open their direct chats themselves (open_direct), as a demo does.
+      ULW_CHAT_SELF_SERVICE: 'on',
       ...livekit,
       ...rootAllowed,
+      ...extra,
     };
     for (let i = 0; i < count; ++i) {
       // Another process may take a port between its pick and the node's bind: then the node

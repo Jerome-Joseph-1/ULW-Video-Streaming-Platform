@@ -14,6 +14,7 @@
 #include "call_bell.hpp"
 #include "chat_service.hpp"
 #include "presence.hpp"
+#include "service_api.hpp"
 #include "token_bucket.hpp"
 
 #include <cstddef>
@@ -103,6 +104,8 @@ struct Limits {
     // Initialised, as trusted_proxies is, so that a designated initializer may leave it out.
     // NOLINTNEXTLINE(readability-redundant-member-init)
     CallLimits calls = {};
+    // NOLINTNEXTLINE(readability-redundant-member-init)
+    ServiceApiLimits service_api = {};
 };
 
 // Who may open a socket: the cookie that carries the token, and the pages allowed to use it.
@@ -176,7 +179,7 @@ private:
 };
 
 // The chat service's view of this node's RoomRouter.
-class RouterRooms final : public IRooms, public IRingPlane {
+class RouterRooms final : public IRooms, public ICallPlane {
 public:
     explicit RouterRooms(rt::RoomRouter& router) noexcept : router_(router) {}
 
@@ -201,9 +204,31 @@ public:
     [[nodiscard]] bool owns(const core::RoomId& room) const noexcept override {
         return router_.owns(room);
     }
+    [[nodiscard]] std::optional<std::uint64_t>
+    owner_generation(const core::RoomId& room) const noexcept override {
+        return router_.owner_generation(room);
+    }
+    void media_generation(const core::RoomId& room, const rt::MediaChange& change,
+                          rt::StoreCallback<std::optional<rt::MediaState>> done) override {
+        router_.media_generation(room, change, std::move(done));
+    }
 
 private:
     rt::RoomRouter& router_;
+};
+
+// Presence's view of the message store: who shares a direct or group chat with whom (ADR-0096).
+class StorePresenceAccess final : public IPresenceAccess {
+public:
+    explicit StorePresenceAccess(core::ports::IMessageStore& store) noexcept : store_(store) {}
+
+    void shared_with(const core::UserId& user, std::vector<core::UserId> others,
+                     core::ports::MessageCallback<std::vector<core::UserId>> done) override {
+        store_.shared_with(user, std::move(others), std::move(done));
+    }
+
+private:
+    core::ports::IMessageStore& store_;
 };
 
 // chat_server's client side: WebSocket upgrades on /rt, authenticated with the gateway's
@@ -252,6 +277,8 @@ public:
     [[nodiscard]] ChatService& chat() noexcept { return chat_; }
     [[nodiscard]] Presence& presence() noexcept { return presence_; }
     [[nodiscard]] CallBell& bell() noexcept { return bell_; }
+    // The operator's backend's API (ADR-0096), on its own listener when ULW_SERVICE_PORT is set.
+    [[nodiscard]] ServiceApi& service_api() noexcept { return service_api_; }
     [[nodiscard]] Session* session(net::Slab<Session>::Handle handle) noexcept;
     void retire(net::Slab<Session>::Handle handle) noexcept;
     // Where a session encodes a frame before the reactor copies it into its send queue: one
@@ -299,6 +326,7 @@ private:
     // Declared before the sessions, which use it until they are destroyed.
     std::vector<std::byte> frame_buffer_;
     RouterRooms rooms_;
+    StorePresenceAccess shared_;
     // Sessions detach from both as they close, so they outlive them.
     ChatService chat_;
     Presence presence_;
@@ -308,6 +336,7 @@ private:
     // Answers the router's asks for the rooms this node owns; the router is told to stop asking
     // before it goes.
     CallHandler calls_;
+    ServiceApi service_api_;
     http::BoundedTable<net::IpAddress, ClientEntry, http::AddressHash> clients_;
     http::BoundedTable<core::UserId, UserEntry, http::ViewHash> users_;
     http::BoundedTable<net::IpAddress, BlockEntry, http::AddressHash> blocks_;

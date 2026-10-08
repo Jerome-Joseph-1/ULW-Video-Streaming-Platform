@@ -15,6 +15,7 @@ enum class RouteId : std::uint8_t {
     CancelUpload,
     CommitUpload,
     GetVideo,
+    UpdateVideo,
     MasterPlaylist,
     MediaPlaylist,
     LivePlaylist,
@@ -23,12 +24,15 @@ enum class RouteId : std::uint8_t {
     StreamTicket,
     StartStream,
     EndStream,
+    ListGrants,
+    GrantAccess,
+    RevokeAccess,
     Healthz,
     Readyz,
     Metrics,
 };
 
-inline constexpr std::array<http::Route<RouteId>, 19> kRoutes{{
+inline constexpr std::array<http::Route<RouteId>, 23> kRoutes{{
     {.method = http::Method::Post, .pattern = "/api/v1/uploads", .id = RouteId::CreateUpload},
     {.method = http::Method::Patch, .pattern = "/api/v1/uploads/{id}", .id = RouteId::AppendChunk},
     {.method = http::Method::Head, .pattern = "/api/v1/uploads/{id}", .id = RouteId::UploadOffset},
@@ -39,6 +43,9 @@ inline constexpr std::array<http::Route<RouteId>, 19> kRoutes{{
      .pattern = "/api/v1/uploads/{id}/commit",
      .id = RouteId::CommitUpload},
     {.method = http::Method::Get, .pattern = "/api/v1/videos/{id}", .id = RouteId::GetVideo},
+    // Who may see a video (ADR-0097): its owner sets its visibility, the operator's backend
+    // grants it to users.
+    {.method = http::Method::Patch, .pattern = "/api/v1/videos/{id}", .id = RouteId::UpdateVideo},
     {.method = http::Method::Get,
      .pattern = "/api/v1/videos/{id}/master.m3u8",
      .id = RouteId::MasterPlaylist},
@@ -58,6 +65,15 @@ inline constexpr std::array<http::Route<RouteId>, 19> kRoutes{{
      .pattern = "/api/v1/live/{id}/start",
      .id = RouteId::StartStream},
     {.method = http::Method::Post, .pattern = "/api/v1/live/{id}/end", .id = RouteId::EndStream},
+    {.method = http::Method::Get,
+     .pattern = "/api/v1/service/videos/{id}/grants",
+     .id = RouteId::ListGrants},
+    {.method = http::Method::Post,
+     .pattern = "/api/v1/service/videos/{id}/grants/{user}",
+     .id = RouteId::GrantAccess},
+    {.method = http::Method::Delete,
+     .pattern = "/api/v1/service/videos/{id}/grants/{user}",
+     .id = RouteId::RevokeAccess},
     {.method = http::Method::Get, .pattern = "/api/v1/healthz", .id = RouteId::Healthz},
     {.method = http::Method::Get, .pattern = "/api/v1/readyz", .id = RouteId::Readyz},
     // The names a kubelet or a load balancer probes by default, outside the API prefix.
@@ -83,6 +99,8 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "commit_upload";
     case RouteId::GetVideo:
         return "get_video";
+    case RouteId::UpdateVideo:
+        return "update_video";
     case RouteId::MasterPlaylist:
         return "master_playlist";
     case RouteId::MediaPlaylist:
@@ -99,6 +117,12 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "start_stream";
     case RouteId::EndStream:
         return "end_stream";
+    case RouteId::ListGrants:
+        return "list_grants";
+    case RouteId::GrantAccess:
+        return "grant_access";
+    case RouteId::RevokeAccess:
+        return "revoke_access";
     case RouteId::Healthz:
         return "healthz";
     case RouteId::Readyz:
@@ -121,6 +145,7 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::CancelUpload:
     case RouteId::CommitUpload:
     case RouteId::GetVideo:
+    case RouteId::UpdateVideo:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
     case RouteId::LivePlaylist:
@@ -129,6 +154,9 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::StreamTicket:
     case RouteId::StartStream:
     case RouteId::EndStream:
+    case RouteId::ListGrants:
+    case RouteId::GrantAccess:
+    case RouteId::RevokeAccess:
         return true;
     }
     return true;

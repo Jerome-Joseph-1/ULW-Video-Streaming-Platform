@@ -1,0 +1,34 @@
+[package]
+name = "web_mls"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+publish = false
+description = "OpenMLS for the browser: the same library, version and ciphersuite as infra/e2ee/mls_ffi_bridge, as WebAssembly"
+
+[lib]
+# cdylib for wasm-bindgen; rlib so the native tests link the same code.
+crate-type = ["cdylib", "rlib"]
+
+# Exact versions, the same as the FFI bridge's (ADR-0044). Cargo.lock pins the rest of the
+# graph, and each crate's SHA-256 with it.
+[dependencies]
+openmls = { version = "=0.9.0", features = ["js"] }
+openmls_basic_credential = "=0.6.0"
+openmls_rust_crypto = "=0.6.0"
+openmls_traits = "=0.6.0"
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "=0.2.129"
+js-sys = "=0.3.106"
+# The two getrandom majors in the graph, each told to draw from crypto.getRandomValues:
+# 0.2 through rand_core 0.6 (RustCrypto's keys), 0.4 through OpenMLS itself.
+getrandom_02 = { package = "getrandom", version = "=0.2.17", features = ["js"] }
+getrandom_04 = { package = "getrandom", version = "=0.4.3", features = ["wasm_js"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"

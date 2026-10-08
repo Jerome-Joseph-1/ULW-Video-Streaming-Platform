@@ -1,9 +1,10 @@
 name: e2e
 
 # The sandbox cluster end to end: bring it up, run the VOD and chat checks, the STUNner checks
-# and the resource check under load, take it down. A manual run, the nightly one and a phase
-# tag's are the same job with the same steps. Everything happens inside this runner's kind
-# cluster; the workflow has no credentials and reaches no operator's infrastructure.
+# and the resource check under load, take it down. A manual run, the nightly one, a phase tag's
+# and a push to main's are the same job with the same steps. Everything happens inside this
+# runner's kind cluster; the workflow has no credentials and reaches no operator's
+# infrastructure.
 #
 # Beside it, two jobs run on a build tree, with no cluster, each starting its own services from
 # it and serving its own page, so neither can be pointed at the sandbox route. browser runs the
@@ -18,16 +19,28 @@ on:
         description: Also run the sandbox cluster job (false runs the build-tree jobs alone)
         type: boolean
         default: true
+      demo:
+        description: Run the laptop demo's smoke test (demo/); with sandbox unticked, only that
+        type: boolean
+        default: false
+      demo_build:
+        description: Build the demo's images from this ref rather than pull the published :main ones
+        type: boolean
+        default: false
   schedule:
     - cron: "43 3 * * *"
+  # Every push to main as well (docs/operations/ci-lanes.md): the commits a green batch
+  # squash-merges. The concurrency group below queues at most one run behind the current one.
   push:
+    branches: [main]
     tags: ["phase-*"]
 
 permissions:
   contents: read
 
 concurrency:
-  group: e2e
+  # A demo-only run (demo ticked, sandbox not) runs nothing else and has a lane of its own.
+  group: e2e${{ github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox && '-demo' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -151,6 +164,7 @@ jobs:
   # host; Chrome's offers go through codec/sdp and back byte for byte. run.sh starts its own
   # gateway_server and transcode_worker on a scratch database and bucket.
   browser:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     services:
@@ -211,6 +225,7 @@ jobs:
   # MinIO on the URLs the gateway signed; the media sequence only grows; the stream's end
   # reaches the player as EXT-X-ENDLIST and playback ends cleanly (tests/e2e/live.e2e.mjs).
   live-playback:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     services:
@@ -292,8 +307,11 @@ jobs:
   # broadcaster's page starts a stream through the gateway, publishes Chromium's fake camera
   # over WHIP with the ticket the gateway issued, goes live; the gateway starts the packager
   # and LiveKit's recorder relays to it; a second user watches in hls.js; the broadcaster ends
-  # it, and its recording becomes a video the worker makes ready.
+  # it, and its recording becomes a video the worker makes ready. A second run never calls start
+  # or end: LiveKit's webhooks to the gateway take the stream live and, once the page drops its
+  # connection, end it (docs/adr/0093).
   live-publish:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     services:
@@ -349,6 +367,7 @@ jobs:
   # this runner, its egress per call and CPU per call against the derivation (brief 8.1,
   # ADR-0012). Independent of the sandbox cluster; the SFU runs in a container of its own.
   call-capacity:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -365,9 +384,97 @@ jobs:
           sudo "$RUNNER_TEMP/callcap/bin/python" tests/load/call_capacity/call_capacity.py
           --calls 4 --seconds 60 --out call-capacity
         timeout-minutes: 10
+      # M29 (ADR-0095): group calls of four, against n x (n - 1) streams out per call.
+      - run: >-
+          sudo "$RUNNER_TEMP/callcap/bin/python" tests/load/call_capacity/call_capacity.py
+          --calls 2 --participants 4 --seconds 60 --out call-capacity/group-of-4
+        timeout-minutes: 10
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: call-capacity
           path: call-capacity
           if-no-files-found: warn
+
+  # The laptop demo (demo/README.md) as its owner starts it, then every tab driven in headless
+  # Chrome with fake media (demo/smoke). Manual runs only, with demo=true; demo_build=true tests
+  # the dispatched ref's own images instead of the published :main ones.
+  demo:
+    if: github.event_name == 'workflow_dispatch' && inputs.demo
+    runs-on: ubuntu-24.04
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
+      # The worker's and the packager's sandbox make user namespaces, which Ubuntu 24.04's
+      # AppArmor refuses to a process without host capabilities (as the sandbox job explains).
+      - run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - run: demo/smoke/run.sh
+        timeout-minutes: 60
+        env:
+          DEMO_BUILD: ${{ inputs.demo_build && '1' || '0' }}
+      # With demo_build, the images just tested go into one archive for a laptop to load
+      # (demo/load.sh), as the owner's fallback to pulling published images; publish-images.yml
+      # stays the only way to the registry. The run then loads it back into a clean Docker and
+      # tests again, as the owner would.
+      - name: Save the demo's images
+        id: images
+        if: inputs.demo_build
+        run: |
+          sha=$(git rev-parse --short=12 HEAD)
+          tag=local-$sha
+          archive=demo-images-$sha.tar.gz
+          images=()
+          for name in video-gateway video-worker chat live-packager; do
+            images+=("ghcr.io/jerome-joseph-1/ulw-$name:$tag")
+          done
+          docker save "${images[@]}" | gzip -1 > "$archive"
+          size=$(du -h "$archive" | cut -f1)
+          {
+            echo "archive=$archive"
+            echo "name=demo-images-$sha"
+            echo "tag=$tag"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Demo images"
+            echo
+            echo "\`$archive\`, $size: the four images tagged \`$tag\`, built from $sha."
+            echo
+            echo "\`gh run download $GITHUB_RUN_ID -n demo-images-$sha\`, then \`demo/load.sh $archive\` and \`ULW_TAG=$tag demo/up.sh\` in a checkout of $sha."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$archive: $size"
+      - name: Load the archive into a clean Docker and test again
+        if: inputs.demo_build
+        timeout-minutes: 30
+        env:
+          ARCHIVE: ${{ steps.images.outputs.archive }}
+          ULW_TAG: ${{ steps.images.outputs.tag }}
+        run: |
+          demo/down.sh --wipe
+          for name in video-gateway video-worker chat live-packager; do
+            docker rmi "ghcr.io/jerome-joseph-1/ulw-$name:$ULW_TAG"
+          done
+          docker rmi ulw-demo/gateway-live:local || true
+          demo/load.sh "$ARCHIVE"
+          demo/smoke/run.sh
+      - if: inputs.demo_build
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ steps.images.outputs.name }}
+          path: ${{ steps.images.outputs.archive }}
+          retention-days: 2
+          compression-level: 0
+          if-no-files-found: error
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: demo-smoke
+          path: |
+            demo/smoke/results
+            demo/smoke/report
+          if-no-files-found: ignore

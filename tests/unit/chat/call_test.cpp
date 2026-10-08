@@ -2,7 +2,9 @@
 #include "presence_room.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
+#include "support/no_membership_store.hpp"
 
+#include <algorithm>
 #include <gtest/gtest.h>
 #include <memory>
 #include <new>
@@ -27,7 +29,7 @@ core::RoomId room_id(std::string_view room = kRoom) {
 }
 
 // Only access matters to the handler; it answers what the test set, at once or when told to.
-class FakeStore final : public core::ports::IMessageStore {
+class FakeStore final : public ulw::test::NoMembershipStore {
 public:
     void history_before(
         const core::RoomId& /*room*/, std::optional<std::uint64_t> /*before*/,
@@ -108,8 +110,9 @@ public:
     int lists = 0;
 };
 
-// The room plane as the ring sees it: the notices, decoded.
-class FakePlane final : public chat::IRingPlane {
+// The room plane as the call handler sees it: the notices, decoded, and the room's ownership
+// and media generation, answered at once unless held.
+class FakePlane final : public chat::ICallPlane {
 public:
     void notify(const core::RoomId& room, std::span<const std::byte> notice) noexcept override {
         auto decoded = chat::decode_notice(notice);
@@ -118,7 +121,53 @@ public:
             sent.push_back(*decoded);
         }
     }
-    [[nodiscard]] bool owns(const core::RoomId& /*room*/) const noexcept override { return true; }
+    [[nodiscard]] bool owns(const core::RoomId& /*room*/) const noexcept override {
+        return owner.has_value();
+    }
+    [[nodiscard]] std::optional<std::uint64_t>
+    owner_generation(const core::RoomId& /*room*/) const noexcept override {
+        return owner;
+    }
+    void media_generation(const core::RoomId& /*room*/, const rt::MediaChange& change,
+                          rt::StoreCallback<std::optional<rt::MediaState>> done) override {
+        steps.push_back(change.step);
+        changes.push_back(change);
+        if (hold) {
+            held.emplace_back(change, std::move(done));
+            return;
+        }
+        answer(change, done);
+    }
+    // Answers the oldest held step as the store would now.
+    void release() {
+        auto [change, done] = std::move(held.front());
+        held.erase(held.begin());
+        answer(change, done);
+    }
+    void answer(const rt::MediaChange& change,
+                rt::StoreCallback<std::optional<rt::MediaState>>& done) {
+        if (store_down) {
+            done(std::unexpected(rt::StoreError::Unavailable));
+            return;
+        }
+        if (fenced) {
+            done(std::optional<rt::MediaState>{});
+            return;
+        }
+        if (change.step != rt::MediaStep::Read) {
+            if (change.step == rt::MediaStep::Advance) {
+                ++generation;
+            }
+            if (!change.carry) {
+                expelled.clear();
+            }
+            if (change.expel) {
+                expelled.push_back(*change.expel);
+            }
+        }
+        done(std::optional<rt::MediaState>{
+            rt::MediaState{.generation = generation, .expelled = expelled}});
+    }
 
     [[nodiscard]] std::vector<chat::RingEvent> events() const {
         std::vector<chat::RingEvent> out;
@@ -130,6 +179,19 @@ public:
     }
 
     std::vector<chat::CallNotice> sent;
+    // This node owns the room under this generation; nullopt: it does not.
+    std::optional<std::uint64_t> owner = 1;
+    // The room's media generation as stored.
+    std::uint64_t generation = 1;
+    bool hold = false;
+    bool store_down = false;
+    // The store finds another owner's generation.
+    bool fenced = false;
+    // Who the store holds put out of `generation`.
+    std::vector<core::UserId> expelled;
+    std::vector<rt::MediaStep> steps;
+    std::vector<rt::MediaChange> changes;
+    std::vector<std::pair<rt::MediaChange, rt::StoreCallback<std::optional<rt::MediaState>>>> held;
 };
 
 struct Joined {
@@ -153,7 +215,16 @@ public:
                                   .done = std::move(done)});
         }
         void participants(core::ports::ParticipantsDone done) override {
-            done(std::unexpected(MediaError::NotImplemented));
+            ++sfu_.listings;
+            if (sfu_.hold_listings) {
+                sfu_.held_listings.push_back(std::move(done));
+                return;
+            }
+            if (sfu_.listing_error) {
+                done(std::unexpected(*sfu_.listing_error));
+                return;
+            }
+            done(sfu_.connected);
         }
         void relay(const core::UserId& /*user*/, const core::DeviceId& /*device*/,
                    const core::ports::MediaRelay& /*target*/,
@@ -162,8 +233,19 @@ public:
         }
         void close(core::ports::MediaDone done) override {
             ++sfu_.closes;
+            sfu_.closed.push_back(generation);
+            if (sfu_.hold_closes) {
+                sfu_.held_closes.push_back(std::move(done));
+                return;
+            }
+            if (sfu_.close_error) {
+                done(std::unexpected(*sfu_.close_error));
+                return;
+            }
             done({});
         }
+
+        std::uint64_t generation = 0;
 
     private:
         FakeSfu& sfu_;
@@ -176,6 +258,13 @@ public:
         std::uint16_t max_participants;
         OpenDone done;
     };
+
+    // Calls never ask: only the stream service's webhook path does (ADR-0093).
+    void present(const core::RoomId& /*room*/, core::ports::MediaGeneration /*generation*/,
+                 const core::UserId& /*user*/, const core::DeviceId& /*device*/,
+                 core::ports::PresenceDone done) override {
+        done(std::unexpected(MediaError::NotImplemented));
+    }
 
     void open_room(const core::RoomId& room, core::ports::MediaGeneration generation,
                    core::ports::MediaRoomKind kind, std::uint16_t max_participants,
@@ -199,7 +288,9 @@ public:
             o.done(std::unexpected(result.error()));
             return;
         }
-        o.done(std::make_unique<Room>(*this));
+        auto room = std::make_unique<Room>(*this);
+        room->generation = std::to_underlying(o.generation);
+        o.done(std::move(room));
     }
 
     // Answers the oldest join with a ticket for its participant, or the error.
@@ -220,6 +311,28 @@ public:
     std::vector<Joined> joins;
     int answered_opens = 0;
     int closes = 0;
+    // The generations closed, in order.
+    std::vector<std::uint64_t> closed;
+    std::optional<MediaError> close_error;
+    // Closes answered by hand, oldest first.
+    bool hold_closes = false;
+    std::vector<core::ports::MediaDone> held_closes;
+    void release_close(std::optional<MediaError> error = std::nullopt) {
+        core::ports::MediaDone done = std::move(held_closes.front());
+        held_closes.erase(held_closes.begin());
+        if (error) {
+            done(std::unexpected(*error));
+            return;
+        }
+        done({});
+    }
+    // Who participants() reports connected, or its error.
+    std::vector<core::ports::MediaParticipant> connected;
+    std::optional<MediaError> listing_error;
+    int listings = 0;
+    // participants() answers wait in held_listings while set.
+    bool hold_listings = false;
+    std::vector<core::ports::ParticipantsDone> held_listings;
     // open_room fails to take the open at all, as an allocation inside it would.
     bool throwing = false;
 };
@@ -234,9 +347,13 @@ protected:
 
     // Declines, cancels or ends `call` as `user`; the answer lands in answers_ as ask's do.
     void move(std::string_view user, chat::CallSignal signal, const chat::CallId& call,
-              std::string_view room = kRoom) {
+              std::string_view room = kRoom,
+              std::optional<std::string_view> target = std::nullopt) {
         const auto request = chat::encode_request(chat::CallSignalRequest{
-            .user = *core::UserId::parse(user), .signal = signal, .call = call});
+            .user = *core::UserId::parse(user),
+            .signal = signal,
+            .call = call,
+            .target = target ? std::optional(*core::UserId::parse(*target)) : std::nullopt});
         handler_->on_ask(room_id(room), request,
                          [this](std::expected<std::vector<std::byte>, rt::RouteError> r) noexcept {
                              if (!r) {
@@ -249,9 +366,11 @@ protected:
 
     // Asks as `user` from `device`; the answer lands in answers_, in the order they come.
     void ask(std::string_view user = "alice", std::string_view device = kDevice,
-             std::string_view room = kRoom) {
-        const auto request = chat::encode_request(chat::CallRequest{
-            .user = *core::UserId::parse(user), .device = *core::DeviceId::parse(device)});
+             std::string_view room = kRoom, std::optional<chat::CallId> answering = std::nullopt) {
+        const auto request =
+            chat::encode_request(chat::CallRequest{.user = *core::UserId::parse(user),
+                                                   .device = *core::DeviceId::parse(device),
+                                                   .answering = answering});
         handler_->on_ask(room_id(room), request,
                          [this](std::expected<std::vector<std::byte>, rt::RouteError> r) noexcept {
                              if (!r) {
@@ -312,14 +431,13 @@ TEST_F(CallHandlerTest, SomeoneNotOnTheMemberListIsRefusedAndTheSfuNeverHearsOfI
     EXPECT_EQ(handler_->counters().not_member, 1U);
 }
 
-TEST_F(CallHandlerTest, OnlyADirectChatHasACall) {
+TEST_F(CallHandlerTest, OnlyADirectOrAGroupChatHasACall) {
     for (const std::optional<RoomKind> kind :
-         {std::optional<RoomKind>{RoomKind::GroupChat},
-          std::optional<RoomKind>{RoomKind::StreamLiveChat}, std::optional<RoomKind>{}}) {
+         {std::optional<RoomKind>{RoomKind::StreamLiveChat}, std::optional<RoomKind>{}}) {
         store_.kind = kind;
         ask("alice");
     }
-    EXPECT_EQ(outcomes(), std::vector(3, CallOutcome::NotCallable));
+    EXPECT_EQ(outcomes(), std::vector(2, CallOutcome::NotCallable));
     EXPECT_TRUE(sfu_.opens.empty());
 }
 
@@ -534,7 +652,7 @@ TEST_F(CallHandlerTest, OnlyAMemberOfADirectChatMovesItsCall) {
     std::erase(store_.members_, "bob");
     move("bob", chat::CallSignal::Decline, call);
     store_.members_.emplace_back("bob");
-    store_.kind = RoomKind::GroupChat;
+    store_.kind = RoomKind::StreamLiveChat;
     move("bob", chat::CallSignal::Decline, call);
     store_.kind = RoomKind::DirectChat;
     store_.down = true;
@@ -598,6 +716,76 @@ TEST_F(CallHandlerTest, ATicketForAnAnswerThatCameAfterTheRingEndedRingsNobody) 
     EXPECT_EQ(answers_[2].outcome, CallOutcome::Ticket);
     EXPECT_FALSE(answers_[2].call);
     EXPECT_TRUE(plane_.sent.empty());
+}
+
+TEST_F(CallHandlerTest, AnAnswerToARingTheCallerCancelledIsRefusedAndRingsNobodyBack) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.at(0).call;
+    move("alice", chat::CallSignal::Cancel, call);
+    plane_.sent.clear();
+    const std::size_t joins = sfu_.joins.size();
+    const int lists = store_.lists;
+    // Bob's device never heard the cancel (its socket was reconnecting) and he picks up: that
+    // call is over, and his answer must not ring alice as a new call from him.
+    ask("bob", kOtherDevice, kRoom, call);
+    EXPECT_EQ(outcomes(),
+              (std::vector{CallOutcome::Ticket, CallOutcome::Done, CallOutcome::NoCall}));
+    EXPECT_TRUE(plane_.sent.empty()) << "a late answer rang the caller";
+    EXPECT_EQ(sfu_.joins.size(), joins) << "a late answer was given a ticket";
+    EXPECT_EQ(store_.lists, lists);
+    EXPECT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(handler_->ring_counters().started, 1U);
+    EXPECT_EQ(handler_->counters().no_call, 1U);
+    // Without the call it answers, the same ask starts a call, as it always did.
+    ask("bob", kOtherDevice);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(handler_->ring_counters().started, 2U);
+}
+
+TEST_F(CallHandlerTest, AnAnswerToACancelledRingAnswersTheCallersNewRing) {
+    // Cancel, ring again, answer: the callee's device may still name the first ring; the
+    // caller's new one is what it picks up.
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId first = *answers_.at(0).call;
+    move("alice", chat::CallSignal::Cancel, first);
+    ask("alice");
+    sfu_.issue();
+    const chat::CallId second = *answers_.back().call;
+    ASSERT_NE(first, second);
+    plane_.sent.clear();
+    ask("bob", kOtherDevice, kRoom, first);
+    sfu_.issue();
+    ASSERT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(answers_.back().call, second);
+    EXPECT_EQ(plane_.events(), std::vector(2, chat::RingEvent::Answered));
+    EXPECT_EQ(handler_->ring_counters().answered, 1U);
+    // And the answer naming the ring it answers works as plainly.
+    ask("bob", kOtherDevice, kRoom, second);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().call, second);
+}
+
+TEST_F(CallHandlerTest, AnAnswerThatCrossedTheAnswerersOwnRingIsRefused) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId alices = *answers_.at(0).call;
+    move("alice", chat::CallSignal::Cancel, alices);
+    // Bob calls back meanwhile; his device then answers alice's old ring.
+    ask("bob", kOtherDevice);
+    sfu_.issue();
+    const chat::CallId bobs = *answers_.back().call;
+    ask("bob", kOtherDevice, kRoom, alices);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::NoCall);
+    // His own call rings on, untouched.
+    EXPECT_EQ(handler_->calls(), 1U);
+    move("bob", chat::CallSignal::Cancel, bobs);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
 }
 
 TEST_F(CallHandlerTest, SignalsWithoutAnSfuAreDisabledAsTicketsAre) {
@@ -689,6 +877,713 @@ TEST_F(RingBoundedCallHandlerTest, ATicketThatWouldStartACallPastTheCapIsBusyBef
     EXPECT_EQ(handler_->calls(), 1U);
 }
 
+// A group chat's call (ADR-0095): alice, bob, carol and dave.
+class GroupCallHandlerTest : public CallHandlerTest {
+protected:
+    GroupCallHandlerTest() : CallHandlerTest(chat::CallLimits{.group_participants = 3}) {
+        store_.kind = RoomKind::GroupChat;
+        store_.members_ = {"alice", "bob", "carol", "dave"};
+    }
+
+    // `user` asks and is issued a ticket, the room opened first if it must be; the call's id.
+    chat::CallId ticket(std::string_view user, std::string_view device = kDevice) {
+        ask(user, device);
+        if (!sfu_.opens.empty()) {
+            sfu_.open();
+        }
+        EXPECT_EQ(sfu_.joins.size(), 1U);
+        if (!sfu_.joins.empty()) {
+            sfu_.issue();
+        }
+        EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+        return answers_.back().call.value_or(chat::CallId::generate(clock_, random_));
+    }
+
+    static core::ports::MediaParticipant in_call(std::string_view user, std::string_view device) {
+        return {.user = *core::UserId::parse(user),
+                .device = *core::DeviceId::parse(device),
+                .joined_at = {}};
+    }
+
+    [[nodiscard]] std::size_t heard(chat::RingEvent event) const {
+        return static_cast<std::size_t>(std::ranges::count_if(
+            plane_.sent, [&](const chat::CallNotice& n) { return n.event == event; }));
+    }
+};
+
+TEST_F(GroupCallHandlerTest, AGroupCallsRoomTakesItsCapAndRingsEveryOtherMember) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(sfu_.answered_opens, 1);
+    // The first read of the room's generation, under this node's ownership of it.
+    EXPECT_EQ(plane_.steps, std::vector{rt::MediaStep::Read});
+    EXPECT_EQ(store_.lists, 1);
+    EXPECT_EQ(heard(chat::RingEvent::Ringing), 4U);
+    EXPECT_EQ(ticket("bob"), call);
+    EXPECT_EQ(heard(chat::RingEvent::Answered), 4U);
+    // Counted before each ticket.
+    EXPECT_EQ(sfu_.listings, 2);
+}
+
+TEST_F(GroupCallHandlerTest, TheCapIsTheGroupsAndADeviceAlreadyInCountsOnce) {
+    ask("alice");
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].max_participants, 3U);
+    sfu_.open();
+    sfu_.issue();
+    sfu_.connected = {in_call("alice", kDevice), in_call("bob", kDevice),
+                      in_call("carol", kDevice)};
+    // Full for a new device: refused before the SFU issues anything.
+    ask("dave");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Full);
+    EXPECT_TRUE(sfu_.joins.empty());
+    EXPECT_EQ(handler_->counters().full, 1U);
+    // A device already in it is let back in (a reconnect after its ticket ran out).
+    ask("carol");
+    ASSERT_EQ(sfu_.joins.size(), 1U);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    // An SFU that cannot count leaves it to its own cap at the connect.
+    sfu_.listing_error = MediaError::Unavailable;
+    ask("dave");
+    ASSERT_EQ(sfu_.joins.size(), 1U);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+}
+
+TEST_F(GroupCallHandlerTest, TheCapIsHeldToItsBounds) {
+    handler_ = make(chat::CallLimits{.group_participants = 200});
+    ask("alice");
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].max_participants, chat::kMaxGroupParticipants);
+}
+
+TEST_F(GroupCallHandlerTest, ExpellingMovesTheGenerationThenClosesTheOldOne) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    plane_.hold = true;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    // The fenced write first: nothing is closed, nothing said, until it is done.
+    ASSERT_EQ(plane_.held.size(), 1U);
+    EXPECT_EQ(plane_.held[0].first.step, rt::MediaStep::Advance);
+    // The move carries who is out with it, bob added.
+    EXPECT_TRUE(plane_.held[0].first.carry);
+    EXPECT_EQ(plane_.held[0].first.expel, core::UserId::parse("bob").value());
+    EXPECT_EQ(sfu_.closes, 0);
+    EXPECT_TRUE(plane_.sent.empty());
+    plane_.release();
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 4U);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(answers_.back().caller, core::UserId::parse("alice").value());
+    EXPECT_EQ(handler_->counters().moves_expel, 1U);
+    EXPECT_EQ(handler_->counters().retired_closed, 1U);
+    EXPECT_EQ(handler_->retired(), 0U);
+    plane_.hold = false;
+    // Bob may not come back; carol's ticket is for the new generation.
+    ask("bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Expelled);
+    EXPECT_EQ(handler_->counters().expelled, 1U);
+    ask("carol");
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].generation, core::ports::MediaGeneration{2});
+    sfu_.open();
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(answers_.back().call, call);
+}
+
+TEST_F(GroupCallHandlerTest, PuttingOutSomeoneWithNoTicketMovesNothing) {
+    const chat::CallId call = ticket("alice");
+    plane_.sent.clear();
+    move("alice", chat::CallSignal::Expel, call, kRoom, "carol");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    // Kept with the generation as it stands: nothing moves, nothing closes.
+    EXPECT_EQ(plane_.steps, (std::vector{rt::MediaStep::Read, rt::MediaStep::Expel}));
+    EXPECT_EQ(plane_.expelled, std::vector{core::UserId::parse("carol").value()});
+    EXPECT_EQ(sfu_.closes, 0);
+    // Only carol is told: nobody else has anything to do.
+    ASSERT_EQ(heard(chat::RingEvent::Moved), 1U);
+    EXPECT_EQ(plane_.sent.back().to, core::UserId::parse("carol").value());
+    EXPECT_EQ(handler_->counters().expulsions_kept, 1U);
+    ask("carol");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Expelled);
+}
+
+TEST_F(GroupCallHandlerTest, PuttingOutSomeoneStillConnectedFromBeforeMovesAllTheSame) {
+    // Carol has no ticket in this call, but a connection the SFU still holds: from a call this
+    // node never knew, one an earlier owner ticketed.
+    const chat::CallId call = ticket("alice");
+    sfu_.connected = {in_call("carol", kOtherDevice)};
+    move("alice", chat::CallSignal::Expel, call, kRoom, "carol");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    // An SFU that cannot say is taken to hold them.
+    sfu_.listing_error = MediaError::Unavailable;
+    ask("bob");
+    sfu_.open();
+    sfu_.issue();
+    move("alice", chat::CallSignal::Expel, call, kRoom, "dave");
+    EXPECT_EQ(sfu_.closed, (std::vector<std::uint64_t>{1, 2}));
+}
+
+TEST_F(GroupCallHandlerTest, AMemberRemovedFromARoomWithNoCallKnownHereIsPutOutIfConnected) {
+    const chat::CallId call = ticket("alice");
+    move("alice", chat::CallSignal::Leave, call);
+    // Nobody left, as the SFU says.
+    handler_->sweep();
+    ASSERT_EQ(handler_->calls(), 0U);
+    // Alice's ticket is old: a device of hers would be listed by now.
+    clock_.advance(core::Millis{60'000});
+    plane_.sent.clear();
+    handler_->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    EXPECT_EQ(sfu_.closes, 0);
+    sfu_.connected = {in_call("bob", kDevice)};
+    handler_->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    // No call to tell anyone of.
+    EXPECT_TRUE(plane_.sent.empty());
+}
+
+TEST_F(GroupCallHandlerTest, OnlyTheCallerExpelsOrEnds) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    move("bob", chat::CallSignal::Expel, call, kRoom, "alice");
+    move("bob", chat::CallSignal::End, call);
+    move("alice", chat::CallSignal::Expel, call, kRoom, "alice");
+    EXPECT_EQ(outcomes(),
+              (std::vector{CallOutcome::Ticket, CallOutcome::Ticket, CallOutcome::NoCall,
+                           CallOutcome::NoCall, CallOutcome::NoCall}));
+    EXPECT_EQ(sfu_.closes, 0);
+}
+
+TEST_F(GroupCallHandlerTest, TheCallerEndingClosesTheGenerationWithNoSuccessor) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    move("alice", chat::CallSignal::End, call);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
+    EXPECT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(handler_->counters().moves_end, 1U);
+    // The next call starts in the next generation, and rings again.
+    ask("bob");
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].generation, core::ports::MediaGeneration{2});
+}
+
+TEST_F(GroupCallHandlerTest, LeavingIsAnyonesAndTheCallGoesOnWhileAnyoneIsIn) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    move("alice", chat::CallSignal::Leave, call);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(handler_->calls(), 1U);
+    sfu_.connected = {in_call("bob", kDevice)};
+    move("bob", chat::CallSignal::Leave, call);
+    // The last one known out: the SFU is asked, and still holds bob's device.
+    handler_->sweep();
+    EXPECT_EQ(handler_->calls(), 1U);
+    sfu_.connected.clear();
+    clock_.advance(chat::RingLimits{}.occupancy_check);
+    handler_->sweep();
+    EXPECT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
+    // Leaving closes nothing: the SFU empties the room by itself.
+    EXPECT_EQ(sfu_.closes, 0);
+}
+
+TEST_F(GroupCallHandlerTest, ADeposedOwnersMoveTouchesNoSfuAndSaysNothing) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    plane_.fenced = true;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Unavailable);
+    EXPECT_EQ(sfu_.closes, 0);
+    EXPECT_TRUE(plane_.sent.empty());
+    EXPECT_EQ(handler_->counters().moves_fenced, 1U);
+    EXPECT_EQ(handler_->rooms(), 0U) << "the room's handle went with its ownership";
+}
+
+TEST_F(GroupCallHandlerTest, AMoveTheStoreCouldNotTakeIsAnsweredRetryableAndNothingCloses) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    plane_.store_down = true;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Unavailable);
+    EXPECT_EQ(sfu_.closes, 0);
+    EXPECT_EQ(handler_->counters().moves_unavailable, 1U);
+    // Bob was put out already: the caller's retry moves the generation.
+    plane_.store_down = false;
+    clock_.advance(core::Millis{1'000});
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+}
+
+TEST_F(GroupCallHandlerTest, AGenerationTheStoreCouldNotReadIsAnsweredRetryableAndReadAgain) {
+    plane_.store_down = true;
+    ask("alice");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Unavailable);
+    EXPECT_TRUE(sfu_.opens.empty()) << "nothing opened on a generation nobody read";
+    EXPECT_EQ(plane_.steps, std::vector<rt::MediaStep>{rt::MediaStep::Read});
+    // Asked again within the second, the read waits for the sweep's retry.
+    plane_.store_down = false;
+    ask("alice");
+    EXPECT_EQ(plane_.steps.size(), 1U);
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    EXPECT_EQ(plane_.steps, (std::vector<rt::MediaStep>{rt::MediaStep::Read, rt::MediaStep::Read}));
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+}
+
+TEST_F(GroupCallHandlerTest, ADeviceCountedWhileTheGenerationMovedIsAnsweredRetryable) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    sfu_.hold_listings = true;
+    ask("carol");
+    ASSERT_EQ(sfu_.held_listings.size(), 1U);
+    // Alice puts bob out while carol's device is being counted: carol's count is of a
+    // generation that is going.
+    sfu_.hold_listings = false;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    ASSERT_EQ(answers_.back().outcome, CallOutcome::Done);
+    auto counted = std::move(sfu_.held_listings.front());
+    sfu_.held_listings.clear();
+    counted(std::vector<core::ports::MediaParticipant>{});
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Unavailable);
+    // Asked again, carol is ticketed for the new generation.
+    ask("carol");
+    ASSERT_FALSE(sfu_.opens.empty());
+    EXPECT_EQ(sfu_.opens.back().generation, core::ports::MediaGeneration{2});
+    sfu_.open();
+    ASSERT_FALSE(sfu_.joins.empty());
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+}
+
+TEST_F(GroupCallHandlerTest, AMemberRemovedFromTheChatIsPutOutUntilTheStoreTakesTheMove) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    plane_.store_down = true;
+    handler_->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    EXPECT_EQ(sfu_.closes, 0);
+    // A removal has nobody to answer: it is tried again, a second later, on the sweep.
+    plane_.store_down = false;
+    handler_->sweep();
+    EXPECT_EQ(sfu_.closes, 0);
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 4U);
+    for (const chat::CallNotice& n : plane_.sent) {
+        EXPECT_FALSE(n.by);
+        EXPECT_EQ(n.subject, core::UserId::parse("bob").value());
+    }
+    EXPECT_EQ(handler_->counters().moves_removal, 1U);
+}
+
+TEST_F(GroupCallHandlerTest, ARemovalElsewhereOrOfSomeoneNotInTheCallMovesNothing) {
+    ticket("alice");
+    handler_->on_member_removed(room_id(kOtherRoom), *core::UserId::parse("bob"));
+    handler_->on_member_removed(room_id(), *core::UserId::parse("carol"));
+    plane_.owner.reset();
+    handler_->on_member_removed(room_id(), *core::UserId::parse("alice"));
+    EXPECT_EQ(plane_.steps, std::vector{rt::MediaStep::Read});
+    EXPECT_EQ(sfu_.closes, 0);
+}
+
+TEST_F(GroupCallHandlerTest, AResyncChecksEveryoneInACallAgain) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    std::erase(store_.members_, "bob");
+    const int reads = store_.reads;
+    handler_->on_members_resync();
+    EXPECT_EQ(store_.reads, reads + 2);
+    EXPECT_EQ(handler_->counters().resync_checks, 2U);
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    EXPECT_EQ(handler_->counters().moves_removal, 1U);
+}
+
+TEST_F(GroupCallHandlerTest, AnOldGenerationClosesOnlyOnceItsJoinsAreAnswered) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    ask("carol");
+    ASSERT_EQ(sfu_.joins.size(), 1U);
+    plane_.sent.clear();
+    const std::size_t answered = answers_.size() + 1;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    // Alice is answered at the write; nobody hears of the move while the old room stands.
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(sfu_.closes, 0) << "closed under a join still being issued";
+    EXPECT_EQ(handler_->retired(), 1U);
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 0U);
+    // The ticket names the old generation: it is not handed out, and carol asks again.
+    sfu_.issue();
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    EXPECT_EQ(handler_->retired(), 0U);
+    // Carol's answer, and alice's once the old room is closed.
+    std::vector<CallOutcome> since;
+    for (std::size_t i = answered; i < answers_.size(); ++i) {
+        since.push_back(answers_[i].outcome);
+    }
+    EXPECT_EQ(since, std::vector{CallOutcome::Unavailable});
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 4U);
+}
+
+TEST_F(GroupCallHandlerTest, AMoveIsToldOnlyOnceTheSfuSaysTheOldRoomIsGone) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    sfu_.hold_closes = true;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    ASSERT_EQ(sfu_.held_closes.size(), 1U);
+    // Alice is answered at the write, within her deadline; until the close, bob's old
+    // credential might still find the room, and nobody is told to move on.
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_TRUE(plane_.sent.empty());
+    // The others may still ask meanwhile; their tickets are for the new generation.
+    ask("carol");
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].generation, core::ports::MediaGeneration{2});
+    sfu_.release_close();
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 4U);
+}
+
+TEST_F(GroupCallHandlerTest, ARoomTheSfuStillListsIsNotToldOfAndIsClosedAgainLater) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    sfu_.hold_closes = true;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    sfu_.release_close(MediaError::Remains);
+    // Still there: bob's credential may yet find it, so nobody is told to move.
+    EXPECT_TRUE(plane_.sent.empty());
+    EXPECT_EQ(handler_->retired(), 1U);
+    // Tried again after a second, then after two: backing off.
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    ASSERT_EQ(sfu_.held_closes.size(), 1U);
+    sfu_.release_close(MediaError::Remains);
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    EXPECT_TRUE(sfu_.held_closes.empty()) << "tried again before its backoff";
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    ASSERT_EQ(sfu_.held_closes.size(), 1U);
+    sfu_.release_close();
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 4U);
+    EXPECT_EQ(handler_->retired(), 0U);
+}
+
+TEST_F(GroupCallHandlerTest, ACloseThatNeverAnswersIsTriedAgainAfterItsDeadline) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    sfu_.hold_closes = true;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    ASSERT_EQ(sfu_.held_closes.size(), 1U);
+    // Its answer lost: given up on at the attempt's deadline, and asked again after the backoff.
+    auto lost = std::move(sfu_.held_closes.front());
+    sfu_.held_closes.clear();
+    clock_.advance(chat::CallLimits{}.close_attempt);
+    handler_->sweep();
+    EXPECT_TRUE(sfu_.held_closes.empty()) << "tried again before its backoff";
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    ASSERT_EQ(sfu_.held_closes.size(), 1U);
+    // The lost answer turning up late changes nothing.
+    lost(std::expected<void, MediaError>{});
+    EXPECT_EQ(handler_->retired(), 1U);
+    sfu_.release_close();
+    EXPECT_EQ(handler_->retired(), 0U);
+}
+
+TEST_F(GroupCallHandlerTest, ADeposedOwnerTellsNothingOfAMoveItMadeBefore) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    sfu_.hold_closes = true;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    plane_.owner = 7;
+    sfu_.release_close();
+    EXPECT_TRUE(plane_.sent.empty());
+    EXPECT_EQ(handler_->counters().announcements_dropped, 1U);
+}
+
+TEST_F(GroupCallHandlerTest, AnExpulsionAfterAFailedWriteIsKeptAndTriedAgain) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.store_down = true;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Unavailable);
+    plane_.store_down = false;
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    // Read again first (the move's outcome was unknown), then moved; the old room still closes.
+    EXPECT_EQ(plane_.steps, (std::vector{rt::MediaStep::Read, rt::MediaStep::Advance,
+                                         rt::MediaStep::Read, rt::MediaStep::Advance}));
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+}
+
+TEST_F(GroupCallHandlerTest, OnlyAMemberOfTheChatIsPutOut) {
+    const chat::CallId call = ticket("alice");
+    move("alice", chat::CallSignal::Expel, call, kRoom, "mallory");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::NoCall);
+    store_.down = true;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Unavailable);
+}
+
+TEST_F(GroupCallHandlerTest, AMemberRemovedTwiceWhileTheMoveIsWrittenIsPutOutOnce) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    // The store tells bob's removal twice (a notification, then a resync) before the first
+    // move is written.
+    plane_.hold = true;
+    handler_->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    handler_->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    plane_.hold = false;
+    ASSERT_EQ(plane_.held.size(), 1U);
+    plane_.release();
+    EXPECT_TRUE(plane_.held.empty());
+    EXPECT_EQ(std::ranges::count(plane_.steps, rt::MediaStep::Advance), 1);
+    EXPECT_EQ(handler_->counters().moves_removal, 1U);
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+}
+
+TEST_F(GroupCallHandlerTest, ARoomTheSfuNeverLetsGoIsToldOfWhenTheRetriesGiveUp) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    sfu_.close_error = MediaError::Remains;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_TRUE(plane_.sent.empty());
+    // Alice is still in the call, in the new generation, all the while.
+    sfu_.connected = {in_call("alice", kDevice)};
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    plane_.sent.clear();
+    clock_.advance(chat::CallLimits{}.close_retry_for);
+    handler_->sweep();
+    EXPECT_EQ(handler_->retired(), 0U);
+    EXPECT_EQ(handler_->counters().retired_abandoned, 1U);
+    // Held until then, and told once.
+    EXPECT_EQ(heard(chat::RingEvent::Moved), 4U);
+}
+
+TEST_F(GroupCallHandlerTest, WhoWasPutOutMayComeToTheNextCallOnceThisOneEnds) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    ASSERT_EQ(plane_.expelled, std::vector{*core::UserId::parse("bob")});
+    // Alice leaves: generation 2 is this owner's, and nobody was ticketed into it, so nobody is
+    // in it and the call ends without a move of its own.
+    move("alice", chat::CallSignal::Leave, call);
+    handler_->sweep();
+    ASSERT_EQ(handler_->calls(), 0U);
+    // Who was put out of it is cleared, and the generation stays.
+    EXPECT_EQ(plane_.changes.back().step, rt::MediaStep::Expel);
+    EXPECT_FALSE(plane_.changes.back().carry);
+    EXPECT_TRUE(plane_.expelled.empty());
+    EXPECT_EQ(plane_.generation, 2U);
+    EXPECT_EQ(handler_->counters().expulsions_cleared, 1U);
+    // Bob starts the next call.
+    const chat::CallId next = ticket("bob");
+    EXPECT_NE(next, call);
+}
+
+TEST_F(GroupCallHandlerTest, ACallEndingWithNobodyPutOutWritesNothing) {
+    const chat::CallId call = ticket("alice");
+    const auto writes = plane_.steps.size();
+    move("alice", chat::CallSignal::Leave, call);
+    handler_->sweep();
+    ASSERT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(plane_.steps.size(), writes);
+    EXPECT_EQ(handler_->counters().expulsions_cleared, 0U);
+}
+
+TEST_F(GroupCallHandlerTest, AFullListOfWhoIsPutOutRefusesOneMore) {
+    plane_.expelled.clear();
+    for (std::size_t i = 0; i < rt::kMaxMediaExpelled; ++i) {
+        plane_.expelled.push_back(*core::UserId::parse("gone" + std::to_string(i)));
+    }
+    const chat::CallId call = ticket("alice");
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Busy);
+    EXPECT_EQ(plane_.expelled.size(), rt::kMaxMediaExpelled);
+}
+
+TEST_F(GroupCallHandlerTest, WhoWasPutOutIsRefusedByAnOwnerThatTookTheRoomSince) {
+    // The store holds carol out of the generation; this node knows no call in the room.
+    plane_.expelled = {*core::UserId::parse("carol")};
+    ask("carol");
+    sfu_.open();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Expelled);
+    EXPECT_TRUE(sfu_.joins.empty());
+    ticket("bob");
+}
+
+TEST_F(GroupCallHandlerTest, AMoveIsToldWhenTheSfuCannotSayAndTheCloseIsTriedAgain) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    sfu_.hold_closes = true;
+    move("alice", chat::CallSignal::End, call);
+    sfu_.release_close(MediaError::Unavailable);
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(handler_->retired(), 1U);
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    ASSERT_EQ(sfu_.held_closes.size(), 1U);
+    sfu_.release_close();
+    EXPECT_EQ(handler_->retired(), 0U);
+    // Told once.
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
+}
+
+TEST_F(GroupCallHandlerTest, AnOldGenerationTheSfuCouldNotCloseIsTriedAgainThenGivenUp) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    sfu_.close_error = MediaError::Unavailable;
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(sfu_.closes, 1);
+    EXPECT_EQ(handler_->retired(), 1U);
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    EXPECT_EQ(sfu_.closes, 2);
+    clock_.advance(chat::CallLimits{}.close_retry_for);
+    handler_->sweep();
+    EXPECT_EQ(handler_->retired(), 0U);
+    EXPECT_EQ(handler_->counters().retired_abandoned, 1U);
+    EXPECT_EQ(sfu_.closes, 2);
+}
+
+TEST_F(GroupCallHandlerTest, AGenerationAnotherOwnerMovedIsReadAgainAndItsOldHandleLetGo) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    // This node lost the room and took it back; meanwhile the generation moved on.
+    plane_.owner = 3;
+    plane_.generation = 5;
+    ask("carol");
+    EXPECT_EQ(plane_.steps, (std::vector{rt::MediaStep::Read, rt::MediaStep::Read}));
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].generation, core::ports::MediaGeneration{5});
+    EXPECT_EQ(sfu_.closes, 0) << "the old handle is not this owner's to close";
+    sfu_.open();
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+}
+
+TEST_F(GroupCallHandlerTest, AMoveOfAGenerationOpenedElsewhereOpensItToCloseIt) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.owner = 2;
+    plane_.generation = 4;
+    plane_.hold = true;
+    handler_->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    // The read under the new ownership, then the move.
+    plane_.release();
+    plane_.release();
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].generation, core::ports::MediaGeneration{4});
+    sfu_.open();
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{4});
+}
+
+TEST_F(GroupCallHandlerTest, AnAskOfARoomThisNodeNoLongerOwnsIsRetryable) {
+    ticket("alice");
+    plane_.owner.reset();
+    ask("bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Unavailable);
+    EXPECT_EQ(handler_->rooms(), 0U);
+}
+
+TEST_F(GroupCallHandlerTest, AQuietCallIsAskedWhetherAnyoneIsStillInIt) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    plane_.sent.clear();
+    const int listings = sfu_.listings;
+    clock_.advance(chat::RingLimits{}.answered_hold);
+    sfu_.connected = {in_call("bob", kDevice)};
+    handler_->sweep();
+    EXPECT_EQ(sfu_.listings, listings + 1);
+    EXPECT_EQ(handler_->calls(), 1U);
+    // Kept past the idle time while the call lasts: its handle is what it is asked through.
+    clock_.advance(chat::CallLimits{}.idle);
+    sfu_.listing_error = MediaError::Unavailable;
+    handler_->sweep();
+    EXPECT_EQ(handler_->rooms(), 1U);
+    EXPECT_EQ(handler_->counters().occupancy_unavailable, 1U);
+    sfu_.listing_error.reset();
+    sfu_.connected.clear();
+    clock_.advance(chat::RingLimits{}.occupancy_check);
+    handler_->sweep();
+    EXPECT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
+    EXPECT_EQ(handler_->counters().occupancy_checks, 3U);
+}
+
+TEST_F(CallHandlerTest, ADirectChatLosingAMemberEndsItsCallAndClosesItsGeneration) {
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    ask("bob", kOtherDevice);
+    sfu_.issue();
+    plane_.sent.clear();
+    handler_->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    EXPECT_EQ(plane_.steps, (std::vector{rt::MediaStep::Read, rt::MediaStep::Advance}));
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    EXPECT_EQ(plane_.events(), std::vector(2, chat::RingEvent::Ended));
+    for (const chat::CallNotice& n : plane_.sent) {
+        EXPECT_FALSE(n.by);
+    }
+    EXPECT_EQ(handler_->calls(), 0U);
+}
+
+TEST_F(CallHandlerTest, MovesPastWhatARoomQueuesAreBusy) {
+    store_.kind = RoomKind::GroupChat;
+    store_.members_ = {"alice", "bob"};
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.back().call;
+    ask("bob", kOtherDevice);
+    sfu_.issue();
+    plane_.hold = true;
+    for (int i = 0; i < 17; ++i) {
+        move("alice", chat::CallSignal::End, call);
+    }
+    EXPECT_EQ(outcomes().back(), CallOutcome::Busy);
+    EXPECT_EQ(plane_.held.size(), 1U);
+}
+
+TEST_F(CallHandlerTest, ExpulsionsPastTheOldRoomsAwaitingCloseAreBusy) {
+    handler_ = make(chat::CallLimits{.max_retired = 1});
+    store_.kind = RoomKind::GroupChat;
+    store_.members_ = {"alice", "bob", "carol"};
+    sfu_.close_error = MediaError::Unavailable;
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.back().call;
+    for (const char* who : {"bob", "carol"}) {
+        ask(who, kOtherDevice);
+        if (!sfu_.opens.empty()) {
+            sfu_.open();
+        }
+        sfu_.issue();
+    }
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    move("alice", chat::CallSignal::Expel, call, kRoom, "carol");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Busy);
+}
+
 class BoundedCallHandlerTest : public CallHandlerTest {
 protected:
     BoundedCallHandlerTest()
@@ -752,8 +1647,33 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
         EXPECT_EQ(moved->signal, signal);
         EXPECT_EQ(moved->call, call);
     }
+    const chat::CallSignalRequest expel{.user = request.user,
+                                        .signal = chat::CallSignal::Expel,
+                                        .call = call,
+                                        .target = *core::UserId::parse("bob")};
+    const auto expel_back = chat::decode_request(chat::encode_request(expel));
+    ASSERT_TRUE(expel_back);
+    EXPECT_EQ(std::get<chat::CallSignalRequest>(*expel_back).target, expel.target);
+    auto short_expel = chat::encode_request(expel);
+    short_expel.pop_back();
+    EXPECT_FALSE(chat::decode_request(short_expel));
+    for (const CallOutcome outcome : {CallOutcome::Expelled, CallOutcome::Full}) {
+        const auto refusal =
+            chat::decode_answer(chat::encode_answer({.outcome = outcome, .ticket = std::nullopt}));
+        ASSERT_TRUE(refusal);
+        EXPECT_EQ(refusal->outcome, outcome);
+    }
+    const chat::CallRequest answer{
+        .user = request.user, .device = request.device, .answering = call};
+    const auto answer_back = chat::decode_request(chat::encode_request(answer));
+    ASSERT_TRUE(answer_back);
+    EXPECT_EQ(std::get<chat::CallRequest>(*answer_back).answering, call);
+    EXPECT_FALSE(std::get<chat::CallRequest>(*decoded).answering);
+    auto short_answer = chat::encode_request(answer);
+    short_answer.pop_back();
+    EXPECT_FALSE(chat::decode_request(short_answer));
     auto unknown_ask = chat::encode_request(request);
-    unknown_ask[1] = std::byte{4};
+    unknown_ask[1] = std::byte{7};
     EXPECT_FALSE(chat::decode_request(unknown_ask));
     auto short_ask = chat::encode_request(request);
     short_ask.pop_back();
@@ -783,7 +1703,7 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
     trailing.push_back(std::byte{0});
     EXPECT_FALSE(chat::decode_answer(trailing));
     auto unknown = chat::encode_answer({.outcome = CallOutcome::Busy, .ticket = std::nullopt});
-    unknown[1] = std::byte{10};
+    unknown[1] = std::byte{12};
     EXPECT_FALSE(chat::decode_answer(unknown));
 
     // A ticket names its call; a signal done names the call's caller.

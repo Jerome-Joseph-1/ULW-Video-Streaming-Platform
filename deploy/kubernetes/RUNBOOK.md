@@ -299,9 +299,17 @@ ALTER DATABASE ulw SET auto_explain.log_parameter_max_length = 0;
 as `ulw` then print `0`.
 
 Chat rooms other than a stream's live chat admit only their listed members (docs/adr/0054).
-Until the product manages the lists, they are rows in `chat_members`, set as the service's role.
-Record the room as closed in the same transaction, before its first member, as the service's own
-statement does, so that it can never be recorded live while it lists anyone:
+Who lists them is yours to choose (docs/adr/0096). By default (`ULW_CHAT_SELF_SERVICE` unset or
+`off`) users cannot start a conversation themselves: your product's backend lists them through
+chat's service API once its own request and accept allow it (step 10), and users may still
+leave, remove others from a group they administer, and list their rooms. With
+`ULW_CHAT_SELF_SERVICE=on` (a demo, a closed community) users open direct chats, create groups
+and add members over the chat WebSocket themselves (`open_direct`, `create_group`,
+`add_members`; docs/integration/chat.md). Either way presence is seen only between users who
+share a chat. The lists are rows in `chat_members`, and an operator may still change them as the
+service's role, to repair a list or to moderate. Record a room as
+closed in the same transaction, before its first member, as the service's own statements do, so
+that it can never be recorded live while it lists anyone:
 
 ```sql
 BEGIN;
@@ -314,15 +322,31 @@ COMMIT;
 DELETE FROM chat_members WHERE room_id = '<room uuid>' AND user_id = '<user id>';
 ```
 
-`<user id>` is the token's subject claim (`JWT_SUBJECT_CLAIM`, docs/integration/auth.md). A
-member removed this way is cut off at once on every chat node, however the row goes (a DELETE,
-or an UPDATE that moves it to another room or user; one that leaves both as they were removes
-nobody): a trigger (migration 0009) notifies the nodes, each takes that user's sockets out of the
-room, and the client gets an `error` with `not_member` for it (docs/adr/0073). Their next join is
-refused. No restart is needed. If a node's listening session to Postgres was down when the row
-went, the node checks every closed room its clients are in once it listens again, four checks at
-a time and retrying each second while the database fails, so a removal made during a database
-outage takes effect once the node reconnects. `member_removals_total` counts the sockets taken out.
+`<user id>` is the token's subject claim (`JWT_SUBJECT_CLAIM`, docs/integration/auth.md): at
+most 128 bytes, with no white space (`chat_members_user_id`). A member removed this way is cut
+off at once on every chat node, however the row goes (a DELETE, or an UPDATE that moves it to
+another room or user; one that leaves both as they were removes nobody): a trigger (migration
+0015; 0009's for nodes from before it) notifies the nodes, each takes that user's sockets out of
+the room, and the client gets an `error` with `not_member` for it (docs/adr/0073); the user's
+other sockets, and everyone in the room, get a `member` frame. Their next join is refused. No
+restart is needed. If a node's listening session to Postgres was down when the row went, the
+node checks every closed room its clients are in once it listens again, four checks at a time
+and retrying each second while the database fails, so a removal made during a database outage
+takes effect once the node reconnects. `member_removals_total` counts the sockets taken out. A
+member listed this way is told the same way. A room whose id starts with `03` or `04` and has
+version 8 (third group starting with `8`) is a direct or group chat the service named: the
+database accepts it only as that kind (`chat_rooms_named_kind`).
+
+A member's `role` is `member` (the default) or `admin`; a group's creator is its admin, and only
+admins add or remove others. To give a group another admin, or one to a group listed before
+migration 0015 (which has none):
+
+```sql
+UPDATE chat_members SET role = 'admin' WHERE room_id = '<room uuid>' AND user_id = '<user id>';
+```
+
+A role changed this way is told to the user's sockets and the room's as a `member` frame with
+`change` `promoted` (or `demoted`).
 
 A stream's live chat admits anyone, and only the server side opens one: a client's join can
 record a room only as closed, and a stream join is refused with `not_live` until the stream's
@@ -419,6 +443,62 @@ migration gives up and the init container runs it again (`lock_timeout`, docs/ad
 that waits past the chat service's request timeout is answered `unavailable`, and the client
 retries it.
 
+**Migration 0015 comes after 0011 to 0014.** The migrator refuses a migration older than the
+newest one applied, so the release that carries 0015 must also carry 0011 (live streams), 0012
+(a live chat closes), 0013 (a stream's publisher left) and 0014 (group calls), and no database
+may be migrated to 0015 by a build without them.
+
+**Deploy the release that carries migration 0015 off-peak.** The migrator runs it in one
+transaction and holds every lock it takes until the commit. It builds its index on
+`chat_members (user_id, room_id)` first, without `CONCURRENTLY`, under the SHARE lock that takes:
+for the length of the build every member added or removed, by a user's command or by an
+operator, waits; joins, history and everything else that only reads the table do not. The build
+sorts every row of `chat_members`: check first with `SELECT count(*) FROM chat_members;`. Only
+then does it alter `chat_members` and `chat_rooms` (a column with a default and three checks
+added `NOT VALID`, catalog changes that scan nothing) and create its trigger; their ACCESS
+EXCLUSIVE locks, which do stop reads, are held only for the moments until the commit. A member
+change or join that waits past the chat service's request timeout is answered `unavailable`,
+and the client retries it.
+
+Follow-ups once 0015 is everywhere: a later migration validates its `NOT VALID` checks
+(`chat_members_role`, `chat_members_user_id`, `chat_rooms_named_kind`) with `VALIDATE
+CONSTRAINT`, which scans under a lock that lets reads and writes go on; and, once no chat node
+older than 0015 runs, drops 0009's triggers (`chat_member_removed`, `chat_member_moved` on
+`chat_members`), which until then send every removal a second time on the old channel.
+
+**Migration 0016 (who may see a video, docs/adr/0097) comes after 0015**, for the same reason:
+the release that carries it carries 0011 to 0015. It is quick and needs no off-peak window: it
+creates `video_grants` and its index (an empty table), then alters `videos` in one statement (two
+columns, one with a constant default, and two checks added `NOT VALID`), which scans and rewrites
+nothing. Its locks on `videos` are held until its commit, a moment after they are taken: the
+foreign key's SHARE ROW EXCLUSIVE lock holds an upload's progress write or a worker's transition
+back for that moment, and the ALTER's ACCESS EXCLUSIVE lock every read of `videos`, playback
+included, only from the ALTER to the commit. Every video it finds becomes `private`, as before.
+The gateway now reads `chat_members` on each video request to decide who may see a video shared
+with a room; nothing else changes about chat's tables. Follow-up once 0016 is everywhere: a
+later migration validates `videos_visibility` and `videos_visibility_room` with
+`VALIDATE CONSTRAINT`.
+
+Who may see a video (docs/integration/videos-and-playback.md, "Who can see a video") is set by
+its owner and by your backend through the grants API. As the service's role, an operator may
+also look and repair:
+
+```sql
+SELECT visibility, visibility_room FROM videos WHERE id = '<video uuid>';
+SELECT user_id, granted_at FROM video_grants WHERE video_id = '<video uuid>' ORDER BY user_id;
+-- Take a video back to its owner alone, grants included:
+BEGIN;
+UPDATE videos SET visibility = 'private', visibility_room = NULL WHERE id = '<video uuid>';
+DELETE FROM video_grants WHERE video_id = '<video uuid>';
+COMMIT;
+-- Revoke everything a user was granted (video_grants_by_user):
+DELETE FROM video_grants WHERE user_id = '<user id>';
+```
+
+A change takes effect at the user's next request on every gateway: nothing is cached. Segment
+URLs a playlist handed out before stay valid until they expire (at most 7 days, usually an hour
+or two), as for any viewer.
+
 The NetworkPolicies allow ports, not addresses, because Postgres and the store often run outside
 the cluster. If their addresses are stable, patch them in as an `ipBlock` on the 5432 and 443
 rules.
@@ -472,6 +552,8 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `POD_CIDR` | The cluster's pod network | `ULW_TRUSTED_PROXIES` of the gateway and chat; the block the worker and packagers may not reach |
 | `JWKS_URL`, `JWT_ISSUER`, `JWT_AUDIENCE` | The identity provider (docs/integration/auth.md) | the gateway's and chat's settings of the same names |
 | `JWT_SUBJECT_CLAIM` | The claim that names the user, `sub` unless your provider uses another | `ULW_JWT_SUBJECT_CLAIM` |
+| `SERVICE_CLAIM`, `SERVICE_SCOPE` | Which tokens are your backend's, for chat's service API (docs/integration/auth.md, "Service tokens"; step 10): the claim (`scope` by default) and the value only your backend's client-credentials client is granted. Empty `SERVICE_SCOPE`: no token is, and chat has no service API | chat's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE` |
+| `SERVICE_CLAIM`, `SERVICE_SCOPE`, `SERVICE_CLIENT_ID` | Which tokens are your backend's, for the gateway's grants API (docs/integration/auth.md, "Service tokens"): the claim (empty for `scope`), the value only your backend's client-credentials client is granted, and that client's id (recommended; matched against `azp` or `client_id`). Empty `SERVICE_SCOPE`: no token is, and the grants API answers 403 | the gateway's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE`, `ULW_SERVICE_CLIENT_ID` |
 | `AUTH_COOKIE`, `ALLOWED_ORIGINS` | The token cookie, and the web app's pages that may use it | `ULW_AUTH_COOKIE`, `ULW_ALLOWED_ORIGINS` |
 | `STORAGE`, `R2_ACCOUNT_ID`, `S3_ENDPOINT`, `BUCKET` | The object store: `r2` with an account id, or `minio` (any S3-compatible store) with an endpoint; the unused one empty | `ULW_STORAGE` and the rest, for the gateway, worker, reaper and packagers |
 | `VIDEO_GATEWAY_IMAGE_TAG`, `VIDEO_WORKER_IMAGE_TAG`, `CHAT_IMAGE_TAG`, `LIVE_PACKAGER_IMAGE_TAG` | Which build runs: `main`, a commit SHA, or `<sha>@sha256:<digest>` (4a) | each image's tag |
@@ -530,10 +612,21 @@ kubectl -n "$NS" rollout restart deployment/video-worker deployment/chat
 A pinned environment is not restarted onto a new build: its deploy is a change of the image
 tags in its `config.env` (4a) and an apply.
 
-The routes serve `/api/v1/uploads`, `/api/v1/videos` and `/api/v1/live` (the gateway), `/rt`
+The routes serve `/api/v1/uploads`, `/api/v1/videos`, `/api/v1/live` and
+`/api/v1/service/videos` (the gateway), `/rt`
 (chat), and `/rtc` and `/whip` (LiveKit) on `PUBLIC_HOSTNAME` only. Environments often attach to
 one shared Gateway, so a route without `hostnames:` would answer the other environments' hosts
 too. To serve a second host, patch it into the three HTTPRoutes' `spec.hostnames`.
+
+`/api/v1/service/videos` is your backend's grants API (docs/adr/0097). It is routed publicly
+because a backend usually calls from outside the cluster, and the gateway admits only a bearer
+token whose `SERVICE_SCOPE` (and `SERVICE_CLIENT_ID`) is your backend's; with `SERVICE_SCOPE`
+empty it answers 403 to everyone. To narrow it: if your backend has fixed egress addresses, move
+that rule into an HTTPRoute of its own and attach an Envoy Gateway SecurityPolicy allowing only
+them (the commented example in `base/video-gateway/httproute.yaml`); if it runs in the cluster,
+delete the rule in your overlay, have it call the `video-gateway` Service directly, and add an
+ingress rule for its pods to the gateway's NetworkPolicy (`base/video-gateway/networkpolicy.yaml`
+admits only Envoy's proxies on the HTTP port).
 
 ### 4a. Deploying by digest
 
@@ -555,9 +648,10 @@ kubectl kustomize overlays/<env> > /tmp/ulw.yaml
 ../local/check-image-pins.py --pinned /tmp/ulw.yaml    # exit 0, or the image at fault
 ```
 
-1. Take the images from the publish run's summary for the commit you mean to deploy (Actions,
-   publish-images, the run, Summary, "Published images"), each as `<sha>@sha256:<digest>`, or
-   resolve them from its SHA tag; both give the same `sha256:...`:
+1. Take the images from the release you mean to deploy (its GitHub Release lists each as
+   `<sha>@sha256:<digest>`; docs/integration/versioning.md, Releases), or from the publish run's
+   summary for the commit (Actions, publish-images, the run, Summary, "Published images"), or
+   resolve them from its SHA tag; all give the same `sha256:...`:
 
    ```sh
    SHA=<full commit sha on main>
@@ -867,6 +961,12 @@ tickets with the same pair LiveKit checks them with, and calls LiveKit's server 
 with `calls_disabled`. With calls on, the first ticket of a call rings the other member, for
 45 s unless the chat container's environment sets `ULW_CALL_RING_TIMEOUT_MS` (1000 to 300000;
 docs/adr/0091); the base leaves it unset, and an overlay that wants another ring patches it in.
+A group chat's call holds 8 devices unless `ULW_CALL_GROUP_PARTICIPANTS` says otherwise (3 to 16;
+docs/adr/0095 derives the default from one SFU pod's capacity, about four full calls of eight
+per 2-core pod), set the same way. Group calls need migration 0014 (the room's media
+generation), which the gateway's init container applies before chat's new pods matter; they
+change no node-channel frame, so chat rolls out as usual, with group calls answered `unavailable`
+or `not_callable` by an old pod until the rollout finishes.
 All of these read the Secret only at start, so after a change restart
 Redis first (LiveKit does not start without it); STUNner rereads its secret by itself:
 
@@ -1119,7 +1219,30 @@ goes live and ends it; `kubectl -n "$LIVE_NAMESPACE" get jobs -l app.kubernetes.
 lists its packagers, and each Job's log ends `recording: queued as video <id>`. The gateway's
 `live_streams_ended_total{reason="failed"}` or `{reason="timeout"}` rising means packagers that
 did not start or relays that never reached them: look at the Jobs' events and logs, and at
-egress's. To turn live streams off again, take the component out of the overlay and apply it:
+egress's.
+
+**LiveKit's webhooks** (docs/adr/0093) take a stream live when its publisher publishes and end
+it (`publisher_left`) once the publisher has been gone for `ULW_LIVE_PUBLISHER_GRACE_SECONDS`
+(10), so an encoder with a fixed token, or a client that crashed, needs nobody to call `start`
+or `end`. LiveKit posts them, signed with `SFU_SECRET`'s `LIVEKIT_API_KEY`, to the gateway's
+second listener (`ULW_LIVE_WEBHOOK_PORT`, 8081): the Service `video-gateway-hooks`, which no
+HTTPRoute names, admitted by the component's `hooks.yaml` NetworkPolicy from LiveKit's pods
+only. LiveKit's configuration names it in its `webhook` block (`base/livekit/deployment.yaml`).
+Check after a rollout that they arrive and are believed:
+
+```sh
+kubectl -n "$NAMESPACE" logs deploy/livekit | grep -m3 '"sent webhook"'        # statusCode 200
+kubectl -n "$NAMESPACE" exec deploy/video-gateway -- wget -qO- 127.0.0.1:8080/metrics \
+  | grep -E '^live_webhooks_total|^live_webhook_refusals_total'
+```
+
+`live_webhook_refusals_total{reason="signature"}` or `{reason="unknown_key"}` rising means
+LiveKit signs with a key the gateway does not have: both read the same pair from `SFU_SECRET`.
+LiveKit's own log saying `failed to send webhook` means the Service, the port or the policy is
+wrong (or the component is off); streams then still go live through `start` and end through
+`end` and the sweep, as before.
+
+To turn live streams off again, take the component out of the overlay and apply it:
 the stream routes answer `404`, and streams already running end with their publishers.
 
 ### Secrets and the database role
@@ -1212,3 +1335,155 @@ kubectl -n "$LIVE_NAMESPACE" delete secret "live-packager-$STREAM"
 
 Every packager runs ffmpeg under the worker's sandbox, so it needs what step 1 checks for the
 worker (user namespaces) and step 2's seccomp profile on the node it lands on.
+
+## 10. Chat's service API: your backend lists who talks to whom
+
+ULW keeps no directory of users and no contacts (docs/adr/0018). Out of the box, chat lets no
+user reach another just by knowing their id: `open_direct`, `create_group` and `add_members` on
+the socket are answered `not_allowed` (`ULW_CHAT_SELF_SERVICE` is `off`). Your product decides who
+may talk to whom (a friend request, an invitation, a match) and then lists them through chat's
+service API: HTTP on a port of chat's own, authenticated by your identity provider's token for
+your backend (docs/integration/chat.md, "The service API"; docs/adr/0096). ULW holds no secret
+for it.
+
+### The backend's client in the identity provider
+
+The backend needs its own confidential client, allowed the client-credentials grant, whose tokens
+carry a scope (or role) no user's token does, and ULW's audience. In **Keycloak** (the realm
+whose issuer is `JWT_ISSUER`; 24 and later, admin console):
+
+1. **Client scopes, Create client scope.** Name `ulw:admin`, type *None*, protocol *OpenID
+   Connect*, *Include in token scope* on. Save. (Type *None*: it is never added to any client
+   by default.)
+2. **Clients, Create client.** Client type *OpenID Connect*, client ID `ulw-backend`. Next:
+   *Client authentication* on, and of the authentication flows only *Service accounts roles*
+   (clear *Standard flow* and *Direct access grants*). Save. The *Credentials* tab now holds
+   its secret (or switch the authenticator to *Signed JWT* to use a key instead); give it to
+   the backend's secret store, never to ULW.
+3. **Clients, `ulw-backend`, Client scopes, Add client scope:** `ulw:admin`, as *Default* (in
+   every token of this client) or *Optional* (only when the request names it).
+4. **The audience.** Clients, `ulw-backend`, Client scopes, `ulw-backend-dedicated`,
+   *Configure a new mapper*, *Audience*: name `ulw-audience`, *Included Custom Audience* the
+   exact `JWT_AUDIENCE` of the environment, *Add to access token* on. Without it the token's
+   `aud` is `account` or nothing, and chat answers `401`.
+5. **The subject.** A client-credentials token's `sub` is the service account's id, a UUID,
+   which passes. If `JWT_SUBJECT_CLAIM` names another claim (`preferred_username`, say), the
+   service account has it as `service-account-ulw-backend`; a claim it lacks makes every request
+   `401`.
+6. **Check that no user client has `ulw:admin`:** Client scopes, `ulw:admin`, and every client
+   that lists it should be `ulw-backend` alone. A user's token decoded must not show the scope.
+
+Get a token and look at it:
+
+```sh
+TOKEN=$(curl -fsS https://id.example.com/realms/<realm>/protocol/openid-connect/token \
+  -d grant_type=client_credentials -d client_id=ulw-backend \
+  --data-urlencode client_secret@<(cat /path/to/secret) -d scope=ulw:admin | jq -r .access_token)
+echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss, aud, sub, scope, exp}'
+```
+
+`iss` must be `JWT_ISSUER` byte for byte, `aud` must hold `JWT_AUDIENCE`, and `scope` must hold
+`ulw:admin` among its space-separated values. Keycloak issues these for 5 minutes by default;
+the backend fetches a new one before `exp`, and keeps the old one until then.
+
+Elsewhere, the same shape: **Auth0**, an API whose identifier is `JWT_AUDIENCE` with a permission
+`ulw:admin`, and a machine-to-machine application authorized for it with that permission (the
+token's `scope` holds it; `sub` is `<client id>@clients`, which passes). **Okta**, a custom
+authorization server whose audience is `JWT_AUDIENCE`, a custom scope `ulw:admin`, and a service
+app granted it by an access policy. **Microsoft Entra ID**, an app role on the API registration
+(value `ulw.admin`; Entra role values allow no `:`) assigned to the backend's application, which
+arrives in the `roles` array: `SERVICE_CLAIM=roles`, `SERVICE_SCOPE=ulw.admin`.
+
+### Turning it on
+
+In `config.env`, `SERVICE_CLAIM` (the claim, `scope` unless your provider uses `roles` or
+another) and `SERVICE_SCOPE` (`ulw:admin` above): `components/operator-config` copies them to
+chat's `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE` (docs/integration/auth.md, "Service
+tokens"). With
+`SERVICE_SCOPE` empty, no token is the service's. Chat also requires the client itself,
+`ULW_SERVICE_CLIENT_ID`, with its port: `ulw-backend` (Keycloak puts it in `azp`; Okta and RFC
+9068 tokens in `client_id`), so that a token holding the scope but issued to any other client is
+refused. Then open chat's port with a kustomize patch
+in your overlay (the base sets no port, so the API is off, and self-service is off, until you
+do):
+
+```yaml
+patches:
+  - target:
+      kind: Deployment
+      name: chat
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/ports/-
+        value: {name: service, containerPort: 9301}
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: ULW_SERVICE_PORT, value: "9301"}
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value: {name: ULW_SERVICE_CLIENT_ID, value: ulw-backend}
+```
+
+and, beside it, a ClusterIP Service no HTTPRoute names, and a NetworkPolicy that admits your
+backend's pods (or its egress addresses) to that port and nothing else:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata: {name: chat-service, namespace: ulw}
+spec:
+  selector: {app.kubernetes.io/name: chat}
+  ports: [{name: service, port: 80, targetPort: service}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata: {name: chat-service-api, namespace: ulw}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: chat}}
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: <backend namespace>}}
+      ports: [{port: service}]
+```
+
+The token is what admits a caller, so a port reached from elsewhere is not open to anyone; but
+nothing needs it reachable from the internet, and a route left off costs nothing, so the base
+ships no HTTPRoute for it. A backend outside the cluster reaches it through your own private
+ingress (a VPN, an internal load balancer). If you must route it through the public Gateway,
+add an HTTPRoute for `/service/v1/` to `chat-service` and restrict it to the backend's
+addresses, for example with Envoy Gateway's `SecurityPolicy`:
+
+```yaml
+# apiVersion: gateway.envoyproxy.io/v1alpha1
+# kind: SecurityPolicy
+# metadata: {name: chat-service-api, namespace: ulw}
+# spec:
+#   targetRefs: [{group: gateway.networking.k8s.io, kind: HTTPRoute, name: chat-service}]
+#   authorization:
+#     defaultAction: Deny
+#     rules:
+#       - action: Allow
+#         principal: {clientCIDRs: ["203.0.113.0/24"]}   # the backend's egress
+```
+
+as well as the client id chat already requires. Keep
+`ULW_CHAT_SELF_SERVICE` unset (off). A demo whose web client opens chats itself needs
+`ULW_CHAT_SELF_SERVICE=on` (`value: "on"` in the same patch) and no service API.
+
+### Verify
+
+From a pod your NetworkPolicy admits:
+
+```sh
+curl -sS -X POST http://chat-service.ulw.svc/service/v1/rooms \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' -d '{"user":"<a user id>"}'
+```
+
+answers `200` and the user's rooms. With a user's token instead, `403`; with none, `401`. Each
+chat pod's log line `"msg":"listening"` shows `"self_service":false` and `"service_port":9301`,
+and `/metrics` counts `service_api_answers_total{result="forbidden"}` (users trying the port:
+alert if it rises) and `{result="unauthorized"}` (a backend whose token stopped verifying:
+issuer, audience or key). After changing the claim, roll the chat pods (`kubectl -n ulw rollout
+restart deployment/chat`); after the provider rotates its signing key, step 8 covers the service
+tokens as it does users'.

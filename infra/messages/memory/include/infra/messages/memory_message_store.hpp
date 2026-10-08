@@ -6,7 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
-#include <set>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -57,10 +57,32 @@ public:
     void access(const core::RoomId& room, const core::UserId& user,
                 core::ports::MessageCallback<core::ports::RoomAccess> done) override;
     void record_live(const core::RoomId& room, core::ports::MessageCallback<void> done) override;
-    // Told of remove_member's removals only: nothing else changes this store's lists.
+    // Told of every member this store lists or takes off, after the answer of the call that did
+    // it: nothing else changes this store's lists.
     void watch_members(core::ports::IMemberListener* listener) noexcept override {
         listener_ = listener;
     }
+    void open_direct(const core::RoomId& room, const core::UserId& user, const core::UserId& peer,
+                     core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void create_group(const core::RoomId& room, const core::UserId& creator,
+                      std::vector<core::UserId> members,
+                      core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void add_members(const core::RoomId& room, const core::ports::Actor& actor,
+                     std::vector<core::UserId> users,
+                     core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void expel(const core::RoomId& room, const core::UserId& actor, const core::UserId& user,
+               core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void close_direct(const core::RoomId& room,
+                      core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void leave_room(const core::RoomId& room, const core::UserId& user,
+                    core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void rooms_of(const core::UserId& user, std::optional<core::RoomId> after, std::size_t limit,
+                  core::ports::MessageCallback<std::vector<core::ports::RoomEntry>> done) override;
+    void roster(const core::RoomId& room, const core::ports::Actor& asker,
+                std::optional<core::UserId> after, std::size_t limit,
+                core::ports::MessageCallback<core::ports::Roster> done) override;
+    void shared_with(const core::UserId& user, std::vector<core::UserId> others,
+                     core::ports::MessageCallback<std::vector<core::UserId>> done) override;
 
     void on_timeout() noexcept override;
 
@@ -79,14 +101,25 @@ private:
         std::uint64_t last = 0;
     };
 
+    using Members = std::map<core::UserId, core::ports::MemberRole, ByteOrder>;
+
     void defer(std::move_only_function<void() noexcept> fn);
+    // Answers `done` with `change`, then tells the listener of each id in it: added or removed.
+    void answer_change(core::ports::MembershipChange change, bool added, const core::RoomId& room,
+                       core::ports::MessageCallback<core::ports::MembershipChange> done);
+    // Lists `users` (the first with `first_role`) in a room that lists nobody yet: what
+    // open_direct and create_group do, once the room is recorded as `kind`.
+    void create_listed(const core::RoomId& room, core::ports::RoomKind kind,
+                       const core::UserId& asker, std::vector<core::UserId> users,
+                       core::ports::MemberRole first_role,
+                       core::ports::MessageCallback<core::ports::MembershipChange> done);
 
     net::IReactor& reactor_;
     net::TimerId timer_;
     std::vector<std::move_only_function<void() noexcept>> pending_;
     std::unordered_map<core::RoomId, Room> rooms_;
-    // Ordered bytewise, as the durable store lists them.
-    std::unordered_map<core::RoomId, std::set<core::UserId, ByteOrder>> members_;
+    // Ordered bytewise, as the durable store lists them, with each member's role.
+    std::unordered_map<core::RoomId, Members> members_;
     // As recorded by each room's first join or member, or by record_live.
     std::unordered_map<core::RoomId, core::ports::RoomKind> kinds_;
 };

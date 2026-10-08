@@ -5,6 +5,11 @@ name: security
 # C++, Trivy over deploy/, and actionlint and zizmor over .github/. The binary hardening check
 # runs where the binaries are built (ci.yml's build-test; e2e.yml's sandbox for the release
 # images, with Trivy's image scan). Weekly as well, since new advisories arrive without a push.
+#
+# Not part of ci.yml's lanes (docs/operations/ci-lanes.md): pull requests run all four jobs, CodeQL
+# (about ten minutes) for its alerts on the pull request and the other three in seconds; batch/**
+# branches do not, since a code scanning analysis per batch branch would only add noise, and the
+# squash commits that reach main are scanned on their push.
 on:
   push:
     branches: [main]

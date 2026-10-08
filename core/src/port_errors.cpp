@@ -16,6 +16,8 @@ std::string_view to_string(CatalogError e) noexcept {
         return "catalog unavailable";
     case CatalogError::Corrupt:
         return "corrupt record";
+    case CatalogError::Forbidden:
+        return "forbidden";
     }
     return "unknown catalog error";
 }
@@ -78,6 +80,8 @@ std::string_view to_string(MediaError e) noexcept {
         return "media room closed";
     case MediaError::NotImplemented:
         return "media operation not implemented";
+    case MediaError::Remains:
+        return "media room still there after its close";
     }
     return "unknown media error";
 }
@@ -104,6 +108,8 @@ std::string_view to_string(LiveEnd e) noexcept {
         return "failed";
     case LiveEnd::Timeout:
         return "timeout";
+    case LiveEnd::PublisherLeft:
+        return "publisher_left";
     }
     return "failed";
 }

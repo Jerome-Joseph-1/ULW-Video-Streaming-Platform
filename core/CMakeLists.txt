@@ -12,7 +12,9 @@ ulw_add_library(core_domain
     src/upload.cpp
     src/uuid.cpp
     src/version.cpp
-    src/video.cpp)
+    src/video.cpp
+    src/video_access.cpp
+    src/visibility.cpp)
 target_include_directories(core_domain
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     PRIVATE ${ULW_GENERATED_DIR})
