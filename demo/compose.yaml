@@ -219,6 +219,9 @@ services:
       ULW_MAX_CONNECTIONS_PER_IP: "512"
       ULW_MAX_CONNECTIONS_PER_IP_BLOCK: "1280"
       ULW_NEW_CONNECTIONS_PER_IP_PER_SECOND: "1000"
+      # The page opens its direct chats and creates its groups itself (web/js/rooms.js), which
+      # chat allows only with self-service on (ADR-0096; off by default).
+      ULW_CHAT_SELF_SERVICE: "on"
       # Calls (ADR-0087): tickets for LiveKit, which the page reaches through the web proxy.
       LIVEKIT_API_URL: http://127.0.0.1:7880
       LIVEKIT_CLIENT_URL: ws://localhost:${DEMO_PORT:-8080}
