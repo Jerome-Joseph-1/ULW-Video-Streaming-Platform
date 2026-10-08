@@ -33,6 +33,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/key_package_test.cpp
     unit/core/ladder_test.cpp
     unit/core/parse_test.cpp
+    unit/core/url_test.cpp
     unit/core/storage_key_test.cpp
     unit/core/upload_test.cpp
     unit/core/uuid_test.cpp
@@ -128,7 +129,8 @@ ulw_add_test_suite(net_unit_tests unit
     unit/net/slab_test.cpp
     unit/net/sockaddr_test.cpp
     unit/net/timing_wheel_test.cpp
-    unit/net/transport_tls_test.cpp)
+    unit/net/transport_tls_test.cpp
+    unit/net/uring_locked_memory_test.cpp)
 target_link_libraries(net_unit_tests PRIVATE ulw::net_lib ulw::test_echo ulw::test_tls)
 # White-box tests of the reactor internals.
 target_include_directories(net_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/net/src ${PROJECT_SOURCE_DIR}/tests)
@@ -290,11 +292,13 @@ ulw_add_test_suite(gateway_tests unit
     gateway/gateway_ops_test.cpp
     gateway/gateway_playback_test.cpp
     gateway/gateway_store_stall_test.cpp
+    gateway/gateway_streams_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
     gateway/health_test.cpp
     gateway/key_fetcher_test.cpp
     gateway/live_manifest_cache_test.cpp
+    gateway/live_streams_test.cpp
     gateway/rate_limit_test.cpp
     gateway/send_window.cpp
     gateway/upload_claim_test.cpp)
@@ -385,6 +389,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_harness.cpp
     integration/postgres_job_queue_test.cpp
     integration/postgres_live_recordings_test.cpp
+    integration/postgres_live_streams_test.cpp
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
     integration/postgres_upload_reaper_test.cpp
@@ -395,6 +400,19 @@ target_include_directories(postgres_integration_tests
 target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
+
+# The stream service over the Postgres and LiveKit of deploy/local/compose.yaml; it skips when
+# LiveKit is not running.
+ulw_add_test_suite(live_service_integration_tests integration
+    integration/live_service_test.cpp
+    integration/postgres_harness.cpp)
+target_link_libraries(live_service_integration_tests PRIVATE ulw::gateway_lib ulw::pg_store
+    ulw::sfu_livekit ulw::auth PkgConfig::LIBPQ OpenSSL::Crypto)
+target_include_directories(live_service_integration_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+target_compile_definitions(live_service_integration_tests
+    PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
+add_dependencies(live_service_integration_tests ulw_migrate)
 
 ulw_add_test_suite(reaper_unit_tests unit
     unit/reaper/config_test.cpp
@@ -445,6 +463,7 @@ target_include_directories(message_store_integration_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
 ulw_add_test_suite(chat_unit_tests unit
+    unit/chat/call_bell_test.cpp
     unit/chat/call_test.cpp
     unit/chat/chat_service_test.cpp
     unit/chat/config_test.cpp
@@ -453,6 +472,7 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/live_chat_test.cpp
     unit/chat/memory_store_access_test.cpp
     unit/chat/presence_test.cpp
+    unit/chat/ring_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
 target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os
@@ -581,23 +601,71 @@ if(ULW_BUILD_WORKER)
     target_compile_features(ulw_syscall_probe PRIVATE cxx_std_23)
     target_link_libraries(ulw_syscall_probe PRIVATE ulw_warnings)
 
+    # The sandbox helper for tests: the same source as ulw_sandbox, with a table that adds
+    # ordinary programs to stand in for ffmpeg, the syscall probe, and paths each wrong in one
+    # way, for the check the helper makes of the path it runs (program_check.hpp). Never
+    # installed, and never copied into an image (deploy/docker/Dockerfile copies ulw_sandbox).
+    # Usr-merged paths, as on Ubuntu 24.04 and Debian 13, where the trixie workflow runs it.
+    # The probe's path and the unexecutable file are in the build tree, so it is held to what
+    # the table takes (infra/ffmpeg/CMakeLists.txt).
+    ulw_sandbox_safe_path("${CMAKE_CURRENT_BINARY_DIR}" safe)
+    if(NOT safe)
+        message(FATAL_ERROR "The sandbox test helper's table names files in the build directory, "
+            "whose path must be absolute and made only of letters, digits and ._+- between its "
+            "slashes: \"${CMAKE_CURRENT_BINARY_DIR}\". Build elsewhere, or with "
+            "ULW_BUILD_TESTS=OFF.")
+    endif()
+    set(ulw_test_programs "${CMAKE_CURRENT_BINARY_DIR}/sandbox_test_programs")
+    set(ulw_not_executable "${ulw_test_programs}/not-executable")
+    file(WRITE "${ulw_not_executable}" "#!/bin/sh\nexit 0\n")
+    file(CHMOD "${ulw_not_executable}" PERMISSIONS OWNER_READ OWNER_WRITE GROUP_READ WORLD_READ)
+    ulw_sandbox_programs("${ulw_test_programs}"
+        ffmpeg "${ULW_SANDBOX_FFMPEG}"
+        ffprobe "${ULW_SANDBOX_FFPROBE}"
+        bash /usr/bin/bash
+        cat /usr/bin/cat
+        env /usr/bin/env
+        python3 /usr/bin/python3
+        sh /usr/bin/sh
+        sleep /usr/bin/sleep
+        true /usr/bin/true
+        syscall_probe "$<TARGET_FILE:ulw_syscall_probe>"
+        bare_name sh
+        relative usr/bin/sh
+        dot_dot /usr/bin/../bin/sh
+        dot /usr/./bin/sh
+        doubled_slash /usr//bin/sh
+        directory /usr/bin
+        missing /nonexistent/ulw-sandbox-test-program
+        not_executable "${ulw_not_executable}")
+    add_executable(ulw_sandbox_test_helper ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src/sandbox_main.cpp)
+    target_compile_features(ulw_sandbox_test_helper PRIVATE cxx_std_23)
+    target_include_directories(ulw_sandbox_test_helper PRIVATE ${ulw_test_programs}/$<CONFIG>
+        ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${PROJECT_SOURCE_DIR}/core/include)
+    target_link_libraries(ulw_sandbox_test_helper PRIVATE ulw_warnings)
+
     ulw_add_test_suite(ffmpeg_unit_tests unit
         unit/ffmpeg/command_test.cpp
         unit/ffmpeg/exit_code_test.cpp
         unit/ffmpeg/hls_rewrite_test.cpp
         unit/ffmpeg/live_command_test.cpp
+        unit/ffmpeg/program_check_test.cpp
         unit/ffmpeg/progress_test.cpp
         unit/ffmpeg/recording_verdict_test.cpp
         unit/ffmpeg/sandbox_test.cpp
         unit/ffmpeg/seccomp_filter_test.cpp)
     target_link_libraries(ffmpeg_unit_tests PRIVATE ulw::ffmpeg_adapter ulw::os)
-    # White-box tests of the adapter internals, and the real sandbox helper.
+    # White-box tests of the adapter internals, the production helper's table, the production
+    # helper itself and the test helper.
     target_include_directories(ffmpeg_unit_tests
-        PRIVATE ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${PROJECT_SOURCE_DIR}/tests)
+        PRIVATE ${PROJECT_SOURCE_DIR}/infra/ffmpeg/src ${ULW_SANDBOX_PROGRAMS_DIR}/$<CONFIG>
+                ${PROJECT_SOURCE_DIR}/tests)
     target_compile_definitions(ffmpeg_unit_tests
         PRIVATE ULW_SANDBOX_BIN="$<TARGET_FILE:ulw_sandbox>"
-                ULW_SYSCALL_PROBE_BIN="$<TARGET_FILE:ulw_syscall_probe>")
-    add_dependencies(ffmpeg_unit_tests ulw_sandbox ulw_syscall_probe)
+                ULW_SANDBOX_TEST_HELPER_BIN="$<TARGET_FILE:ulw_sandbox_test_helper>"
+                ULW_SANDBOX_FFMPEG="${ULW_SANDBOX_FFMPEG}"
+                ULW_SANDBOX_FFPROBE="${ULW_SANDBOX_FFPROBE}")
+    add_dependencies(ffmpeg_unit_tests ulw_sandbox ulw_sandbox_test_helper ulw_syscall_probe)
 
     ulw_add_test_suite(worker_unit_tests unit
         unit/worker/config_test.cpp
@@ -722,6 +790,14 @@ target_link_libraries(sfu_unit_tests PRIVATE ulw::sfu_livekit ulw::auth ulw::tes
 # White-box tests of token minting and of how RoomService answers are read.
 target_include_directories(sfu_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src
     ${PROJECT_SOURCE_DIR}/tests)
+
+# How the stream service starts packagers: as child processes, and as Jobs through a scripted
+# Kubernetes API server.
+ulw_add_test_suite(packagers_unit_tests unit
+    unit/packagers/kubernetes_packagers_test.cpp
+    unit/packagers/process_packagers_test.cpp)
+target_link_libraries(packagers_unit_tests PRIVATE ulw::packagers ulw::test_http_server)
+target_include_directories(packagers_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
 # The signalling side of the call suite, tests/call/run.sh.
 ulw_add_executable(ulw_call_harness call/harness_main.cpp)

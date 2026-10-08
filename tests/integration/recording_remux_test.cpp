@@ -42,11 +42,8 @@ protected:
 
     os::SystemClock clock_;
     ulw::test::TempDir work_{"ulw-recording-remux"};
-    infra::ffmpeg::RecordingRemuxer remuxer_{{.sandbox = ULW_SANDBOX_BIN,
-                                              .ffmpeg = "ffmpeg",
-                                              .ffprobe = "ffprobe",
-                                              .search_path = search_path()},
-                                             clock_};
+    infra::ffmpeg::RecordingRemuxer remuxer_{
+        {.sandbox = ULW_SANDBOX_BIN, .search_path = search_path()}, clock_};
     os::UniqueFd read_;
     os::UniqueFd write_;
 };

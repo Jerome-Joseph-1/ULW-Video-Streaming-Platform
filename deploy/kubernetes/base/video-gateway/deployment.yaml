@@ -27,6 +27,9 @@ spec:
         app.kubernetes.io/name: video-gateway
         app.kubernetes.io/part-of: ulw
     spec:
+      # Its own account (serviceaccount.yaml), whose token nothing mounts here: the one Role it
+      # has is for live streams, which components/live-streams turns on (docs/adr/0092).
+      serviceAccountName: video-gateway
       automountServiceAccountToken: false
       enableServiceLinks: false
       # preStop 5 s + the gateway's 30 s drain deadline (Limits::drain_deadline), with 10 s

@@ -1,12 +1,15 @@
 # One live stream's packager (docs/adr/0046, 0083): live_packager takes the stream from LiveKit's
 # recorder over SRT, writes its HLS to the store, and once the stream ends queues its recording
 # as a video (ADR-0055). One process per stream, so one Job per stream, made from this template
-# by whatever starts the stream: the stream service once it exists, by hand until then
-# (RUNBOOK.md, step 9). It is in no kustomization, so applying an overlay never creates one.
+# by whatever starts the stream: the gateway's stream service (ADR-0092), which reads this file
+# from its image, or by hand (RUNBOOK.md, step 9). It is in no kustomization, so applying an
+# overlay never creates one.
 #
 # The template's variables, filled with envsubst naming exactly these (RUNBOOK.md, step 9). All
-# but the last two come from the environment's config.env, sourced as a shell file:
-#   NAMESPACE                as config.env says
+# but the last two come from the environment's config.env, sourced as a shell file; the gateway
+# fills the same names from its own settings (ULW_K8S_NAMESPACE, ULW_LIVE_PACKAGER_IMAGE_TAG,
+# ULW_LIVE_PACKAGER_PULL_POLICY, its store, ULW_LIVE_PACKAGER_SECRET), so both make one Job:
+#   LIVE_NAMESPACE           the packagers' own namespace (docs/adr/0092)
 #   LIVE_PACKAGER_IMAGE_TAG  a commit SHA that publish-images.yml pushed from main
 #                            (ghcr.io/jerome-joseph-1/ulw-live-packager), best
 #                            <sha>@sha256:<digest> from its run's summary; a pinned
@@ -25,7 +28,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: ${ULW_STREAM_ID}
-  namespace: ${NAMESPACE}
+  namespace: ${LIVE_NAMESPACE}
   labels:
     app.kubernetes.io/name: live-packager
     app.kubernetes.io/part-of: ulw
@@ -39,8 +42,10 @@ spec:
   # The longest stream is 12 h (ULW_LIVE_MAX_HOURS), and its recording is copied far faster
   # than real time; an hour more is a packager that is stuck.
   activeDeadlineSeconds: 46800
-  # Kept a day after it ends, for its log ("recording: queued as video <id>").
-  ttlSecondsAfterFinished: 86400
+  # Kept an hour after it ends, for its log ("recording: queued as video <id>"). The recording
+  # is queued before the process exits, so a finished Job's work is done; an hour keeps the
+  # namespace's Job count (its quota) to the streams of the last hour or so, not of a day.
+  ttlSecondsAfterFinished: 3600
   template:
     metadata:
       labels:
@@ -86,8 +91,10 @@ spec:
                   fieldPath: status.podIP
             - name: ULW_STREAM_ID
               value: ${ULW_STREAM_ID}
+            # Quoted: a user id may hold ':', '|' or '@', or be all digits, which a plain YAML
+            # scalar would not take as text, and never holds '"' or '\'.
             - name: ULW_STREAM_OWNER
-              value: ${ULW_STREAM_OWNER}
+              value: "${ULW_STREAM_OWNER}"
             # The SRT listener binds the pod's own address (numeric only), on the port the
             # Service and the NetworkPolicy name.
             - name: ULW_LIVE_INGEST_HOST
@@ -98,6 +105,11 @@ spec:
             # both defaults.
             - name: ULW_LIVE_SEGMENT_SECONDS
               value: "2"
+            # The relay calls within seconds of the Job's start (ADR-0092); a packager it never
+            # reaches, or one restarted after its relay went, ends and records the stream after
+            # this long instead of waiting out activeDeadlineSeconds.
+            - name: ULW_LIVE_CALLER_WAIT_SECONDS
+              value: "60"
             - name: ULW_STORAGE
               value: ${STORAGE}
             - name: ULW_R2_ACCOUNT_ID

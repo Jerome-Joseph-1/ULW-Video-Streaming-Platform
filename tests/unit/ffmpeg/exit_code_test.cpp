@@ -5,6 +5,8 @@
 #include <csignal>
 #include <filesystem>
 #include <gtest/gtest.h>
+#include <string_view>
+#include <utility>
 
 namespace {
 
@@ -137,6 +139,24 @@ TEST(Refusal, OnlyARejectionIsRefined) {
               TranscodeFailure::Crashed);
     EXPECT_EQ(infra::ffmpeg::refine(TranscodeFailure::Sandbox, 125, kDenied, ours),
               TranscodeFailure::Sandbox);
+}
+
+// The sandbox helper's refusals of the program it was built to run (docs/adr/0089): a name not
+// in its table, or a built-in path it may not execute, which it reports with the path and the
+// access error. Those are the host's, as Sandbox, before any refinement looks at the text.
+TEST(Refusal, TheHelpersRefusalOfItsBuiltInProgramIsASandboxFailure) {
+    const std::array ours{kSource, kOut, std::filesystem::path("/usr/bin")};
+    constexpr std::string_view kNotBuiltIn =
+        "ulw_sandbox: refusing to run ffmpeg7: not a program this helper was built to run\n";
+    constexpr std::string_view kNotExecutable =
+        "ulw_sandbox: refusing to run ffmpeg: /usr/bin/ffmpeg: Permission denied\n";
+    for (const auto& [code, text] : {std::pair{infra::ffmpeg::kProgramNotFound, kNotBuiltIn},
+                                     std::pair{infra::ffmpeg::kCannotExecute, kNotExecutable}}) {
+        const auto kind = classify(code, kExited, Ending::Exited);
+        ASSERT_EQ(kind, TranscodeFailure::Sandbox) << text;
+        EXPECT_EQ(infra::ffmpeg::refine(*kind, code, text, ours), TranscodeFailure::Sandbox)
+            << text;
+    }
 }
 
 TEST(Refusal, FfmpegsExitForAnAccessErrorIsOursWhateverItPrinted) {
