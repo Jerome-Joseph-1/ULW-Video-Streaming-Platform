@@ -656,12 +656,19 @@ jobs:
       # The browser client (ADR-0098): the same checks, natively and for wasm32, and its room
       # logic against an in-memory room. Its lock adds crates the bridge's fetch does not cover.
       # The quick lane runs them only when the pull request changed clients/web-mls/.
+      # The room tests run under Node, which the self-hosted host does not have.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: matrix.shard == 0 && needs.changes.outputs.web-mls == 'true'
+        with:
+          node-version: "24.21.0"
+          package-manager-cache: false
       - name: Browser MLS client (rustfmt, clippy, cargo test, room tests)
         if: matrix.shard == 0 && needs.changes.outputs.web-mls == 'true'
         working-directory: clients/web-mls
+        # rustup does not lock its own directory, so jobs sharing a host take turns.
         run: |
-          rustup component add rustfmt clippy
-          rustup target add wasm32-unknown-unknown
+          flock -w 900 "$HOME/.rustup-install.lock" rustup component add rustfmt clippy
+          flock -w 900 "$HOME/.rustup-install.lock" rustup target add wasm32-unknown-unknown
           cargo fetch --locked
           cargo fmt --check
           cargo clippy --locked --offline --all-targets -- -D warnings
