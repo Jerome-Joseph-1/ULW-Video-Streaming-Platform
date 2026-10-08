@@ -32,6 +32,29 @@ What to do:
   it elsewhere than `scope`) in config.env, and have your backend get that value into the tokens
   of the users who may upload.
 
+## 2026-10-08: chat and calls are Stable
+
+<!-- docs/integration/chat.md, docs/integration/calls.md, docs/integration/versioning.md, apps/chat/src/envelope.hpp, apps/chat/src/service_api.hpp, apps/chat/src/ring.hpp -->
+
+Chat and calls leave draft. Nothing in the protocol changes today: what [chat.md](chat.md) and
+[calls.md](calls.md) describe is what is served, and it is now kept under the compatibility rules
+in [versioning.md](versioning.md).
+
+| Before | Now |
+|---|---|
+| The chat WebSocket envelope (messages, acks, resume, history, member lists and the commands that change them, presence) was a draft until phase 2 | Stable |
+| Chat's service API (`POST /service/v1/<operation>` on `ULW_SERVICE_PORT`) was a draft with it | Stable |
+| Calls, 1:1 and group, were a draft until M26 | Stable |
+| Live streams and end-to-end encryption were drafts | Still drafts ([live.md](live.md), [e2ee.md](e2ee.md)) |
+
+What to do:
+
+- **Clients:** nothing to change. From now on a breaking change to chat or calls is announced
+  here ahead of time, as for the HTTP API; additive ones (a new field, message `type` or `error`
+  reason) may arrive without notice, so ignore what you do not know.
+- **Operators:** nothing to change. The service API's requests and answers, and the settings
+  chat and calls read ([operator-contract.md](operator-contract.md)), are kept the same way.
+
 ## 2026-10-04: videos shared by visibility and by grants
 
 <!-- core/src/video_access.cpp, apps/gateway/src/connection.cpp (on_video, start_update, start_service_route), apps/gateway/src/video_access.cpp, infra/auth/src/service_claim.cpp, migrations/0016_video_access.sql, docs/adr/0097-videos-shared-by-visibility-and-service-grants.md -->

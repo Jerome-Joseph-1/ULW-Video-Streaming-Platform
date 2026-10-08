@@ -13,7 +13,8 @@ against in HTML comments, for maintainers.
   (R2 or any S3-compatible store) over presigned URLs and never pass through the service.
 - **Identity** from the operator's identity provider: the same JWT the apps already hold,
   verified against the provider's JWKS. There are no ULW accounts.
-- **Realtime** (chat, calls, live streams, end-to-end encryption): in progress; see the drafts.
+- **Realtime**: chat (direct and group chats, history, presence, the operator's service API)
+  and 1:1 and group calls are Stable; live streams and end-to-end encryption are drafts.
 
 ## Pages
 
@@ -25,13 +26,13 @@ against in HTML comments, for maintainers.
 | [operator-contract.md](operator-contract.md) | What the operator provides; settings, health, readiness, metrics | Stable |
 | [versioning.md](versioning.md) | Compatibility and how changes are announced | Stable (policy is a proposal) |
 | [changelog.md](changelog.md) | Changes to the Stable pages a client may have to act on | Stable |
-| [chat.md](chat.md) | WebSocket endpoint, envelope, resume, history and member lists | Draft until phase 2 |
-| [calls.md](calls.md) | 1:1 calls; group calls are planned, not available | Draft until M26 |
+| [chat.md](chat.md) | WebSocket endpoint, envelope, resume, history, member lists, presence and the service API | Stable |
+| [calls.md](calls.md) | 1:1 and group calls | Stable |
 | [live.md](live.md) | Live streams | Draft until M33 |
 | [e2ee.md](e2ee.md) | End-to-end encrypted chat | Draft until M22 |
 
-"Stable" means the `/api/v1` contract described there is kept under the rules in
-[versioning.md](versioning.md). "Draft" pages change without notice until the milestone named
+"Stable" means the contract described there (the `/api/v1` endpoints, and chat's WebSocket and
+service API) is kept under the rules in [versioning.md](versioning.md). "Draft" pages change without notice until the milestone named
 at their top merges.
 
 ## Base URLs and environments

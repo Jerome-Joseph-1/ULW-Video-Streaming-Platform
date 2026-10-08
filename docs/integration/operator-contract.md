@@ -437,7 +437,7 @@ database said they no longer rest on a shared chat; a watch it cannot check is h
 (401: no bearer token, or one that fails verification), `{result="forbidden"}` (403: a valid token
 that is not the service's; a user trying the port), `{result="rate_limited"}` (429: the service's rate, or an address past its failures' budget),
 `{result="bad_request"}` (another path, method or body), `{result="refused"}` (409 or 404: the
-change the database refused) and `{result="unavailable"}` (503). Chat is a draft
+change the database refused) and `{result="unavailable"}` (503). Chat is Stable
 ([chat.md](chat.md)).
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that

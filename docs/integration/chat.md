@@ -1,9 +1,10 @@
 # Chat
 
-> **Draft until phase 2 is tagged.** Messages, acks, resume, history, member lists (and the
-> [commands that change them](#changing-member-lists)) and [presence](#presence) below are what
-> `main` does. Nothing here is expected to change before
-> the tag, but it is not a compatibility promise until then.
+> **Stable.** The WebSocket envelope (messages, acks, resume, history, member lists, the
+> [commands that change them](#changing-member-lists) and [presence](#presence)) and
+> [the service API](#the-service-api) are kept under the compatibility rules in
+> [versioning.md](versioning.md). End-to-end encrypted rooms follow [e2ee.md](e2ee.md), which is
+> still a draft.
 
 Chat is its own service, `chat_server`, separate from the video gateway (ADR-0019). Clients hold
 one WebSocket to it and send JSON messages in text frames.
