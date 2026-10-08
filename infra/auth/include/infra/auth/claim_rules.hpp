@@ -26,6 +26,11 @@ struct ClaimRules {
     // ULW_SERVICE_CLIENT_ID: when set, the service's token must also name this client (azp or
     // client_id). Empty: any client.
     std::string service_client_id{};
+    // ULW_UPLOADER_CLAIM and ULW_UPLOADER_SCOPE (ADR-0100, read by read_uploader_claim): a token
+    // may create an upload only when its claim of this name holds this value, matched as the
+    // service's is. No value: every token may.
+    std::string uploader_claim{};
+    std::string uploader_value{};
     // NOLINTEND(readability-redundant-member-init)
 };
 

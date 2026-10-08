@@ -71,6 +71,10 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_SERVICE_CLAIM", .key = "auth.service_claim"},
     ops::Setting{.env = "ULW_SERVICE_SCOPE", .key = "auth.service_scope"},
     ops::Setting{.env = "ULW_SERVICE_CLIENT_ID", .key = "auth.service_client_id"},
+    // Who may create uploads, by a claim the operator's backend has put in their token
+    // (ADR-0100).
+    ops::Setting{.env = "ULW_UPLOADER_CLAIM", .key = "auth.uploader_claim"},
+    ops::Setting{.env = "ULW_UPLOADER_SCOPE", .key = "auth.uploader_scope"},
     ops::Setting{.env = "ULW_AUTH_COOKIE", .key = "auth.cookie"},
     ops::Setting{.env = "ULW_ALLOWED_ORIGINS", .key = "auth.allowed_origins"},
     ops::Setting{.env = "ULW_ALLOW_SAME_SITE", .key = "auth.allow_same_site"},
@@ -316,6 +320,13 @@ std::expected<void, ConfigError> load_auth(const EnvLookup& env, Config& config)
     config.service_claim = std::move(service->claim);
     config.service_value = std::move(service->value);
     config.service_client_id = std::move(service->client_id);
+    auto uploader = infra::auth::read_uploader_claim(lookup(env, "ULW_UPLOADER_CLAIM"),
+                                                     lookup(env, "ULW_UPLOADER_SCOPE"));
+    if (!uploader) {
+        return error(uploader.error().variable, uploader.error().reason);
+    }
+    config.uploader_claim = std::move(uploader->claim);
+    config.uploader_value = std::move(uploader->value);
     config.limits.auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token");
     if (const auto list = lookup(env, "ULW_ALLOWED_ORIGINS")) {
         auto origins = http::parse_origin_list(*list);
@@ -918,7 +929,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
     for (const std::string& origin : config.limits.allowed_origins) {
         origins += (origins.empty() ? "" : ",") + origin;
     }
-    const std::array<std::pair<std::string_view, std::string>, 37> values{{
+    const std::array<std::pair<std::string_view, std::string>, 39> values{{
         {"ULW_LISTEN_PORT", std::to_string(config.port)},
         {"ULW_REACTOR", std::string(net::to_string(config.reactor))},
         {"ULW_TRANSPORT", config.transport == Transport::Tls ? "tls" : "plain"},
@@ -957,6 +968,8 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_SERVICE_CLAIM", config.service_value.empty() ? "" : config.service_claim},
         {"ULW_SERVICE_SCOPE", config.service_value},
         {"ULW_SERVICE_CLIENT_ID", config.service_client_id},
+        {"ULW_UPLOADER_CLAIM", config.uploader_value.empty() ? "" : config.uploader_claim},
+        {"ULW_UPLOADER_SCOPE", config.uploader_value},
         {"ULW_AUTH_COOKIE", config.limits.auth_cookie},
         {"ULW_ALLOWED_ORIGINS", origins},
         {"ULW_ALLOW_SAME_SITE", config.limits.allow_same_site ? "1" : ""},

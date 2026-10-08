@@ -2,6 +2,7 @@
 
 #include <format>
 #include <optional>
+#include <string>
 
 namespace reaper {
 
@@ -77,11 +78,73 @@ void forget_rooms(core::ports::IUnusedRooms& rooms, const core::ports::IClock& c
     }
 }
 
+// Removes every object a deleted video left: the source and the HLS renditions, all under
+// videos/<id>/. A key gone already is fine: a pass that stopped halfway runs again.
+std::optional<std::string> remove_objects(core::ports::IObjectAdmin& admin,
+                                          const core::VideoId& video) {
+    using core::ports::StorageError;
+    const std::string prefix = "videos/" + video.to_string() + "/";
+    const auto keys = admin.list(prefix);
+    if (!keys) {
+        return std::format("list {}: {}", prefix, core::ports::to_string(keys.error()));
+    }
+    for (const core::StorageKey& key : *keys) {
+        if (const auto removed = admin.remove(key);
+            !removed && removed.error() != StorageError::NotFound) {
+            return std::format("remove {}: {}", key.view(),
+                               core::ports::to_string(removed.error()));
+        }
+    }
+    return std::nullopt;
+}
+
+void purge_videos(core::ports::IVideoPurges& purges, core::ports::IObjectAdmin& admin,
+                  const Options& options, Report& report) {
+    for (std::size_t looked = 0; looked < options.videos_per_pass; looked += options.batch) {
+        const auto due = purges.due(options.batch);
+        if (!due) {
+            report.problems.push_back(
+                std::format("purge deleted videos: {}", core::ports::to_string(due.error())));
+            return;
+        }
+        bool all_purged = true;
+        for (const core::VideoId& video : *due) {
+            if (const auto problem = remove_objects(admin, video)) {
+                report.problems.push_back(*problem);
+                ++report.videos_purge_failed;
+                all_purged = false;
+                continue;
+            }
+            const auto forgotten = purges.forget(video);
+            if (!forgotten) {
+                report.problems.push_back(std::format("forget deleted video {}: {}",
+                                                      video.to_string(),
+                                                      core::ports::to_string(forgotten.error())));
+                ++report.videos_purge_failed;
+                all_purged = false;
+                continue;
+            }
+            if (!*forgotten) {
+                // A job was put back for it: it comes due again once that is cancelled.
+                all_purged = false;
+                continue;
+            }
+            ++report.videos_purged;
+        }
+        // A short batch means there are no more due; one that left some behind would only find
+        // them again.
+        if (due->size() < options.batch || !all_purged) {
+            return;
+        }
+    }
+}
+
 } // namespace
 
 Report run_once(core::ports::IUploadExpiry& uploads, core::ports::IIngestStore& store,
                 core::ports::IObjectAdmin& admin, core::ports::IUnusedRooms& rooms,
-                const core::ports::IClock& clock, const Options& options) {
+                core::ports::IVideoPurges& purges, const core::ports::IClock& clock,
+                const Options& options) {
     Report report;
     expire_uploads(uploads, store, admin, clock, options, report);
     const auto swept = admin.reap_abandoned(clock.wall_now() - options.orphan_after);
@@ -92,6 +155,7 @@ Report run_once(core::ports::IUploadExpiry& uploads, core::ports::IIngestStore& 
             std::format("sweep orphaned uploads: {}", core::ports::to_string(swept.error())));
     }
     forget_rooms(rooms, clock, options, report);
+    purge_videos(purges, admin, options, report);
     return report;
 }
 
@@ -103,9 +167,13 @@ std::string metrics_text(const Report& report) {
                        "# TYPE reaper_parts_orphaned_last_run gauge\n"
                        "reaper_parts_orphaned_last_run {}\n"
                        "# TYPE reaper_chat_rooms_forgotten_last_run gauge\n"
-                       "reaper_chat_rooms_forgotten_last_run {}\n",
+                       "reaper_chat_rooms_forgotten_last_run {}\n"
+                       "# TYPE reaper_videos_purged_last_run gauge\n"
+                       "reaper_videos_purged_last_run {}\n"
+                       "# TYPE reaper_videos_purge_failed_last_run gauge\n"
+                       "reaper_videos_purge_failed_last_run {}\n",
                        report.uploads_expired, report.uploads_release_failed, report.parts_orphaned,
-                       report.rooms_forgotten);
+                       report.rooms_forgotten, report.videos_purged, report.videos_purge_failed);
 }
 
 } // namespace reaper

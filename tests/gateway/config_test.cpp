@@ -952,6 +952,46 @@ TEST_F(ConfigTest, TheServiceScopeAndItsClaimAreReadAndLogged) {
     EXPECT_NE(log.find(R"("name":"ULW_SERVICE_SCOPE","value":"ulw:admin")"), std::string::npos);
 }
 
+// ADR-0100: who may create uploads, by a claim of their tokens; off unless a scope is set.
+TEST_F(ConfigTest, EveryoneMayUploadUnlessAnUploaderScopeIsSet) {
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->uploader_claim, "scope");
+    EXPECT_TRUE(config->uploader_value.empty());
+    // The default claim named without a scope is still off, as for the service.
+    env["ULW_UPLOADER_CLAIM"] = "scope";
+    const auto named = load();
+    ASSERT_TRUE(named) << named.error().variable << ": " << named.error().reason;
+    EXPECT_TRUE(named->uploader_value.empty());
+}
+
+TEST_F(ConfigTest, TheUploaderScopeAndItsClaimAreReadAndLogged) {
+    env["ULW_UPLOADER_SCOPE"] = "video:upload";
+    const auto scoped = load();
+    ASSERT_TRUE(scoped) << scoped.error().variable << ": " << scoped.error().reason;
+    EXPECT_EQ(scoped->uploader_claim, "scope");
+    EXPECT_EQ(scoped->uploader_value, "video:upload");
+    env["ULW_UPLOADER_CLAIM"] = "roles";
+    const auto config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    EXPECT_EQ(config->uploader_claim, "roles");
+    const std::string log = effective_log(*config);
+    EXPECT_NE(log.find(R"("name":"ULW_UPLOADER_CLAIM","value":"roles")"), std::string::npos);
+    EXPECT_NE(log.find(R"("name":"ULW_UPLOADER_SCOPE","value":"video:upload")"), std::string::npos);
+    // Independent of the service's settings.
+    EXPECT_TRUE(config->service_value.empty());
+}
+
+TEST_F(ConfigTest, AnUploaderClaimOrScopeThatCannotWorkIsRefused) {
+    env["ULW_UPLOADER_CLAIM"] = "roles";
+    EXPECT_EQ(refused_variable(), "ULW_UPLOADER_CLAIM");
+    env["ULW_UPLOADER_SCOPE"] = "video upload";
+    EXPECT_EQ(refused_variable(), "ULW_UPLOADER_SCOPE");
+    env["ULW_UPLOADER_SCOPE"] = "video:upload";
+    env["ULW_UPLOADER_CLAIM"] = "aud";
+    EXPECT_EQ(refused_variable(), "ULW_UPLOADER_CLAIM");
+}
+
 TEST_F(ConfigTest, AServiceClaimOrScopeThatCannotWorkIsRefused) {
     env["ULW_SERVICE_CLAIM"] = "roles";
     EXPECT_EQ(refused_variable(), "ULW_SERVICE_CLAIM");

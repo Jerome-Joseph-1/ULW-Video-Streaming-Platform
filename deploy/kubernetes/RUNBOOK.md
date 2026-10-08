@@ -426,11 +426,19 @@ upload owns (docs/adr/0049). It also forgets direct and group chat rooms that a 
 recorded more than a day ago and nothing used since (no members, never on the room plane),
 however old; a stream's live chat is never forgotten. It looks at 10,000 rooms a pass at most,
 from where the last pass stopped, and starts over from the oldest once it reaches the cutoff
-(`chat_rooms_forget_cursor`, docs/adr/0075). Each pass prints
+(`chat_rooms_forget_cursor`, docs/adr/0075). Last, it purges deleted videos (docs/adr/0100):
+for each video its owner deleted or your backend took down, longest deleted first and up to
+1,000 a pass, it removes every object under `videos/<id>/` (the source and the HLS renditions),
+then the video's row, which takes its upload, jobs, renditions and grants with it. A video a
+transcode still runs for waits until the job ends; one whose objects cannot all be removed stays
+queued (`video_purges`) for the next pass. Each pass prints
 `reaper_uploads_expired_last_run`, `reaper_uploads_release_failed_last_run`,
-`reaper_parts_orphaned_last_run` and `reaper_chat_rooms_forgotten_last_run` on stdout, as
-gauges; a non-zero exit, so a failed Job, means a phase failed or an upload's release was not
-confirmed, and the Job's log says which.
+`reaper_parts_orphaned_last_run`, `reaper_chat_rooms_forgotten_last_run`,
+`reaper_videos_purged_last_run` and `reaper_videos_purge_failed_last_run` on stdout, as
+gauges; a non-zero exit, so a failed Job, means a phase failed, an upload's release was not
+confirmed or a deleted video's objects were not all removed, and the Job's log says which. The
+reaper's role needs `DELETE` on `videos` and `video_purges` and `UPDATE` on `jobs`; the
+gateway's role, which it runs as, has them.
 
 **Deploy the release that carries migration 0010 off-peak.** Migrations run inside a
 transaction, so its index on `chat_rooms (recorded_at, room_id)` is built without
@@ -478,6 +486,24 @@ The gateway now reads `chat_members` on each video request to decide who may see
 with a room; nothing else changes about chat's tables. Follow-up once 0016 is everywhere: a
 later migration validates `videos_visibility` and `videos_visibility_room` with
 `VALIDATE CONSTRAINT`.
+
+**Migration 0017 (deleted videos, docs/adr/0100) comes after 0016.** It only creates
+`video_purges`, an empty table with no foreign key, and its index: nothing else is locked or
+scanned, so it needs no off-peak window. Deploy the gateway and the reaper from the same release
+(they share the image): a gateway that deletes videos needs the table, and only a reaper that
+knows it removes their objects. To restore a video deleted by mistake before the reaper's next
+pass (at most 15 minutes), clear its mark and its queue entry together:
+
+```sql
+BEGIN;
+UPDATE videos SET deleted_at = NULL WHERE id = '<video uuid>';
+DELETE FROM video_purges WHERE video_id = '<video uuid>';
+COMMIT;
+```
+
+Its grants are gone and are not restored; a transcode that was still queued was cancelled, so a
+video restored in `processing` needs its job queued again. A restored video whose entry stays is
+never purged, but stays queued.
 
 Who may see a video (docs/integration/videos-and-playback.md, "Who can see a video") is set by
 its owner and by your backend through the grants API. As the service's role, an operator may
@@ -554,6 +580,7 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `JWT_SUBJECT_CLAIM` | The claim that names the user, `sub` unless your provider uses another | `ULW_JWT_SUBJECT_CLAIM` |
 | `SERVICE_CLAIM`, `SERVICE_SCOPE` | Which tokens are your backend's, for chat's service API (docs/integration/auth.md, "Service tokens"; step 10): the claim (`scope` by default) and the value only your backend's client-credentials client is granted. Empty `SERVICE_SCOPE`: no token is, and chat has no service API | chat's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE` |
 | `SERVICE_CLAIM`, `SERVICE_SCOPE`, `SERVICE_CLIENT_ID` | Which tokens are your backend's, for the gateway's grants API (docs/integration/auth.md, "Service tokens"): the claim (empty for `scope`), the value only your backend's client-credentials client is granted, and that client's id (recommended; matched against `azp` or `client_id`). Empty `SERVICE_SCOPE`: no token is, and the grants API answers 403 | the gateway's `ULW_SERVICE_CLAIM`, `ULW_SERVICE_SCOPE`, `ULW_SERVICE_CLIENT_ID` |
+| `UPLOADER_CLAIM`, `UPLOADER_SCOPE` | Who may create uploads (docs/integration/uploads.md, docs/adr/0100): the claim (empty for `scope`) and the value your backend has the identity provider put in the tokens of the users it lets upload. Empty `UPLOADER_SCOPE`: every signed-in user may, as before | the gateway's `ULW_UPLOADER_CLAIM`, `ULW_UPLOADER_SCOPE` |
 | `AUTH_COOKIE`, `ALLOWED_ORIGINS` | The token cookie, and the web app's pages that may use it | `ULW_AUTH_COOKIE`, `ULW_ALLOWED_ORIGINS` |
 | `STORAGE`, `R2_ACCOUNT_ID`, `S3_ENDPOINT`, `BUCKET` | The object store: `r2` with an account id, or `minio` (any S3-compatible store) with an endpoint; the unused one empty | `ULW_STORAGE` and the rest, for the gateway, worker, reaper and packagers |
 | `VIDEO_GATEWAY_IMAGE_TAG`, `VIDEO_WORKER_IMAGE_TAG`, `CHAT_IMAGE_TAG`, `LIVE_PACKAGER_IMAGE_TAG` | Which build runs: `main`, a commit SHA, or `<sha>@sha256:<digest>` (4a) | each image's tag |
@@ -618,7 +645,8 @@ The routes serve `/api/v1/uploads`, `/api/v1/videos`, `/api/v1/live` and
 one shared Gateway, so a route without `hostnames:` would answer the other environments' hosts
 too. To serve a second host, patch it into the three HTTPRoutes' `spec.hostnames`.
 
-`/api/v1/service/videos` is your backend's grants API (docs/adr/0097). It is routed publicly
+`/api/v1/service/videos` is your backend's API: grants (docs/adr/0097), and a user's videos
+listed, a video's visibility set and a video taken down (docs/adr/0100). It is routed publicly
 because a backend usually calls from outside the cluster, and the gateway admits only a bearer
 token whose `SERVICE_SCOPE` (and `SERVICE_CLIENT_ID`) is your backend's; with `SERVICE_SCOPE`
 empty it answers 403 to everyone. To narrow it: if your backend has fixed egress addresses, move

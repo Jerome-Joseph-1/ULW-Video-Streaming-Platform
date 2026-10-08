@@ -76,9 +76,14 @@ public:
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
     void find_video_for(const core::VideoId& id, const core::UserId& viewer,
                         core::ports::CatalogCallback<core::ports::VideoView> done) override;
-    void set_visibility(const core::VideoId& id, const core::UserId& owner,
+    void set_visibility(const core::VideoId& id, const std::optional<core::UserId>& owner,
                         const core::Visibility& visibility,
                         core::ports::CatalogCallback<core::VideoRecord> done) override;
+    void delete_video(const core::VideoId& id, const std::optional<core::UserId>& owner,
+                      core::ports::CatalogCallback<void> done) override;
+    void list_videos(const core::UserId& owner, std::optional<core::ports::VideoCursor> after,
+                     std::size_t limit,
+                     core::ports::CatalogCallback<core::ports::VideoPage> done) override;
     void grant_access(const core::VideoId& id, const core::UserId& user,
                       core::ports::CatalogCallback<void> done) override;
     void revoke_access(const core::VideoId& id, const core::UserId& user,

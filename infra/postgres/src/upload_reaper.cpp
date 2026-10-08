@@ -7,8 +7,10 @@
 #include "sync_connection.hpp"
 
 #include <chrono>
+#include <cstdint>
 #include <optional>
 #include <utility>
+#include <vector>
 
 namespace infra::postgres {
 
@@ -93,6 +95,42 @@ moved AS (
               FROM lap LEFT JOIN last ON true)
     RETURNING 1)
 SELECT (SELECT count(*) FROM gone), (SELECT finished FROM lap), (SELECT count(*) FROM moved))sql";
+
+// Deleted videos whose objects may go now (ADR-0100), longest deleted first, from video_purges by
+// its index: none has a job queued or running, and none was restored (deleted_at cleared) by an
+// operator. A job still queued for one, or put back after its worker's lease lapsed, is
+// cancelled in the same statement; its video comes due at the next call, as the statement's
+// own look at jobs still sees the job queued.
+constexpr Sql kDuePurges = R"sql(
+WITH cancelled AS (
+    UPDATE jobs SET state = 'failed', last_error = 'video deleted'
+     WHERE state = 'queued'
+       AND video_id IN (SELECT p.video_id FROM video_purges p
+                          JOIN videos v ON v.id = p.video_id
+                         WHERE v.deleted_at IS NOT NULL))
+SELECT p.video_id FROM video_purges p
+ WHERE NOT EXISTS (SELECT 1 FROM jobs j
+                    WHERE j.video_id = p.video_id AND j.state IN ('queued', 'running'))
+   AND NOT EXISTS (SELECT 1 FROM videos v WHERE v.id = p.video_id AND v.deleted_at IS NULL)
+ ORDER BY p.deleted_at
+ LIMIT $1)sql";
+
+// The row goes, and its upload, jobs, renditions and grants with it (ON DELETE CASCADE), unless
+// a job is queued or running for it again; the queue's entry goes with the row, or alone when
+// the row is gone already. Answers whether the entry went.
+constexpr Sql kForgetPurged = R"sql(
+WITH gone AS (
+    DELETE FROM videos v
+     WHERE v.id = $1 AND v.deleted_at IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM jobs j
+                        WHERE j.video_id = v.id AND j.state IN ('queued', 'running'))
+    RETURNING v.id),
+dequeued AS (
+    DELETE FROM video_purges
+     WHERE video_id = $1
+       AND (EXISTS (SELECT 1 FROM gone) OR NOT EXISTS (SELECT 1 FROM videos WHERE id = $1))
+    RETURNING 1)
+SELECT count(*) FROM dequeued)sql";
 
 CatalogError to_catalog_error(DbError e) noexcept {
     switch (e) {
@@ -215,6 +253,42 @@ PgUploadReaper::forget_unused(core::WallTime recorded_before, std::size_t limit)
     }
     return core::ports::UnusedRoomsScan{.forgotten = static_cast<std::size_t>(*forgotten),
                                         .finished = *finished == "t"};
+}
+
+std::expected<std::vector<core::VideoId>, CatalogError> PgUploadReaper::due(std::size_t limit) {
+    auto conn = impl_->session();
+    if (!conn) {
+        return std::unexpected(conn.error());
+    }
+    auto rows = (*conn)->exec(kDuePurges, Params{}.add_int(static_cast<std::int64_t>(limit)));
+    if (!rows) {
+        return failure(rows.error());
+    }
+    std::vector<core::VideoId> videos;
+    for (int row = 0; row < rows->rows(); ++row) {
+        const auto id = domain_at<core::VideoId>(*rows, row, 0);
+        if (!id) {
+            return std::unexpected(CatalogError::Corrupt);
+        }
+        videos.push_back(*id);
+    }
+    return videos;
+}
+
+std::expected<bool, CatalogError> PgUploadReaper::forget(const core::VideoId& video) {
+    auto conn = impl_->session();
+    if (!conn) {
+        return std::unexpected(conn.error());
+    }
+    auto done = (*conn)->exec(kForgetPurged, Params{}.add_uuid(video.uuid()));
+    if (!done) {
+        return failure(done.error());
+    }
+    const auto dequeued = done->get(0, 0).and_then(parse_uint64);
+    if (!dequeued) {
+        return std::unexpected(CatalogError::Corrupt);
+    }
+    return *dequeued == 1;
 }
 
 } // namespace infra::postgres

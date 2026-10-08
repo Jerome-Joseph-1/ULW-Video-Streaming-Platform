@@ -155,6 +155,15 @@ bool is_service(const core::json::Value& doc, const ClaimRules& rules) noexcept 
            names_client(doc, rules.service_client_id);
 }
 
+// The uploader rule, read as leniently: a token that may not upload still serves its user.
+bool may_upload(const core::json::Value& doc, const ClaimRules& rules) noexcept {
+    if (rules.uploader_value.empty()) {
+        return true;
+    }
+    const core::json::Value* claim = doc.find(rules.uploader_claim);
+    return claim != nullptr && claim_holds(*claim, rules.uploader_value);
+}
+
 } // namespace
 
 VerifyResult check_claims(std::string_view payload, const ClaimRules& rules, core::WallTime now) {
@@ -205,7 +214,8 @@ VerifyResult check_claims(std::string_view payload, const ClaimRules& rules, cor
                   .email = std::move(*email),
                   .expires_at = *expires_at,
                   .may_broadcast = matches(*doc, rules),
-                  .is_service = is_service(*doc, rules)};
+                  .is_service = is_service(*doc, rules),
+                  .may_upload = may_upload(*doc, rules)};
 }
 
 VerifyResult authenticate(const CompactJws& jws, const PublicKey& key, const ClaimRules& rules,

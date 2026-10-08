@@ -147,6 +147,27 @@ replacements:
           name: video-gateway
         fieldPaths:
           - spec.template.spec.containers.[name=gateway].env.[name=ULW_SERVICE_CLIENT_ID].value
+  # ULW_UPLOADER_CLAIM and ULW_UPLOADER_SCOPE of the gateway (ADR-0100).
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.UPLOADER_CLAIM
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_UPLOADER_CLAIM].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.UPLOADER_SCOPE
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_UPLOADER_SCOPE].value
   # ULW_AUTH_COOKIE of the gateway and chat.
   - source:
       kind: ConfigMap

@@ -301,6 +301,12 @@ bool GatewayUnderTest::finished() {
     return out;
 }
 
+std::vector<core::VideoId> GatewayUnderTest::purges() {
+    std::vector<core::VideoId> out;
+    on_loop([&] { out = loop_->catalog->purges(); });
+    return out;
+}
+
 std::vector<infra::catalog::MemoryCatalog::Job> GatewayUnderTest::jobs() {
     std::vector<infra::catalog::MemoryCatalog::Job> out;
     on_loop([&] { out = loop_->catalog->jobs(); });

@@ -85,6 +85,26 @@ struct GrantPage {
     bool more = false;
 };
 
+// Where a page of one user's videos resumes (ADR-0100): after the video with this id, created at
+// this instant (Unix microseconds, the database's own precision), in newest-first order.
+struct VideoCursor {
+    std::int64_t created_at_us = 0;
+    VideoId id;
+};
+
+// One video of a user's listing, and when it was created.
+struct ListedVideo {
+    VideoRecord video;
+    std::int64_t created_at_us = 0;
+};
+
+// A user's videos, newest first (created_at, then id, both descending), deleted ones left out.
+struct VideoPage {
+    std::vector<ListedVideo> videos;
+    // More follow the last one here.
+    bool more = false;
+};
+
 // Upload and video metadata as the gateway sees it. Every call is asynchronous: the gateway's
 // reactor thread issues it and continues.
 class IUploadCatalog {
@@ -129,12 +149,27 @@ public:
     // the room the video is shared with, and whether they hold a grant of it.
     virtual void find_video_for(const VideoId& id, const UserId& viewer,
                                 CatalogCallback<VideoView> done) = 0;
-    // NotFound unless `owner` owns a video by that id, exactly as for one that does not exist.
-    // Forbidden when `visibility` names a room chat_members does not list `owner` in. Answers
-    // the video as it now stands.
-    virtual void set_visibility(const VideoId& id, const UserId& owner,
+    // NotFound unless `owner` owns a video by that id, exactly as for one that does not exist;
+    // without an owner (the operator's backend, ADR-0100), unless a video by that id exists.
+    // Forbidden when `visibility` names a room chat_members does not list the video's owner in.
+    // Answers the video as it now stands.
+    virtual void set_visibility(const VideoId& id, const std::optional<UserId>& owner,
                                 const Visibility& visibility,
                                 CatalogCallback<VideoRecord> done) = 0;
+    // Deletes a committed video (processing, ready or failed) for good (ADR-0100): from this
+    // call on every read finds no such video, its grants are gone, a transcode job still queued
+    // for it is cancelled, and its stored objects are queued for the reaper, which removes them
+    // and then the row. With `owner`, only a video of theirs; without (the operator's backend),
+    // any. Idempotent: a video deleted already, and not removed by the reaper yet, succeeds
+    // again. NotFound when no video by that id exists (or is not `owner`'s, or the reaper has
+    // removed it); Conflict while its upload is in progress (init or uploading).
+    virtual void delete_video(const VideoId& id, const std::optional<UserId>& owner,
+                              CatalogCallback<void> done) = 0;
+    // At most `limit` of `owner`'s videos that are not deleted, newest first, from after
+    // `after` (from the newest without one), every state included. A user with none gets an
+    // empty page.
+    virtual void list_videos(const UserId& owner, std::optional<VideoCursor> after,
+                             std::size_t limit, CatalogCallback<VideoPage> done) = 0;
     // Both idempotent: a grant held already, or a revoke of one not held, succeeds. NotFound
     // when no video has that id.
     virtual void grant_access(const VideoId& id, const UserId& user,
