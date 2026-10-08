@@ -67,7 +67,8 @@ async function s3Request(method, path) {
   const region = 'us-east-1';
   const payload = createHash('sha256').update('').digest('hex');
   const headers = { host: s3.endpoint.host, 'x-amz-content-sha256': payload, 'x-amz-date': now };
-  const signed = Object.keys(headers).sort();
+  // SigV4 orders the canonical headers by their lowercase names' character codes, not by locale.
+  const signed = Object.keys(headers).sort((a, b) => (a < b ? -1 : Number(a > b)));
   const canonical = [method, path, '', signed.map((h) => `${h}:${headers[h]}\n`).join(''),
     signed.join(';'), payload].join('\n');
   const scope = `${date}/${region}/s3/aws4_request`;
@@ -104,7 +105,10 @@ async function ensureBucket() {
 const key = loadKey();
 console.log(`key set written to ${keyDir}/jwks.json (kid ${key.kid}); issuer ${issuer}`);
 let ready = false;
-ensureBucket().then(() => { ready = true; console.log('ready'); });
+ensureBucket().then(() => { ready = true; console.log('ready'); }, (e) => {
+  console.error(`bucket setup failed: ${e.message}`);
+  process.exit(1);
+});
 
 const send = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' });
@@ -112,7 +116,8 @@ const send = (res, status, body) => {
 };
 
 http.createServer((req, res) => {
-  const url = new URL(req.url, 'http://auth');
+  // A base only to parse the path and query; the host is never used.
+  const url = new URL(req.url, 'http://localhost');
   if (req.method === 'GET' && url.pathname === '/auth/healthz') {
     return send(res, ready ? 200 : 503, { ready });
   }

@@ -7,8 +7,11 @@ import { initCalls, refreshCalls } from './calls.js';
 import { relist, useRoomsApi } from './rooms.js';
 import { initLive } from './live.js';
 
-function showTab(name) {
-  for (const b of document.querySelectorAll('#tabs button')) b.classList.toggle('active', b.dataset.tab === name);
+function showTab(requested) {
+  // Only a tab the page has: the name may come from the URL.
+  const buttons = [...document.querySelectorAll('#tabs button')];
+  const name = buttons.find((b) => b.dataset.tab === requested)?.dataset.tab ?? 'videos';
+  for (const b of buttons) b.classList.toggle('active', b.dataset.tab === name);
   for (const s of document.querySelectorAll('.tab')) s.hidden = s.id !== `tab-${name}`;
   try { sessionStorage.setItem('ulw-demo:tab', name); } catch { /* ignore */ }
 }

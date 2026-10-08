@@ -33,7 +33,7 @@ export function initVideos() {
     if (upload.paused) {
       upload.paused = false;
       $('pause').textContent = 'Pause';
-      resume();
+      resume().catch((e) => status(`upload stopped: ${e.message}; press Upload to resume`));
     } else {
       upload.paused = true;
       upload.controller?.abort();
@@ -43,7 +43,7 @@ export function initVideos() {
   });
   renderVideos();
   for (const v of store.get('videos', [])) {
-    if (v.state !== 'ready' && v.state !== 'failed') poll(v.id);
+    if (v.state !== 'ready' && v.state !== 'failed') watchState(v.id);
   }
 }
 
@@ -58,7 +58,7 @@ export function addVideo(id, title, state = 'processing') {
     store.set('videos', videos);
   }
   renderVideos();
-  poll(id);
+  watchState(id);
 }
 
 function updateVideo(id, patch) {
@@ -83,6 +83,11 @@ function renderVideos() {
       el('span', { class: `state ${v.state}` }, v.state + (v.error ? `: ${v.error}` : '')),
       playButton));
   }
+}
+
+// Polls in the background; a poll that stops on an error is logged, and a reload starts it again.
+function watchState(id) {
+  poll(id).catch((e) => log('video_poll_failed', { id, error: e.message }));
 }
 
 // GET /api/v1/videos/{id} every 2 s until ready or failed.
@@ -178,7 +183,7 @@ async function resume() {
   status(`uploaded; the worker is transcoding it (${c.data.state})`);
   log('upload_committed', { video: u.videoId });
   updateVideo(u.videoId, { state: c.data.state });
-  poll(u.videoId);
+  watchState(u.videoId);
   upload = null;
 }
 
@@ -269,7 +274,7 @@ async function makeClip(seconds = 6) {
   await new Promise((resolve) => { recorder.onstop = resolve; recorder.stop(); });
   clearInterval(timer);
   osc.stop();
-  audio.close();
+  await audio.close();
   const mime = type.split(';')[0];
   const ext = mime === 'video/mp4' ? 'mp4' : 'webm';
   return new File(parts, `clip-${new Date().toISOString().slice(11, 19).replace(/:/g, '')}.${ext}`,

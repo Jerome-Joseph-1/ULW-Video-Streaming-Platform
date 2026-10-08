@@ -24,7 +24,7 @@ export function initLive() {
   $('watch-form').addEventListener('submit', (e) => {
     e.preventDefault();
     const id = $('watch-id').value.trim();
-    if (id) watch(id);
+    if (id) watch(id).catch((e) => toast(`could not watch ${id}: ${e.message}`));
   });
   $('live-composer').addEventListener('submit', (e) => {
     e.preventDefault();
@@ -38,7 +38,7 @@ export function initLive() {
     const s = streams.get(body.id) ?? { id: body.id, owner: sender, state: 'unknown' };
     if (body.what === 'ended') s.state = 'ended';
     streams.set(body.id, s);
-    refresh(body.id);
+    refresh(body.id).catch((e) => log('live_refresh_failed', { id: body.id, error: e.message }));
   });
   // A stream's live chat (lossy): the room chat.js does not own.
   chat.addEventListener('joined', (e) => {
@@ -58,7 +58,9 @@ export function initLive() {
       $('live-messages').replaceChildren(el('li', { class: 'system' }, `live chat unavailable (${e.m.reason})`));
     }
   });
-  setInterval(() => { for (const id of streams.keys()) refresh(id); }, 5000);
+  setInterval(() => {
+    for (const id of streams.keys()) refresh(id).catch((e) => log('live_refresh_failed', { id, error: e.message }));
+  }, 5000);
 }
 
 async function refresh(id) {

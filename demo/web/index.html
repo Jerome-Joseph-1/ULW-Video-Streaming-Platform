@@ -43,7 +43,7 @@
         <h2>Upload</h2>
         <p class="muted">Resumable, in 8 MiB chunks straight into the store through the gateway.</p>
         <div class="row">
-          <input type="file" id="file" accept="video/*" data-testid="file">
+          <input type="file" id="file" accept="video/*" aria-label="Video file to upload" data-testid="file">
           <button id="make-clip" title="Records a short clip from a canvas in this browser">Make a 6 s test clip</button>
         </div>
         <div class="row">
@@ -86,7 +86,7 @@
         <div id="e2ee-banner" class="banner" hidden></div>
         <ol id="messages" class="messages" data-testid="messages"></ol>
         <form id="composer" class="row" hidden>
-          <input id="message" autocomplete="off" placeholder="Message" data-testid="message">
+          <input id="message" autocomplete="off" placeholder="Message" aria-label="Message" data-testid="message">
           <button class="primary">Send</button>
         </form>
       </div>
@@ -137,7 +137,7 @@
         <h2>Watch</h2>
         <ul id="streams" class="list" data-testid="streams"></ul>
         <form id="watch-form" class="row">
-          <input id="watch-id" placeholder="stream id" autocomplete="off">
+          <input id="watch-id" placeholder="stream id" aria-label="Stream id to watch" autocomplete="off">
           <button>Watch</button>
         </form>
       </div>
@@ -152,7 +152,7 @@
         <div class="live-chat">
           <ol id="live-messages" class="messages"></ol>
           <form id="live-composer" class="row">
-            <input id="live-message" autocomplete="off" placeholder="Say something">
+            <input id="live-message" autocomplete="off" placeholder="Say something" aria-label="Live chat message">
             <button>Send</button>
           </form>
         </div>

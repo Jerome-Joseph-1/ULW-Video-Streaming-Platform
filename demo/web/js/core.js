@@ -98,7 +98,7 @@ export const b64url = {
   encode(bytes) {
     let s = '';
     for (const b of bytes) s += String.fromCharCode(b);
-    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/={1,2}$/, '');
   },
   decode(text) {
     const s = atob(text.replace(/-/g, '+').replace(/_/g, '/'));
@@ -121,8 +121,8 @@ class ChatSocket extends EventTarget {
   }
 
   async connect() {
-    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${scheme}://${location.host}/rt?token=${encodeURIComponent(await token())}`);
+    // A path: the browser resolves it on this page's origin, as ws: or wss: to match it.
+    const ws = new WebSocket(`/rt?token=${encodeURIComponent(await token())}`);
     this.ws = ws;
     ws.onopen = () => {
       this.open = true;

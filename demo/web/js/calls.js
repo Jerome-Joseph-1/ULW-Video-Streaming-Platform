@@ -248,7 +248,7 @@ function onCallEvent(type, m) {
     // generation (someone put out) takes everyone else to it with a fresh ticket.
     if (type === 'call_moved') {
       if (m.expelled === session.user) endCall(`${m.by} put you out of the call`);
-      else rejoinGroup(`${m.expelled ?? 'someone'} was put out; reconnecting`);
+      else rejoinGroup(`${m.expelled ?? 'someone'} was put out; reconnecting`).catch((e) => endCall(`could not rejoin: ${e.message}`));
     }
     if (type === 'call_left' && m.by !== session.user) toast(`${m.by} left the call`);
     if (type === 'call_ended') endCall(m.by && m.by !== session.user ? `${m.by} ended the call` : 'the call ended');
@@ -320,7 +320,7 @@ function decline() {
   log('declined', { from: r.from });
 }
 
-async function hangUp(reason = 'call ended') {
+function hangUp(reason = 'call ended') {
   const c = call;
   if (!c) return;
   if (c.kind === 'group' && c.callId) {
