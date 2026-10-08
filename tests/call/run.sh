@@ -8,10 +8,10 @@
 # which is started with its recorder if they are not running (and left running). The ingest spec
 # also needs gst-launch-1.0 with the good and bad plugins, ffmpeg, cargo and GStreamer's
 # development files (fetch-whipsink.sh builds whipsink), and the live_packager and ulw_sandbox
-# targets of the same build. The direct-call spec needs psql, a Postgres (ULW_TEST_DATABASE_URL)
-# and the chat_server, ulw_migrate and ulw_devtoken targets instead of the harness; the recorder
-# is started only when a spec that uses the harness runs. The environment can point the suite
-# elsewhere:
+# targets of the same build. The direct-call and group-call specs need psql, a Postgres
+# (ULW_TEST_DATABASE_URL) and the chat_server, ulw_migrate and ulw_devtoken targets instead of
+# the harness; the recorder is started only when a spec that uses the harness runs. The
+# environment can point the suite elsewhere:
 #   LIVEKIT_API_URL, LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
 #       Another LiveKit, such as the one deploy/stunner/up.sh puts behind STUNner in the kind
 #       sandbox. The local server is then left alone. The ingest spec's packager test needs a
@@ -30,7 +30,7 @@ root=$(cd "$here/../.." && pwd)
 build=$(realpath "${1:-$root/build/ci}")
 shift $(($# > 0 ? 1 : 0))
 
-# The harness stands in for chat in call.spec.mjs and ingest.spec.mjs; direct-call.spec.mjs runs
+# The harness stands in for chat in call.spec.mjs and ingest.spec.mjs; the *-call specs run
 # the product itself instead: chat_server, ulw_migrate and ulw_devtoken of the same build, on a
 # scratch database of the Postgres at ULW_TEST_DATABASE_URL (default the local one of
 # deploy/local/compose.yaml), created and dropped with psql.
@@ -41,12 +41,12 @@ specs=()
 for arg in "$@"; do
     [[ $arg == *.spec.mjs ]] && specs+=("$arg")
 done
-[[ ${#specs[@]} -eq 0 ]] && specs=(call.spec.mjs ingest.spec.mjs direct-call.spec.mjs)
+[[ ${#specs[@]} -eq 0 ]] && specs=(call.spec.mjs ingest.spec.mjs direct-call.spec.mjs group-call.spec.mjs)
 needs_harness=
 needs_chat=
 for spec in "${specs[@]}"; do
     case $spec in
-    *direct-call.spec.mjs) needs_chat=1 ;;
+    *direct-call.spec.mjs | *group-call.spec.mjs) needs_chat=1 ;;
     *) needs_harness=1 ;;
     esac
 done

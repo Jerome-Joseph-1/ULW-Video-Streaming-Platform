@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <expected>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -39,11 +40,28 @@
 //   {"type":"watch","user":"<sub>"}     hear when the user comes online or goes offline
 //   {"type":"unwatch","user":"<sub>"}   stop; unanswered
 //   {"type":"call","room":"<uuid>","device":"<uuid>"}   a ticket to the room's call, for this
-//       device: the room must be a direct chat this connection has joined (ADR-0050). The first
-//       rings the other member; the other member's answers the ring (ADR-0091)
-//   {"type":"call_decline"|"call_cancel"|"call_end","room":"<uuid>","call":"<uuid>"}   turn a
-//       ringing call down (a callee), give up ringing (the caller), or end an answered call
-//       (either member); answered with the event the other member hears
+//       device: the room must be a direct or group chat this connection has joined (ADR-0050,
+//       ADR-0095). The first rings the other members; another member's answers the ring
+//       (ADR-0091)
+//       "answer":"<call>"    optional: the ringing call this ticket answers. When that call is
+//                            over and the room has no call to answer, it is refused no_call
+//                            (with "call") instead of ringing the other members anew
+//   {"type":"call_decline"|"call_cancel"|"call_end"|"call_leave","room":"<uuid>",
+//    "call":"<uuid>"}   turn a ringing call down (a callee), give up ringing (the caller), end
+//       an answered call (either member of a direct chat, a group call's caller for everyone),
+//       or leave a group call; answered with the event the other members hear
+//   {"type":"call_expel","room":"<uuid>","call":"<uuid>","user":"<sub>"}   a group call's caller
+//       puts a member out of the call; answered with call_moved
+// Member lists (ADR-0096), none of which needs a join first:
+//   {"type":"open_direct","user":"<sub>"}   the direct chat with that user, made the first time
+//   {"type":"create_group","id":"<request id>","users":["<sub>",...]}   a group chat, the asker
+//       its admin; "users" optional, at most 50. The same id again names the same room
+//   {"type":"add_members","room":"<uuid>","users":["<sub>",...]}   1 to 50, by an admin
+//   {"type":"remove_member","room":"<uuid>","user":"<sub>"}   by an admin
+//   {"type":"leave","room":"<uuid>"}   off a group chat's list
+//   {"type":"rooms"}   the rooms the user is listed in; "after":"<uuid>", "limit":<1 to 100>
+//   {"type":"members","room":"<uuid>"}   a room's members, for a member; "after":"<sub>",
+//       "limit":<1 to 100>
 // Server to client:
 //   {"type":"joined","room":"<uuid>","seq":<integer>}   the room's latest seq known: a client
 //                                                      whose last seq is lower missed messages
@@ -62,7 +80,24 @@
 //       unasked, on every socket of both members: from is calling, until expires_at
 //   {"type":"call_answered"|"call_declined"|"call_cancelled"|"call_ended","room":"<uuid>",
 //    "call":"<uuid>","from":"<sub>","by":"<sub>"}   unasked, on every socket of both members
-//   {"type":"call_missed","room":"<uuid>","call":"<uuid>","from":"<sub>"}   nobody answered
+//   {"type":"call_missed","room":"<uuid>","call":"<uuid>","from":"<sub>"}   nobody answered (in a
+//       group call that is on, only the members still rung hear it: their ring ran out)
+//   {"type":"call_left","room":"<uuid>","call":"<uuid>","from":"<sub>","by":"<sub>"}   a group
+//       call's member left it
+//   {"type":"call_moved","room":"<uuid>","call":"<uuid>","from":"<sub>","expelled":"<sub>"}
+//       with "by" when the caller put them out: everyone else asks for a ticket again
+//   {"type":"direct","room":"<uuid>","user":"<sub>"}   the answer to open_direct
+//   {"type":"group","room":"<uuid>","id":"<request id>"}   the answer to create_group
+//   {"type":"added","room":"<uuid>","users":[...]}   who add_members listed, not who already was
+//   {"type":"removed","room":"<uuid>","user":"<sub>"}   the answer to remove_member
+//   {"type":"left","room":"<uuid>"}   the answer to leave; "promoted":"<sub>" when the group's
+//       last admin left and that member became its admin
+//   {"type":"rooms","rooms":[{"room":..,"kind":"direct"|"group"|"live","role":"member"|"admin",
+//    "peer":"<sub>"}],"more":<bool>}   a page; "peer" for a direct chat's other member
+//   {"type":"members","room":"<uuid>","members":[{"user":..,"role":..}],"more":<bool>}
+//   {"type":"member","room":"<uuid>","user":"<sub>",
+//    "change":"added"|"removed"|"promoted"|"demoted"}   unasked: a
+//       member list this connection's user is on, or a room it has joined, changed
 //   {"type":"error","reason":"<code>"}          with "room" and "id" when known, "user" for a
 //                                               watch, and "retry_after_ms" when the reason is
 //                                               rate_limited, or unavailable for a call
@@ -116,16 +151,63 @@ struct Unwatch {
 struct Call {
     core::RoomId room;
     core::DeviceId device;
+    // "answer": the ringing call this ticket answers (calls.md, Ringing).
+    std::optional<CallId> answering = std::nullopt;
 };
 
-// call_decline, call_cancel or call_end.
+// call_decline, call_cancel, call_end, call_leave or call_expel.
 struct CallMove {
     core::RoomId room;
     CallSignal signal = CallSignal::Decline;
     CallId call;
+    // call_expel only: who is put out.
+    std::optional<core::UserId> target = std::nullopt;
 };
 
-using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove>;
+// A page of rooms or of members (core::ports::kMaxListPage at most).
+inline constexpr std::size_t kMaxListLimit = 100;
+inline constexpr std::size_t kDefaultListLimit = 50;
+
+struct OpenDirect {
+    core::UserId user;
+};
+
+struct CreateGroup {
+    // The client's id for the request, as a message's: a repeat names the same room.
+    rt::MessageKey id;
+    // Besides the asker; at most core::ports::kMaxMembersPerChange, as given.
+    std::vector<core::UserId> users;
+};
+
+struct AddMembers {
+    core::RoomId room;
+    // 1 to core::ports::kMaxMembersPerChange, as given.
+    std::vector<core::UserId> users;
+};
+
+struct RemoveMember {
+    core::RoomId room;
+    core::UserId user;
+};
+
+struct LeaveRoom {
+    core::RoomId room;
+};
+
+struct ListRooms {
+    std::optional<core::RoomId> after;
+    std::size_t limit = kDefaultListLimit;
+};
+
+struct ListMembers {
+    core::RoomId room;
+    std::optional<core::UserId> after;
+    std::size_t limit = kDefaultListLimit;
+};
+
+using Command =
+    std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, OpenDirect, CreateGroup,
+                 AddMembers, RemoveMember, LeaveRoom, ListRooms, ListMembers>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -179,9 +261,36 @@ void write_ticket(std::string& out, const core::RoomId& room,
 // What a ring's notice tells each socket of its member, and what a member's own decline,
 // cancel or end is answered with.
 void write_call_event(std::string& out, const CallNotice& notice);
+// A ticket answering a call that is over: no_call, naming the call it answered.
+void write_call_over(std::string& out, const core::RoomId& room, const CallId& call);
 // A call refused, with a hint of when to ask again for a refusal a retry may cure.
 void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
                       std::optional<core::Millis> retry_after);
+
+// The answers to the member-list commands (ADR-0096).
+void write_direct(std::string& out, const core::RoomId& room, const core::UserId& user);
+void write_group(std::string& out, const core::RoomId& room, const rt::MessageKey& id);
+void write_added(std::string& out, const core::RoomId& room, std::span<const core::UserId> users);
+void write_removed(std::string& out, const core::RoomId& room, const core::UserId& user);
+// `promoted`: who became the group's admin because the leaver was its last.
+void write_left(std::string& out, const core::RoomId& room,
+                const std::optional<core::UserId>& promoted);
+void write_rooms(std::string& out, std::span<const core::ports::RoomEntry> rooms, bool more);
+void write_members(std::string& out, const core::RoomId& room,
+                   std::span<const core::ports::MemberEntry> members, bool more);
+// Unasked: `user` was listed in the room's member list ("added"), taken off it ("removed"), or
+// made its admin or a plain member again ("promoted", "demoted").
+void write_member_change(std::string& out, const core::RoomId& room, const core::UserId& user,
+                         std::string_view change);
+// A member-list command refused: whichever of the room, the request's id and the user named are
+// known, and when to ask again for rate_limited.
+struct ErrorContext {
+    std::optional<core::RoomId> room;
+    std::optional<rt::MessageKey> id;
+    std::optional<core::UserId> user;
+    std::optional<core::Millis> retry_after;
+};
+void write_error_with(std::string& out, std::string_view reason, const ErrorContext& context);
 
 // The error codes clients see.
 [[nodiscard]] std::string_view reason(EnvelopeError e) noexcept;

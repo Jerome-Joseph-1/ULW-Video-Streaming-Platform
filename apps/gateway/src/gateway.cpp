@@ -351,7 +351,7 @@ void render_live_metrics(ops::Exposition& e, const LiveStreams& live) {
     e.family("live_streams_ended_total", "Live streams ended, by why.", MetricType::Counter);
     for (const core::ports::LiveEnd reason :
          {core::ports::LiveEnd::Owner, core::ports::LiveEnd::Finished, core::ports::LiveEnd::Failed,
-          core::ports::LiveEnd::Timeout}) {
+          core::ports::LiveEnd::Timeout, core::ports::LiveEnd::PublisherLeft}) {
         e.sample("live_streams_ended_total",
                  {{.name = "reason", .value = core::ports::to_string(reason)}},
                  l.ended.at(static_cast<std::size_t>(reason)));
@@ -366,6 +366,49 @@ void render_live_metrics(ops::Exposition& e, const LiveStreams& live) {
     e.sample("live_dependency_failures_total", {{.name = "dependency", .value = "packager"}},
              l.packager_failures);
     e.counter("live_sweeps_total", "Looks at the unfinished live streams.", l.sweeps);
+}
+
+void render_webhook_metrics(ops::Exposition& e, const WebhookServer& hooks,
+                            const PublisherWatch& watch) {
+    using ops::MetricType;
+    const WebhookCounters& h = hooks.counters();
+    e.family("live_webhooks_total", "LiveKit webhook requests, by what became of them.",
+             MetricType::Counter);
+    std::uint64_t refused = 0;
+    for (const std::uint64_t n : h.refused) {
+        refused += n;
+    }
+    e.sample("live_webhooks_total", {{.name = "outcome", .value = "accepted"}}, h.accepted);
+    e.sample("live_webhooks_total", {{.name = "outcome", .value = "refused"}}, refused);
+    e.sample("live_webhooks_total", {{.name = "outcome", .value = "limited"}}, h.limited);
+    e.sample("live_webhooks_total", {{.name = "outcome", .value = "bad_request"}}, h.bad_requests);
+    e.family("live_webhook_refusals_total",
+             "LiveKit webhook requests refused before they were read, by why.",
+             MetricType::Counter);
+    for (std::size_t i = 0; i < h.refused.size(); ++i) {
+        e.sample("live_webhook_refusals_total",
+                 {{.name = "reason", .value = to_string(static_cast<WebhookRejection>(i))}},
+                 h.refused.at(i));
+    }
+    e.counter("live_webhook_connections_refused_total",
+              "Webhook connections closed on accept, as many as allowed being open.",
+              h.refused_connections);
+    const WatchCounters& w = watch.counters();
+    e.counter("live_webhook_starts_total",
+              "Go-live attempts made because LiveKit said a stream's publisher joined.", w.starts);
+    e.counter("live_webhook_start_failures_total",
+              "Go-live attempts from webhooks a dependency refused or could not answer.",
+              w.start_failures);
+    e.counter("live_publisher_departures_total",
+              "Times a stream's publisher was gone and the grace for a reconnect began.",
+              w.departures);
+    e.counter("live_publisher_returns_total", "Publishers back within their grace.", w.returns);
+    e.counter("live_publisher_kept_total",
+              "Graces that ran out with the publisher still connected at LiveKit.", w.kept);
+    e.counter("live_publisher_check_failures_total",
+              "Checks for a departed publisher a dependency could not answer.", w.check_failures);
+    e.gauge("live_publisher_streams_followed", "Streams whose publisher this replica follows.",
+            watch.followed());
 }
 
 } // namespace
@@ -492,6 +535,9 @@ std::string Gateway::render_metrics() {
     e.gauge("live_playlist_cache_bytes", "Bytes of live playlists held.", live_.bytes());
     if (deps_.live_streams != nullptr) {
         render_live_metrics(e, *deps_.live_streams);
+    }
+    if (deps_.webhooks != nullptr && deps_.publisher_watch != nullptr) {
+        render_webhook_metrics(e, *deps_.webhooks, *deps_.publisher_watch);
     }
     e.counter("playlists_rejected_total", "Stored playlists that broke a rewriting rule.",
               c.playlists_rejected);

@@ -84,6 +84,31 @@ TEST(DevTokenTest, NoEmailClaimWhenNoneIsGiven) {
     EXPECT_EQ(claims->email, "");
 }
 
+// A backend's token for chat's service API, as a client-credentials grant gives one.
+TEST(DevTokenTest, AScopeIsMintedAsTheSpaceSeparatedClaimTheServiceRuleReads) {
+    const ulw::test::FakeClock clock;
+    const auto key = DevKey::generate();
+    ASSERT_TRUE(key.has_value());
+    MintRequest request = request_for("backend");
+    request.scope = "openid ulw:admin";
+    const auto token = key->mint(request, clock.wall_now());
+    ASSERT_TRUE(token.has_value());
+    infra::auth::ClaimRules rules = ulw::test::kTestRules;
+    rules.service_claim = "scope";
+    rules.service_value = "ulw:admin";
+    auto verifier = infra::auth::Ed25519LocalVerifier::create(key->public_jwks(), rules);
+    ASSERT_TRUE(verifier);
+    NoWaiter waiter;
+    const auto claims = verifier->verify(*token, clock.wall_now(), waiter);
+    ASSERT_TRUE(claims && *claims);
+    EXPECT_TRUE((*claims)->is_service);
+    const auto plain = key->mint(request_for("backend"), clock.wall_now());
+    ASSERT_TRUE(plain.has_value());
+    const auto user = verifier->verify(*plain, clock.wall_now(), waiter);
+    ASSERT_TRUE(user && *user);
+    EXPECT_FALSE((*user)->is_service);
+}
+
 TEST(DevTokenTest, AMintedTokenLapsesAfterItsTtl) {
     ulw::test::FakeClock clock;
     const auto key = DevKey::generate();

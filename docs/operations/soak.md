@@ -147,6 +147,30 @@ with slow clients, saturation, store faults and SIGHUPs) and criterion.
 
 Run 3 (full load) in progress; recorded when it ends at about 16:41 UTC.
 
+### 6 h with the gateway's malloc tuned (ADR-0094), two runs
+
+Both on the self-hosted runner (`soak-experiment`, `kind=gateway`), with the gateway calling
+`mallopt` for one arena and a fixed 128 KiB mmap and trim threshold at startup. On main before
+it, the gateway's steady RSS was about 30.9 MB and it crept by +0.53 MB after the warm-up.
+Per-unit values are the RSS slope's 95% upper end, against bounds of 0.315 bytes a request,
+0.315 a chunk request and 39.85 an upload session.
+
+| | run 37146904045 | run 37168049376 |
+|---|---|---|
+| Branch, commit | exp/soak-allocator, 6163f0d | demo/integration with #145, 3b138a3 |
+| Started (UTC) | 2026-10-03 19:11 | 2026-10-04 01:38 |
+| Gateway RSS, first / last | 49.6 / 50.0 MiB | 50.0 / 50.5 MiB |
+| Creep after the warm-up | +0.42 MiB | +0.5 MiB |
+| Slope | +48.9 KB/h (95% upper end +52.5) | +105.1 KB/h over the window, +5.4 KB/h over the last hour |
+| Per request | 0.379 B | 0.775 B |
+| Per chunk request | 8.23 B | 16.8 B |
+| Per upload session | 45.2 B | 92.4 B |
+| Verdict | fail | fail |
+
+In both, the worker's RSS and both processes' descriptors were flat, the run was not INVALID,
+and every 5xx was injected by the soak. The tuning raised the steady RSS by about 19 MB and
+barely changed the creep, which levels off late in each run; it was not adopted (ADR-0094).
+
 ## Chat
 
 `tests/soak/chat_soak.py` runs three `chat_server` nodes on one Postgres, the M16 cluster, for

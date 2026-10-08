@@ -40,6 +40,8 @@ std::string_view to_string(DomainError e) noexcept {
         return "upload incomplete";
     case DomainError::InvalidFailureReason:
         return "invalid failure reason";
+    case DomainError::InvalidVisibility:
+        return "invalid visibility";
     }
     return "unknown domain error";
 }

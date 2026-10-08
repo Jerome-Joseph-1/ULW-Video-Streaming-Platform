@@ -38,6 +38,13 @@ struct CallsConfig {
     std::string api_secret;
 };
 
+// Chat's service API (ADR-0096): a listener of its own for the operator's backend, which manages
+// member lists with the identity provider's tokens that carry the service claim.
+struct ServiceApiConfig {
+    // ULW_SERVICE_PORT: never the client port or the node channel's.
+    std::uint16_t port = 0;
+};
+
 struct Config {
     core::NodeId node;
     // Clients: WebSocket upgrades on /rt, and the health and metrics endpoints.
@@ -62,6 +69,13 @@ struct Config {
     std::string jwt_audience;
     // ULW_JWT_SUBJECT_CLAIM: the claim that names the user, `sub` by default.
     std::string jwt_subject_claim = "sub";
+    // ULW_SERVICE_CLAIM (default `scope`) and ULW_SERVICE_SCOPE: which tokens are the operator's
+    // backend (infra/auth/service_claim.hpp). No value: none is.
+    std::string service_claim = "scope";
+    std::string service_value;
+    // ULW_SERVICE_CLIENT_ID: the client the service's token must name (azp or client_id), if
+    // any.
+    std::string service_client_id;
     std::string auth_cookie;
     // Pages allowed to open a socket that authenticates with the cookie, as exact
     // "scheme://host[:port]" origins. Empty: the cookie is not accepted at all.
@@ -72,14 +86,23 @@ struct Config {
     // ULW_CALL_RING_TIMEOUT_MS: how long a call rings with nobody answering (ADR-0091). Unset:
     // RingLimits::ring_timeout.
     std::optional<core::Millis> ring_timeout;
+    // ULW_CALL_GROUP_PARTICIPANTS: devices in a group chat's call, 3 to 16 (ADR-0095). Unset:
+    // CallLimits::group_participants.
+    std::optional<std::uint16_t> group_participants;
     ClientLimits client_limits;
     // Unset when LIVEKIT_API_KEY is: calls are not configured, and a call is answered
     // calls_disabled. With the key, the other three LIVEKIT_ variables are required.
     std::optional<CallsConfig> calls;
+    // Unset when ULW_SERVICE_PORT is: no service API.
+    std::optional<ServiceApiConfig> service_api;
     // Who to become when started as root.
     std::string run_as_user;
     // Stay root when started as root with no run_as_user; otherwise that is refused.
     bool allow_root = false;
+    // ULW_CHAT_SELF_SERVICE, `on` or `off` (the default): whether users open direct chats,
+    // create groups and add members over the room socket themselves (ADR-0096). Off, only the
+    // service API does; leaving and an admin's removal stay with users either way.
+    bool self_service = false;
 };
 
 struct ConfigError {

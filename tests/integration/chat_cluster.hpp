@@ -43,6 +43,8 @@ inline constexpr std::array kUsers{"alice", "bob", "carol", "dave"};
 inline constexpr std::chrono::milliseconds kGrace{2'000};
 // Short, so that the call test waits seconds for a ring nobody answers to run out.
 inline constexpr std::chrono::milliseconds kRingTimeout{3'000};
+// A group call of four devices: the group call test fills it.
+inline constexpr int kGroupParticipants = 4;
 
 // The LiveKit server calls go to, as tests/call/run.sh names it: LIVEKIT_API_URL,
 // LIVEKIT_CLIENT_URL, LIVEKIT_API_KEY and LIVEKIT_API_SECRET, all four or none. With them the
@@ -97,6 +99,12 @@ struct Seen {
     std::string call;
     std::string from;
     std::string by;
+    // Of call_moved (ADR-0095).
+    std::string expelled = {};
+    // Of a member list's change.
+    std::string change;
+    // The frame as it came, for the fields above do not cover.
+    std::string raw;
 };
 
 inline std::optional<Seen> parse_seen(const std::string& text) {
@@ -124,7 +132,10 @@ inline std::optional<Seen> parse_seen(const std::string& text) {
            .expires_at = 0,
            .call = string("call"),
            .from = string("from"),
-           .by = string("by")};
+           .by = string("by"),
+           .expelled = string("expelled"),
+           .change = string("change"),
+           .raw = text};
     if (const core::json::Value* expires = json->find("expires_at")) {
         s.expires_at = expires->as_u64().value_or(0);
     }
@@ -261,7 +272,65 @@ struct Node {
     bool port_pinned = false;
     std::uint16_t node_port = 0;
     std::unique_ptr<ChildProcess> process;
+    // The operator's backend's API (ADR-0096).
+    std::uint16_t service_port = 0;
 };
+
+// The scope the nodes ask of the operator's backend (ULW_SERVICE_SCOPE, in the default claim
+// `scope`), and the scope its
+// tokens carry, as a client-credentials grant gives them.
+inline constexpr std::string_view kServiceScopeSetting = "ulw:admin";
+inline constexpr std::string_view kServiceScope = "openid ulw:admin";
+// The backend's client (ULW_SERVICE_CLIENT_ID), named in its tokens' azp.
+inline constexpr std::string_view kServiceClient = "ulw-backend";
+
+// A POST to a chat node's service API, closing the connection after the answer.
+inline PlainResponse service_post(std::uint16_t port, std::string_view op, std::string_view body,
+                                  std::string_view token) {
+    const os::UniqueFd fd{::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0)};
+    if (!fd) {
+        return {};
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    // connect() takes every address family through the generic sockaddr header.
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast)
+    if (::connect(fd.get(), reinterpret_cast<const sockaddr*>(&addr), sizeof addr) != 0) {
+        return {};
+    }
+    std::string request = std::format("POST /service/v1/{} HTTP/1.1\r\nHost: chat-service\r\n"
+                                      "Connection: close\r\nContent-Type: application/json\r\n"
+                                      "Content-Length: {}\r\n",
+                                      op, body.size());
+    if (!token.empty()) {
+        request += "Authorization: Bearer " + std::string(token) + "\r\n";
+    }
+    request += "\r\n";
+    request += body;
+    if (::send(fd.get(), request.data(), request.size(), MSG_NOSIGNAL) !=
+        static_cast<ssize_t>(request.size())) {
+        return {};
+    }
+    std::string response;
+    std::array<char, 4096> buf{};
+    pollfd pfd{.fd = fd.get(), .events = POLLIN, .revents = 0};
+    while (::poll(&pfd, 1, 10'000) > 0) {
+        const ssize_t n = ::recv(fd.get(), buf.data(), buf.size(), 0);
+        if (n <= 0) {
+            break;
+        }
+        response.append(buf.data(), static_cast<std::size_t>(n));
+    }
+    constexpr std::size_t kCodeAt = 9;
+    const std::size_t end = response.find("\r\n\r\n");
+    if (response.size() < kCodeAt + 3 || end == std::string::npos) {
+        return {};
+    }
+    return {.status = core::parse_integer<int>(response.substr(kCodeAt, 3)).value_or(0),
+            .body = response.substr(end + 4)};
+}
 
 class ChatCluster : public ::testing::TestWithParam<net::ReactorKind> {
 protected:
@@ -318,6 +387,11 @@ protected:
             "ULW_DEV_JWKS_FILE=" + jwks, "ULW_DEV_MODE=1", "JWT_ISSUER=" + std::string(kIssuer),
             "ULW_PRESENCE_GRACE_MS=" + std::to_string(kGrace.count()),
             "ULW_CALL_RING_TIMEOUT_MS=" + std::to_string(kRingTimeout.count()),
+            "ULW_CALL_GROUP_PARTICIPANTS=" + std::to_string(kGroupParticipants),
+            // The suite's users manage their own lists, as a demo's do; the operator's backend
+            // has its API beside them (ADR-0096).
+            "ULW_CHAT_SELF_SERVICE=on", "ULW_SERVICE_SCOPE=" + std::string(kServiceScopeSetting),
+            "ULW_SERVICE_CLIENT_ID=" + std::string(kServiceClient),
             "ULW_REACTOR=" +
                 std::string(GetParam() == net::ReactorKind::IoUring ? "io_uring" : "epoll"),
             // Some runs start tests as root; this suite is not about that.
@@ -340,10 +414,12 @@ protected:
                     node.port = reserve_port();
                 }
                 node.node_port = reserve_port();
-                if (node.port == 0 || node.node_port == 0) {
+                node.service_port = reserve_port();
+                if (node.port == 0 || node.node_port == 0 || node.service_port == 0) {
                     return std::unique_ptr<ChildProcess>();
                 }
                 auto with_ports = env;
+                with_ports.push_back("ULW_SERVICE_PORT=" + std::to_string(node.service_port));
                 with_ports.push_back("ULW_LISTEN_PORT=" + std::to_string(node.port));
                 with_ports.push_back("ULW_NODE_ADDRESS=127.0.0.1:" +
                                      std::to_string(node.node_port));
@@ -362,6 +438,21 @@ protected:
                     .subject = user,
                     .email = {},
                     .ttl = std::chrono::seconds(600)},
+                   clock_.wall_now())
+            .value_or("");
+    }
+
+    // The operator's backend's token, as its identity provider's client-credentials grant would
+    // give it: the service account as subject, the service scope beside others.
+    [[nodiscard]] std::string mint_service() const {
+        return key_
+            ->mint({.issuer = std::string(kIssuer),
+                    .audience = "ulw-dev",
+                    .subject = "service-account-backend",
+                    .email = {},
+                    .ttl = std::chrono::seconds(600),
+                    .scope = std::string(kServiceScope),
+                    .client = std::string(kServiceClient)},
                    clock_.wall_now())
             .value_or("");
     }
@@ -444,6 +535,45 @@ protected:
         }
         const auto answer =
             client.wait_for([](const Seen& s) { return s.type == "joined" || s.type == "error"; });
+        if (!answer) {
+            return "no answer";
+        }
+        return answer->type == "joined" ? "joined" : answer->reason;
+    }
+
+    // Sends `command` and waits for its answer: the first frame after it of type `answer`, or an
+    // error. Frames that came before it are not looked at.
+    static std::optional<Seen> ask(Client& client, const std::string& command,
+                                   std::string_view answer) {
+        const std::size_t from = client.seen().size();
+        if (!client.send(command)) {
+            return std::nullopt;
+        }
+        const auto at = client.wait_from(
+            from, [&](const Seen& s) { return s.type == answer || s.type == "error"; });
+        if (!at) {
+            return std::nullopt;
+        }
+        return client.seen()[*at];
+    }
+
+    // The direct chat of the client's user and `peer`, opened over the room WebSocket
+    // (ADR-0096): its room id, or the error's reason prefixed with "error: ".
+    static std::string open_direct(Client& client, const std::string& peer) {
+        const auto answer =
+            ask(client, R"({"type":"open_direct","user":")" + peer + R"("})", "direct");
+        if (!answer) {
+            return "no answer";
+        }
+        return answer->type == "direct" ? answer->room : "error: " + answer->reason;
+    }
+
+    // As join_answer, but looking only at what comes after the join: for a client that has been
+    // answered joined or refused before.
+    static std::string join_again(Client& client, const std::string& room,
+                                  const std::string& fields = "") {
+        const auto answer =
+            ask(client, R"({"type":"join","room":")" + room + R"(")" + fields + "}", "joined");
         if (!answer) {
             return "no answer";
         }

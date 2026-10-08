@@ -28,6 +28,10 @@ public:
         core::NodeId owner;
         std::uint64_t generation = 1;
         std::uint64_t last_seq = 0;
+        // room_state.media_generation (migrations/0014): from 1, moved on by its owner only.
+        std::uint64_t media_generation = 1;
+        // room_media_expelled: who is put out of the current media generation.
+        std::vector<core::UserId> expelled = {};
         bool stale = false;
     };
 
@@ -181,6 +185,40 @@ public:
                    db_.keys.emplace(key, ++r.last_seq);
                    return Answer{r.last_seq};
                });
+    }
+
+    void media_generation(const core::RoomId& room, std::uint64_t generation,
+                          const rt::MediaChange& change,
+                          rt::StoreCallback<std::optional<rt::MediaState>> done) override {
+        answer("", std::move(done), [this, room, generation, change] {
+            using Answer = rt::StoreResult<std::optional<rt::MediaState>>;
+            const auto it = db_.rooms.find(room);
+            if (it == db_.rooms.end() || it->second.generation != generation) {
+                return Answer{std::nullopt};
+            }
+            MemoryRooms::Room& r = it->second;
+            if (change.step != rt::MediaStep::Read) {
+                if (change.step == rt::MediaStep::Advance) {
+                    ++r.media_generation;
+                }
+                if (!change.carry) {
+                    r.expelled.clear();
+                }
+                // As room_media_expelled: at most kMaxMediaExpelled, a move keeping the one it
+                // puts out, an expulsion alone adding nobody past the cap.
+                if (change.expel &&
+                    std::ranges::find(r.expelled, *change.expel) == r.expelled.end()) {
+                    if (r.expelled.size() >= rt::kMaxMediaExpelled &&
+                        change.step == rt::MediaStep::Advance) {
+                        r.expelled.erase(r.expelled.begin());
+                    }
+                    if (r.expelled.size() < rt::kMaxMediaExpelled) {
+                        r.expelled.push_back(*change.expel);
+                    }
+                }
+            }
+            return Answer{rt::MediaState{.generation = r.media_generation, .expelled = r.expelled}};
+        });
     }
 
     void release(const core::NodeId& node, std::vector<rt::OwnedRoom> rooms,

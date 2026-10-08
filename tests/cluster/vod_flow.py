@@ -23,7 +23,8 @@ mock auth-service, as a browser's would through an operator's Gateway:
   call        a 1:1 call through chat (ADR-0050, ADR-0087): both members of a direct chat ask for
               the call on the room WebSocket and get tickets naming the route; LiveKit, through
               the route, admits both into the room's one media room, the second seeing the first;
-              a group chat has no call
+              a group chat's call (ADR-0095) rings the other member, whose answer joins the
+              same call, and LiveKit admits both into the group's media room
 
     tests/cluster/vod_flow.py [--allow-skip] [SCENARIO...]     all of them when none is named
 
@@ -727,24 +728,75 @@ def scenario_call():
                   f"{user}'s join response names neither the room's call nor {identity!r}")
             joins.append(join)
         check(tickets[alice][1] in joins[1], "bob's join response does not name alice")
-        # Only a direct chat has a call (ADR-0058): a group chat of alice's is refused.
-        group = unknown_video_id()
-        sandbox_sql(f"BEGIN; INSERT INTO chat_rooms (room_id, kind) VALUES ('{group}', "
-                    f"'group_chat'); INSERT INTO chat_members (room_id, user_id) VALUES "
-                    f"('{group}', '{alice}'); COMMIT")
-        sockets[0].send({"type": "join", "room": group})
-        sockets[0].expect("joined")
-        sockets[0].send({"type": "call", "room": group, "device": str(uuid.uuid4())})
-        while True:
-            got = sockets[0].recv(10)
-            check(got is not None, "no answer to a group chat's call in 10 s")
-            if got.get("type") == "error" and got.get("room") == group:
-                break
-        check(got.get("reason") == "not_callable", f"a group chat's call answered {got}")
+        check_group_call(alice, bob, sockets, rtc)
     finally:
         for s in sockets + rtc:
             s.close()
-    print("  both members got tickets through chat, and LiveKit admitted both to one room")
+    print("  both members of a direct chat and of a group chat got tickets through chat, and "
+          "LiveKit admitted each pair to its chat's one room")
+
+
+def check_group_call(alice, bob, sockets, rtc):
+    """A group chat has a call too (ADR-0095, calls.md's Group calls): alice's ticket starts it
+    and rings bob on the socket he has open; bob's ticket answers it, and LiveKit admits both
+    to the group's first media generation."""
+    group = unknown_video_id()
+    sandbox_sql(f"BEGIN; INSERT INTO chat_rooms (room_id, kind) VALUES ('{group}', "
+                f"'group_chat'); INSERT INTO chat_members (room_id, user_id) VALUES "
+                f"('{group}', '{alice}'), ('{group}', '{bob}'); COMMIT")
+
+    def group_frame(s, user, kind):
+        # The direct chat's call may still be announcing on the same sockets: only the group's
+        # frames count, and an error about the group fails at once.
+        while True:
+            got = s.recv(10)
+            check(got is not None, f"{user}: no {kind} for the group chat's call in 10 s")
+            if got.get("room") != group:
+                continue
+            check(got.get("type") != "error", f"{user}: the group chat's call answered {got}")
+            if got.get("type") == kind:
+                return got
+
+    for s in sockets:
+        s.send({"type": "join", "room": group})
+        group_frame(s, "a member", "joined")
+    tickets = {}
+    call = None
+    for user, s in zip((alice, bob), sockets):
+        device = str(uuid.uuid4())
+        if call is None:
+            s.send({"type": "call", "room": group, "device": device})
+        else:
+            ring = group_frame(s, user, "call_ringing")
+            check(ring.get("call") == call and ring.get("from") == alice,
+                  f"{user} was rung for another call: {ring}, not alice's {call}")
+            s.send({"type": "call", "room": group, "device": device, "answer": call})
+        ticket = group_frame(s, user, "ticket")
+        check(ticket.get("url") == SANDBOX_URL.replace("http", "ws", 1),
+              f"{user}'s group ticket names {ticket.get('url')!r}")
+        check(time.time() < ticket.get("expires_at", 0) <= time.time() + 61,
+              f"{user}'s group ticket expires at {ticket.get('expires_at')}, not within a minute")
+        if call is None:
+            call = ticket.get("call")
+            check(isinstance(call, str) and re.fullmatch(r"[0-9a-f-]{36}", call),
+                  f"alice's group ticket names no call: {ticket}")
+        check(ticket.get("call") == call, f"{user}'s group ticket is for another call: {ticket}")
+        tickets[user] = (ticket["token"], f"{user}/{device}".encode())
+    answered = group_frame(sockets[0], alice, "call_answered")
+    check(answered.get("call") == call and answered.get("by") == bob,
+          f"alice heard {answered}, not bob answering")
+    joins = []
+    for user in (alice, bob):
+        token, identity = tickets[user]
+        r = ChatSocket(path=f"/rtc?access_token={token}&auto_subscribe=1&sdk=js&protocol=15")
+        rtc.append(r)
+        check(r.status == 101, f"LiveKit refused {user}'s group ticket: {r.status}")
+        join = r.next_frame(10, 0x2)
+        check(join is not None, f"no join response from LiveKit for {user}'s group ticket in 10 s")
+        check(f"{group}:1".encode() in join and identity in join,
+              f"{user}'s group join response names neither the group's call nor {identity!r}")
+        joins.append(join)
+    check(tickets[alice][1] in joins[1], "bob's group join response does not name alice")
 
 
 SCENARIOS = {

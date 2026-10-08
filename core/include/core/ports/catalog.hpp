@@ -4,11 +4,17 @@
 #include "core/models/storage_key.hpp"
 #include "core/models/upload.hpp"
 #include "core/models/video.hpp"
+#include "core/models/video_access.hpp"
+#include "core/models/visibility.hpp"
+#include "core/util/time.hpp"
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <optional>
 #include <string>
+#include <vector>
 
 namespace core::ports {
 
@@ -20,6 +26,8 @@ enum class CatalogError : std::uint8_t {
     Unavailable,
     // A stored row violates a domain invariant.
     Corrupt,
+    // The caller may not make this change: a visibility naming a room they are not a member of.
+    Forbidden,
 };
 
 [[nodiscard]] std::string_view to_string(CatalogError e) noexcept;
@@ -58,6 +66,25 @@ struct ClaimedUpload {
     ClaimToken token;
 };
 
+// A video as one viewer's request finds it: the row, and what the viewer is to it (ADR-0097).
+struct VideoView {
+    VideoRecord video;
+    ViewerFacts viewer;
+};
+
+// One user the operator's backend granted a video to.
+struct VideoGrant {
+    UserId user;
+    WallTime granted_at;
+};
+
+// A video's grants in user id order (bytewise), from after a cursor.
+struct GrantPage {
+    std::vector<VideoGrant> grants;
+    // More follow the last one here.
+    bool more = false;
+};
+
 // Upload and video metadata as the gateway sees it. Every call is asynchronous: the gateway's
 // reactor thread issues it and continues.
 class IUploadCatalog {
@@ -94,7 +121,30 @@ public:
                                const std::string& request_id, CatalogCallback<VideoState> done) = 0;
     virtual void abort_upload(const UploadId& id, CatalogCallback<void> done) = 0;
 
-    virtual void find_video(const VideoId& id, CatalogCallback<VideoRecord> done) = 0;
+    // Who may see a video (ADR-0097). Every read a viewer's request makes goes through
+    // find_video_for and core::access_of; nothing is cached, so a member taken off the room's
+    // list, or a grant revoked, loses the video at their next request.
+
+    // The video and what `viewer` is to it, in one read: whether chat_members lists them in
+    // the room the video is shared with, and whether they hold a grant of it.
+    virtual void find_video_for(const VideoId& id, const UserId& viewer,
+                                CatalogCallback<VideoView> done) = 0;
+    // NotFound unless `owner` owns a video by that id, exactly as for one that does not exist.
+    // Forbidden when `visibility` names a room chat_members does not list `owner` in. Answers
+    // the video as it now stands.
+    virtual void set_visibility(const VideoId& id, const UserId& owner,
+                                const Visibility& visibility,
+                                CatalogCallback<VideoRecord> done) = 0;
+    // Both idempotent: a grant held already, or a revoke of one not held, succeeds. NotFound
+    // when no video has that id.
+    virtual void grant_access(const VideoId& id, const UserId& user,
+                              CatalogCallback<void> done) = 0;
+    virtual void revoke_access(const VideoId& id, const UserId& user,
+                               CatalogCallback<void> done) = 0;
+    // At most `limit` grants, of users whose ids sort after `after` bytewise (from the first
+    // without one). NotFound when no video has that id.
+    virtual void list_grants(const VideoId& id, std::optional<UserId> after, std::size_t limit,
+                             CatalogCallback<GrantPage> done) = 0;
 };
 
 } // namespace core::ports

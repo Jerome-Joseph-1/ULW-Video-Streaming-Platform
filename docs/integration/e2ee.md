@@ -15,6 +15,13 @@ handshake and application messages as opaque chat bodies. The room's total order
 what orders Commits: members apply the first valid Commit for an epoch in `seq` order and
 discard the rest. Multi-device key management is a known gap.
 
+Who is in a chat is the server's member list (ADR-0054), changed by its users with the commands
+of [chat.md](chat.md#changing-member-lists) (ADR-0096); the MLS group follows it by commits the
+members' devices make. A device that adds members commits the Add and sends each new member's
+Welcome as room messages; when a `member` frame tells of a removal or a leave, a remaining
+member's device commits the Remove. The server cuts a removed member off at once, before any
+commit, and never reads one.
+
 ## Browser client
 
 <!-- clients/web-mls/src/core.rs, clients/web-mls/src/wasm.rs, clients/web-mls/js/mls-room.js, clients/web-mls/build.sh, clients/web-mls/interop/, docs/adr/0098-the-browser-runs-openmls-as-webassembly.md -->

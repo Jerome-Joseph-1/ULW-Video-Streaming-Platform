@@ -185,7 +185,17 @@ jobs:
       # stack.mjs creates and drops its scratch database with psql.
       - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - name: Start MinIO
-        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+        # Docker Hub refuses an anonymous pull now and then: on 2026-10-07 it answered one job
+        # "unauthorized: authentication required" for the pinned MinIO digest, which the other
+        # jobs pulled the same minute and which still resolves. The pull is tried again, a few
+        # times, before it fails the job.
+        run: |
+          for attempt in 1 2 3 4; do
+            docker compose -f deploy/local/compose.yaml pull --quiet --include-deps minio && break
+            (( attempt < 4 )) || exit 1
+            sleep $((attempt * 15))
+          done
+          docker compose -f deploy/local/compose.yaml up -d --wait minio
       - run: cmake --preset ci
       - run: >-
           cmake --build --preset ci
@@ -237,7 +247,17 @@ jobs:
       # stack.mjs creates and drops its scratch database with psql.
       - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - name: Start MinIO
-        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+        # Docker Hub refuses an anonymous pull now and then: on 2026-10-07 it answered one job
+        # "unauthorized: authentication required" for the pinned MinIO digest, which the other
+        # jobs pulled the same minute and which still resolves. The pull is tried again, a few
+        # times, before it fails the job.
+        run: |
+          for attempt in 1 2 3 4; do
+            docker compose -f deploy/local/compose.yaml pull --quiet --include-deps minio && break
+            (( attempt < 4 )) || exit 1
+            sleep $((attempt * 15))
+          done
+          docker compose -f deploy/local/compose.yaml up -d --wait minio
       - run: cmake --preset ci
       - run: cmake --build --preset ci --target gateway_server live_packager ulw_devtoken ulw_migrate
       - run: mkdir -p live-report
@@ -272,7 +292,9 @@ jobs:
   # broadcaster's page starts a stream through the gateway, publishes Chromium's fake camera
   # over WHIP with the ticket the gateway issued, goes live; the gateway starts the packager
   # and LiveKit's recorder relays to it; a second user watches in hls.js; the broadcaster ends
-  # it, and its recording becomes a video the worker makes ready.
+  # it, and its recording becomes a video the worker makes ready. A second run never calls start
+  # or end: LiveKit's webhooks to the gateway take the stream live and, once the page drops its
+  # connection, end it (docs/adr/0093).
   live-publish:
     runs-on: ubuntu-24.04
     timeout-minutes: 50
@@ -303,7 +325,17 @@ jobs:
           package-manager-cache: false
       - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - name: Start MinIO, LiveKit and its recorder
-        run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait minio livekit egress
+        # Docker Hub refuses an anonymous pull now and then: on 2026-10-07 it answered one job
+        # "unauthorized: authentication required" for the pinned MinIO digest, which the other
+        # jobs pulled the same minute and which still resolves. The pull is tried again, a few
+        # times, before it fails the job.
+        run: |
+          for attempt in 1 2 3 4; do
+            docker compose -f deploy/local/compose.yaml --profile calls pull --quiet --include-deps minio livekit egress && break
+            (( attempt < 4 )) || exit 1
+            sleep $((attempt * 15))
+          done
+          docker compose -f deploy/local/compose.yaml --profile calls up -d --wait minio livekit egress
       - run: cmake --preset ci
       - run: >-
           cmake --build --preset ci --target gateway_server transcode_worker live_packager
@@ -334,6 +366,11 @@ jobs:
       - run: >-
           sudo "$RUNNER_TEMP/callcap/bin/python" tests/load/call_capacity/call_capacity.py
           --calls 4 --seconds 60 --out call-capacity
+        timeout-minutes: 10
+      # M29 (ADR-0095): group calls of four, against n x (n - 1) streams out per call.
+      - run: >-
+          sudo "$RUNNER_TEMP/callcap/bin/python" tests/load/call_capacity/call_capacity.py
+          --calls 2 --participants 4 --seconds 60 --out call-capacity/group-of-4
         timeout-minutes: 10
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
