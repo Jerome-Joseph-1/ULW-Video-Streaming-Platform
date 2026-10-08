@@ -100,4 +100,19 @@ TEST(PacedBucket, ItsBurstIsThereAtOnceThenOneAnIntervalAndItFillsWhenLeftAlone)
     EXPECT_FALSE(chat::PacedBucket(0, minute, kStart).available(kStart));
 }
 
+TEST(PacedBucket, SaysHowLongUntilTheNextTakeSucceeds) {
+    const Millis interval{3'000};
+    chat::PacedBucket bucket(2, interval, kStart);
+    EXPECT_EQ(bucket.wait(kStart), Millis{0});
+    bucket.take(kStart);
+    bucket.take(kStart);
+    EXPECT_EQ(bucket.wait(kStart), interval);
+    EXPECT_EQ(bucket.wait(kStart + Millis{1'000}), Millis{2'000});
+    // Rounded up: waiting what it says always finds the allowance there.
+    EXPECT_EQ(bucket.wait(kStart + std::chrono::microseconds{2'999'500}), Millis{1});
+    EXPECT_TRUE(bucket.available(kStart + interval));
+    EXPECT_EQ(bucket.wait(kStart + interval), Millis{0});
+    EXPECT_EQ(chat::PacedBucket(0, interval, kStart).wait(kStart), Millis::max());
+}
+
 } // namespace

@@ -1012,6 +1012,7 @@ void ChatService::sweep() noexcept {
     std::erase_if(joins_, [now](const auto& entry) { return entry.second.full(now); });
     std::erase_if(sends_, [now](const auto& entry) { return entry.second.full(now); });
     std::erase_if(refusals_, [now](const auto& entry) { return entry.second.full(now); });
+    std::erase_if(memberships_, [now](const auto& entry) { return entry.second.full(now); });
 }
 
 void ChatService::leave(ClientId id, Client& c, const core::RoomId& room) noexcept {
@@ -1033,8 +1034,10 @@ void ChatService::leave(ClientId id, Client& c, const core::RoomId& room) noexce
 }
 
 void ChatService::on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept {
-    if (also_ != nullptr) {
-        also_->on_member_removed(room, user);
+    for (core::ports::IMemberListener* also : also_) {
+        if (also != nullptr) {
+            also->on_member_removed(room, user);
+        }
     }
     if (core::ports::is_stream_chat(room)) {
         return;
@@ -1059,6 +1062,7 @@ void ChatService::on_member_removed(const core::RoomId& room, const core::UserId
         ++counters_.removals;
         answer(*c.client, "not_member", room);
     }
+    tell_members(room, user, "removed");
 }
 
 void ChatService::unconfirmed(const core::RoomId& room, const core::UserId& user) noexcept {
@@ -1078,8 +1082,10 @@ void ChatService::on_members_resync() noexcept {
     if (stopped_) {
         return;
     }
-    if (also_ != nullptr) {
-        also_->on_members_resync();
+    for (core::ports::IMemberListener* also : also_) {
+        if (also != nullptr) {
+            also->on_members_resync();
+        }
     }
     // Checks asked before now may have been read before a removal this resync is for: a failure
     // of one of them is not asked again (below, rechecked), since this resync asks anew. Those

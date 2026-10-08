@@ -78,6 +78,14 @@ spec:
               value: sub
             - name: ULW_AUTH_COOKIE
               value: auth_token
+            # The operator's backend's tokens (SERVICE_CLAIM, SERVICE_SCOPE in
+            # config.env; ADR-0096). They serve chat's service API once ULW_SERVICE_PORT is set
+            # (RUNBOOK.md, step 10); unset, there is none, and users' lists stay as
+            # ULW_CHAT_SELF_SERVICE (off unless set) allows.
+            - name: ULW_SERVICE_CLAIM
+              value: scope
+            - name: ULW_SERVICE_SCOPE
+              value: ""
             # The pages whose cookie may open a socket (ALLOWED_ORIGINS in config.env). Native
             # apps send the bearer header instead.
             - name: ULW_ALLOWED_ORIGINS

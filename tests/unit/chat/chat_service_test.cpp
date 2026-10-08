@@ -5,6 +5,7 @@
 #include "chat_service.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
+#include "support/no_membership_store.hpp"
 
 #include <algorithm>
 #include <array>
@@ -105,7 +106,7 @@ public:
 // Member lists, answered at once by default. The port never answers from inside a call; the
 // service copes with either, and tests that do not care about membership read simpler this way.
 // With `hold` set, answers wait for answer_admits().
-class FakeMessages final : public core::ports::IMessageStore {
+class FakeMessages final : public ulw::test::NoMembershipStore {
 public:
     void history_before(
         const core::RoomId& /*room*/, std::optional<std::uint64_t> /*before*/,
@@ -227,6 +228,9 @@ struct Seen {
     std::string body;
     std::string reason;
     std::optional<std::uint64_t> retry_after_ms;
+    // Of a member list's change.
+    std::string user;
+    std::string change;
 };
 
 Seen seen(const std::string& text) {
@@ -241,7 +245,9 @@ Seen seen(const std::string& text) {
            .id = string("id"),
            .body = infra::auth::decode_base64url(string("body")).value_or("?"),
            .reason = string("reason"),
-           .retry_after_ms = std::nullopt};
+           .retry_after_ms = std::nullopt,
+           .user = string("user"),
+           .change = string("change")};
     if (const core::json::Value* v = json->find("seq")) {
         s.seq = v->as_u64().value_or(0);
     }
@@ -262,9 +268,17 @@ std::vector<std::uint64_t> seqs(const std::vector<std::string>& texts) {
     return out;
 }
 
+// The service as a deployment that lets users manage their own member lists has it
+// (ULW_CHAT_SELF_SERVICE=on): what these tests exercise.
+chat::ServiceLimits self_serving() {
+    chat::ServiceLimits limits;
+    limits.self_service = true;
+    return limits;
+}
+
 class ChatServiceTest : public ::testing::Test {
 protected:
-    explicit ChatServiceTest(chat::ServiceLimits limits = {})
+    explicit ChatServiceTest(chat::ServiceLimits limits = self_serving())
         : service_(std::make_unique<chat::ChatService>(rooms_, messages_, clock_, limits)) {}
 
     chat::ClientId attach(FakeClient& client, std::string_view user = "alice") {
@@ -416,14 +430,23 @@ TEST_F(ChatServiceTest, AUserRemovedFromTheMemberListLeavesTheRoomAndHearsNothin
     bob_phone.take();
 
     messages_.watcher->on_member_removed(room_id(), *core::UserId::parse("bob"));
+    // Out of the room, then told of the change to the list, as everyone else in it is.
     for (FakeClient* removed : {&bob, &bob_phone}) {
         const auto got = removed->take();
-        ASSERT_EQ(got.size(), 1U);
+        ASSERT_EQ(got.size(), 2U);
         EXPECT_EQ(seen(got[0]).type, "error");
         EXPECT_EQ(seen(got[0]).reason, "not_member");
+        EXPECT_EQ(seen(got[1]).type, "member");
+        EXPECT_EQ(seen(got[1]).user, "bob");
+        EXPECT_EQ(seen(got[1]).change, "removed");
     }
-    EXPECT_TRUE(alice.take().empty());
+    const auto told = alice.take();
+    ASSERT_EQ(told.size(), 1U);
+    EXPECT_EQ(seen(told[0]).type, "member");
+    EXPECT_EQ(seen(told[0]).user, "bob");
+    EXPECT_EQ(seen(told[0]).change, "removed");
     EXPECT_EQ(service_->counters().removals, 2U);
+    EXPECT_EQ(service_->counters().member_events, 3U);
 
     deliver(member, 1, "after");
     EXPECT_EQ(seen(alice.take().at(0)).body, "after");
@@ -447,7 +470,11 @@ TEST_F(ChatServiceTest, AJoinWaitingForTheMemberListWhenItsUserIsRemovedIsRefuse
     messages_.watcher->on_member_removed(room_id(), *core::UserId::parse("bob"));
     messages_.answer_admits({});
     EXPECT_TRUE(rooms_.joins.empty());
-    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_member");
+    // Told of the removal at once, as every socket of the user is, then refused.
+    const auto got = bob.take();
+    ASSERT_EQ(got.size(), 2U);
+    EXPECT_EQ(seen(got[0]).change, "removed");
+    EXPECT_EQ(seen(got[1]).reason, "not_member");
     // Asking again asks the member list again.
     join(b);
     ASSERT_EQ(messages_.held.size(), 1U);
@@ -468,7 +495,11 @@ TEST_F(ChatServiceTest, AfterAResyncAClientNoLongerOnTheListLeavesTheRoom) {
     messages_.refused = {"bob"};
     messages_.watcher->on_members_resync();
     EXPECT_EQ(seen(bob.take().at(0)).reason, "not_member");
-    EXPECT_TRUE(alice.take().empty());
+    // The removal nobody announced is told as an announced one is.
+    const auto told = alice.take();
+    ASSERT_EQ(told.size(), 1U);
+    EXPECT_EQ(seen(told[0]).user, "bob");
+    EXPECT_EQ(seen(told[0]).change, "removed");
     EXPECT_EQ(service_->counters().removals, 1U);
 }
 
@@ -504,7 +535,9 @@ TEST_F(ChatServiceTest, AResyncWhoseChecksFailAsksAgainAndStillFindsTheRemoval) 
         messages_.answer_admits({});
     }
     EXPECT_EQ(seen(bob.take().at(0)).reason, "not_member");
-    EXPECT_TRUE(alice.take().empty());
+    const auto told = alice.take();
+    ASSERT_EQ(told.size(), 1U);
+    EXPECT_EQ(seen(told[0]).change, "removed");
     EXPECT_EQ(service_->counters().removals, 1U);
 }
 
@@ -1765,8 +1798,15 @@ TEST_F(ChatServiceTest, RemovalsAndResyncsAreToldToWhoeverElseListens) {
                                const core::UserId& user) noexcept override {
             removed.emplace_back(room, user);
         }
+        void on_member_added(const core::RoomId& /*room*/,
+                             const core::UserId& /*user*/) noexcept override {
+            ++added;
+        }
+        void on_member_role(const core::RoomId& /*room*/, const core::UserId& /*user*/,
+                            core::ports::MemberRole /*role*/) noexcept override {}
         void on_members_resync() noexcept override { ++resyncs; }
         std::vector<std::pair<core::RoomId, core::UserId>> removed;
+        int added = 0;
         int resyncs = 0;
     } listener;
     service_->also_tell(&listener);
@@ -1820,6 +1860,85 @@ TEST_F(ChatServiceTest, ClientsJoinAtMostTheirShareOfRoomsAndUsersAtMostTheirRat
     clock_.advance(Millis{1'000});
     join(b, std::nullopt, chat::Delivery::Durable, kOtherRoom);
     EXPECT_EQ(rooms_.joins.size(), 65U);
+}
+
+} // namespace
+
+namespace {
+
+// A store that cannot be reached (the fake answers every member-list call so): each command is
+// answered unavailable with what it named, and nothing changes.
+TEST_F(ChatServiceTest, MemberListCommandsOnAStoreThatIsDownAreAnsweredUnavailable) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    service_->open_direct(a, {.user = *core::UserId::parse("bob")});
+    service_->create_group(a, {.id = key("g"), .users = {}});
+    service_->add_members(a, {.room = room_id(), .users = {*core::UserId::parse("bob")}});
+    service_->remove_member(a, {.room = room_id(), .user = *core::UserId::parse("bob")});
+    service_->leave_room(a, {.room = room_id()});
+    service_->list_rooms(a, {.after = std::nullopt, .limit = 10});
+    service_->list_members(a, {.room = room_id(), .after = std::nullopt, .limit = 10});
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 7U);
+    for (const std::string& frame : got) {
+        EXPECT_EQ(seen(frame).reason, "unavailable") << frame;
+    }
+    EXPECT_EQ(seen(got[0]).user, "bob");
+    EXPECT_EQ(seen(got[1]).id, "g");
+    EXPECT_EQ(service_->counters().membership_unavailable, 7U);
+}
+
+// Listings are reads of the store, charged as joins are.
+TEST_F(ChatServiceTest, ListingsAreChargedToTheJoinAllowance) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    for (std::uint32_t i = 0; i < chat::ServiceLimits{}.join_burst; ++i) {
+        service_->list_rooms(a, {.after = std::nullopt, .limit = 10});
+    }
+    alice.take();
+    service_->list_rooms(a, {.after = std::nullopt, .limit = 10});
+    service_->list_members(a, {.room = room_id(), .after = std::nullopt, .limit = 10});
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 2U);
+    EXPECT_EQ(seen(got[0]).reason, "busy");
+    EXPECT_EQ(seen(got[1]).reason, "busy");
+}
+
+// A client whose connection cannot take another frame pays with it, as for any other answer.
+TEST_F(ChatServiceTest, AMemberEventToAClosingClientIsNotCounted) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    messages_.watcher->on_member_added(room_id(), *core::UserId::parse("bob"));
+    EXPECT_EQ(seen(alice.take().at(0)).change, "added");
+    alice.closing = true;
+    messages_.watcher->on_member_added(room_id(), *core::UserId::parse("carol"));
+    EXPECT_EQ(service_->counters().member_events, 1U);
+}
+
+// A join still waiting for the room's member list is not in the room: its client hears of no
+// one else's change there, only its own user's.
+TEST_F(ChatServiceTest, AJoinStillWaitingForTheListHearsOnlyOfItsOwnUser) {
+    messages_.hold = true;
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    messages_.watcher->on_member_added(room_id(), *core::UserId::parse("bob"));
+    messages_.watcher->on_member_role(room_id(), *core::UserId::parse("bob"),
+                                      core::ports::MemberRole::Admin);
+    EXPECT_TRUE(alice.take().empty()) << "a client not let in yet heard of the room";
+    messages_.watcher->on_member_added(room_id(), *core::UserId::parse("alice"));
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 1U);
+    EXPECT_EQ(seen(got[0]).user, "alice");
+    // Once let in, it hears of everyone's.
+    messages_.answer_admits({});
+    rooms_.admit();
+    alice.take();
+    messages_.watcher->on_member_added(room_id(), *core::UserId::parse("bob"));
+    EXPECT_EQ(seen(alice.take().at(0)).user, "bob");
 }
 
 } // namespace

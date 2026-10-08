@@ -12,6 +12,7 @@
 #include "os/limits.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
+#include "os/unique_fd.hpp"
 #include "rt/room_router.hpp"
 
 #include "chat.hpp"
@@ -31,7 +32,9 @@
 #include <optional>
 #include <print>
 #include <string>
+#include <string_view>
 #include <system_error>
+#include <utility>
 
 namespace {
 
@@ -145,6 +148,9 @@ std::expected<void, std::string> make_verifier(const chat::Config& config, Servi
     infra::auth::ClaimRules rules{.issuer = config.jwt_issuer,
                                   .audience = config.jwt_audience,
                                   .subject_claim = config.jwt_subject_claim};
+    rules.service_claim = config.service_claim;
+    rules.service_value = config.service_value;
+    rules.service_client_id = config.service_client_id;
     if (!config.dev_jwks_file.empty()) {
         const auto jwks = read_key_set(config.dev_jwks_file);
         if (!jwks) {
@@ -210,6 +216,7 @@ chat::Limits limits_of(const chat::Config& config) {
     if (const std::optional<std::uint16_t> group = config.group_participants) {
         chat_limits.calls.group_participants = *group;
     }
+    chat_limits.service.self_service = config.self_service;
     const chat::ClientLimits& per_client = config.client_limits;
     chat_limits.max_connections_per_ip =
         per_client.max_connections_per_ip.value_or(chat_limits.max_connections_per_ip);
@@ -227,6 +234,37 @@ chat::Limits limits_of(const chat::Config& config) {
     chat_limits.trusted_proxies = per_client.trusted_proxies;
     chat_limits.trusted_proxy_hops = per_client.trusted_proxy_hops;
     return chat_limits;
+}
+
+// The operator's backend's API, on a port of its own (ADR-0096), when configured; bound while
+// still root, as the client port is.
+std::expected<std::optional<os::UniqueFd>, int> listen_for_service(const chat::Config& config) {
+    const std::optional<chat::ServiceApiConfig>& api = config.service_api;
+    if (!api) {
+        return std::nullopt;
+    }
+    auto bound = net::listen_tcp({.port = api->port});
+    if (!bound) {
+        return std::unexpected(bound.error());
+    }
+    return std::optional<os::UniqueFd>(std::move(*bound));
+}
+
+// The clients' listener and, when configured, the service API's, registered with the reactor;
+// what failed names itself.
+std::expected<void, std::pair<std::string_view, int>>
+serve(Services& s, os::UniqueFd listener, std::optional<os::UniqueFd> service_listener) {
+    if (auto r = s.reactor->listen(std::move(listener), *s.server); !r) {
+        return std::unexpected(std::pair{std::string_view{"register listener"}, r.error()});
+    }
+    if (!service_listener) {
+        return {};
+    }
+    if (auto r = s.reactor->listen(std::move(*service_listener), s.server->service_api()); !r) {
+        return std::unexpected(
+            std::pair{std::string_view{"register the service listener"}, r.error()});
+    }
+    return {};
 }
 
 int run() {
@@ -255,6 +293,10 @@ int run() {
     auto listener = net::listen_tcp({.port = config->port});
     if (!listener) {
         return fail("listen", errno_text(listener.error()));
+    }
+    auto service_listener = listen_for_service(*config);
+    if (!service_listener) {
+        return fail("listen on the service port", errno_text(service_listener.error()));
     }
     // Before any thread exists: glibc then has no other thread to carry the change to.
     const auto step = ops::leave_root(config->run_as_user, config->allow_root);
@@ -328,8 +370,8 @@ int run() {
         return fail("signalfd", errno_text(signals.error()));
     }
     s.signals = std::move(*signals);
-    if (auto r = s.reactor->listen(std::move(*listener), *s.server); !r) {
-        return fail("register listener", errno_text(r.error()));
+    if (auto r = serve(s, std::move(*listener), std::move(*service_listener)); !r) {
+        return fail(r.error().first, errno_text(r.error().second));
     }
     // Says which keys tokens are checked against, so a development key set left configured in
     // a real deployment shows on the first line of the log.
@@ -341,10 +383,13 @@ int run() {
     const std::string calls = calls_text(*config);
     chat::log_event(
         R"("level":"info","msg":"listening","version":"{}","git":"{}","node":"{}","port":{},)"
-        R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}","calls":{})",
+        R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}","calls":{},)"
+        R"("self_service":{},"service_port":{})",
         info.version, info.git_sha, config->node.view(), config->port, config->node_address,
         net::to_string(choice->kind), choice->fell_back_from_io_uring ? " (fallback)" : "", keys,
-        jemalloc.empty() ? "default" : "jemalloc ", jemalloc, calls);
+        jemalloc.empty() ? "default" : "jemalloc ", jemalloc, calls, config->self_service,
+        config->service_api.transform([](const chat::ServiceApiConfig& api) { return api.port; })
+            .value_or(std::uint16_t{0}));
 
     while (!s.server->finished()) {
         s.reactor->run_once(kLoopTick);

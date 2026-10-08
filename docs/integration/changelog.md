@@ -3,6 +3,36 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-04: who may start a chat is the operator's; presence only between shared chats
+
+<!-- apps/chat/src/membership.cpp (self_service), apps/chat/src/service_api.cpp, apps/chat/src/presence.cpp (watch, recheck), apps/chat/src/config.cpp, infra/postgres/src/message_sql.hpp (kSharedWith), docs/adr/0096-member-lists-changed-by-their-users.md -->
+
+Breaking for clients that open chats themselves or watch people they share no chat with, unless
+the operator turns self-service on. Lands with the member-list commands below, before either was
+tagged.
+
+| Before | Now |
+|---|---|
+| Any signed-in user could `open_direct` with, `create_group` with, or `add_members` anyone whose id they knew | Only with `ULW_CHAT_SELF_SERVICE=on`. Off, the default, the three answer `not_allowed`; `leave`, an admin's `remove_member`, `rooms` and `members` are unchanged |
+| Operators listed members in SQL | Also, an operator's backend lists them through chat's [service API](chat.md#the-service-api), with a client-credentials token that `ULW_SERVICE_CLAIM` and `ULW_SERVICE_SCOPE` mark as the service's ([auth.md](auth.md#service-tokens)) |
+| Anyone signed in could `watch` anyone | Only someone who shares a direct or group chat with the user; otherwise `not_shared`. A watch whose shared chat goes is dropped with an unasked `error` `not_shared` (or `unavailable`) naming the user |
+| A `watch` was answered at once | After one read of the database: `watching` comes a round trip later; a watch refused is refused again from memory until either user is listed somewhere |
+| A direct chat's pair could never be undone | The service API's `close_direct` unlists both (an unfriend, a block); users still cannot leave a direct chat themselves |
+
+What to do:
+
+- **Clients:** handle `not_allowed` (start conversations through your product, which calls the
+  service API), and `not_shared` on `watch`, asked or not: show the user as unknown and stop
+  watching. Watch people after you share a chat with them, and again after a `member` `added`
+  if you want their presence.
+- **Operators:** decide between self-service and the service API (RUNBOOK, step 10). A demo
+  whose web client opens chats itself needs `ULW_CHAT_SELF_SERVICE=on`. For the service API, set
+  up the backend's client in the identity provider, then `ULW_SERVICE_PORT` and
+  `SERVICE_CLAIM`/`SERVICE_SCOPE` in config.env, `ULW_SERVICE_PORT` and `ULW_SERVICE_CLIENT_ID`
+  on chat, a Service and a
+  NetworkPolicy for the backend; watch
+  `service_api_answers_total{result="forbidden"}`.
+
 ## 2026-10-04: group calls
 
 <!-- apps/chat/src/call.cpp (CallHandler::callable, CallHandler::moderate), apps/chat/src/ring.cpp (Ringer::signal), apps/chat/src/envelope.cpp (call_move_of, write_call_event), docs/adr/0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md -->
@@ -23,6 +53,34 @@ What to do:
 - **Clients:** to offer group calls, handle `call_left` and `call_moved` (on `call_moved`, ask
   for a ticket again unless you are `expelled`), the errors `expelled` and `call_full`, and a
   `call_ended` with no `by`. Clients that only make 1:1 calls need do nothing.
+
+## 2026-10-03: clients open direct chats and manage group chats themselves
+
+<!-- apps/chat/src/membership.cpp, apps/chat/src/envelope.cpp, migrations/0015_chat_membership.sql, docs/adr/0096-member-lists-changed-by-their-users.md -->
+
+Additive to [chat.md](chat.md); nothing breaks for a client that does not use it. New commands on
+the chat WebSocket: `open_direct`, `create_group`, `add_members`, `remove_member`, `leave`,
+`rooms` and `members` ([Changing member lists](chat.md#changing-member-lists)), and an unasked
+`member` frame when a member list you are on, or of a room you joined, changes.
+
+| Before | Now |
+|---|---|
+| Members were listed by operators in the database | Users open direct chats and create groups; a group's admin adds and removes members; anyone leaves a group |
+| A direct chat was any room id the operators listed two users in | `open_direct` names the pair's room: a version 8 id starting with `03`, the same whichever of the two asks. Rooms listed by operators keep working as before |
+| A removal was told to the removed user's sockets in the room (`error` `not_member`) | The same, and then a `member` frame with `change` `removed` to every socket of that user and every socket in the room; additions are told likewise |
+| Nothing told a group's members of a new admin | A `member` frame with `change` `promoted` (or `demoted`); `left` names who was promoted |
+| No limit on what one account could list | `open_direct` and `create_group` of a new room answer `room_limit` once the user is in 1000 rooms; a group everyone left that holds messages is `gone` to a create under its id |
+| A `join`'s `"kind"` was taken as given | For a room starting with `03` or `04` (version 8) the kind is the room's; a `"kind"` naming the other is `bad_room` |
+
+What to do:
+
+- **Clients:** to start a conversation, send `open_direct` and join the room it answers, instead
+  of asking an operator. Ignore `member` frames you do not use; in end-to-end encrypted rooms,
+  act on them as [chat.md](chat.md#changing-member-lists) says (commit the change in MLS).
+- **Operators:** migration 0015 builds an index on `chat_members` that holds member changes (not
+  joins) while it builds; deploy it off-peak (RUNBOOK). Watch
+  `membership_refusals_total{reason="unavailable"}`. 0015 must run after 0011 to 0014; the
+  release that carries it carries them (RUNBOOK).
 
 ## 2026-10-03: a live stream goes live and ends when its publisher does
 

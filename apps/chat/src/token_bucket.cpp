@@ -63,6 +63,18 @@ bool PacedBucket::available(core::MonoTime now) const noexcept {
     return burst_ > 0 && due_ <= now + (interval_ * (burst_ - 1));
 }
 
+core::Millis PacedBucket::wait(core::MonoTime now) const noexcept {
+    if (burst_ == 0) {
+        return core::Millis::max();
+    }
+    const core::MonoTime at = due_ - (interval_ * (burst_ - 1));
+    if (at <= now) {
+        return core::Millis{0};
+    }
+    // Rounded up: a client that waits exactly this long finds the allowance there.
+    return std::chrono::ceil<core::Millis>(at - now);
+}
+
 void PacedBucket::take(core::MonoTime now) noexcept {
     due_ = std::max(due_, now) + interval_;
 }

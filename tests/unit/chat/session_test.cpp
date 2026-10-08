@@ -26,6 +26,7 @@
 #include <netinet/tcp.h>
 #include <sys/socket.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -334,7 +335,10 @@ Asked ask_upgrade(std::uint16_t port, const std::string& headers) {
 class ChatSessionTest : public ::testing::TestWithParam<net::ReactorKind> {
 protected:
     void SetUp() override {
-        node_ = std::make_unique<Node>(GetParam());
+        // Users manage their own member lists here (ULW_CHAT_SELF_SERVICE=on).
+        chat::Limits limits;
+        limits.service.self_service = true;
+        node_ = std::make_unique<Node>(GetParam(), limits);
         ASSERT_NE(node_->port(), 0);
     }
 
@@ -388,6 +392,111 @@ TEST_P(ChatSessionTest, ProbesAnswerAndUnknownPathsAreNotFound) {
     EXPECT_NE(metrics.body.find("connections_rejected_total{reason=\"capacity\"} 0\n"),
               std::string::npos);
     EXPECT_EQ(ulw::test::http_get(node_->port(), "/api/v1/videos").status, 404);
+}
+
+// Every member-list command reaches the service from the socket, and is counted (ADR-0096).
+TEST_P(ChatSessionTest, MemberListCommandsAreAnsweredOnTheSocketAndCounted) {
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    const auto answer = [&](const std::string& command) {
+        EXPECT_TRUE(alice->send_text(command));
+        // The answer, past any change the command told of.
+        for (;;) {
+            const auto text = alice->next_text(seconds(10));
+            if (!text) {
+                return std::string("no answer");
+            }
+            if (text->find(R"("type":"member")") == std::string::npos) {
+                return *text;
+            }
+        }
+    };
+    EXPECT_NE(answer(R"({"type":"open_direct","user":"bob"})").find(R"("type":"direct")"),
+              std::string::npos);
+    const std::string group = answer(R"({"type":"create_group","id":"g1","users":["bob"]})");
+    ASSERT_NE(group.find(R"("type":"group")"), std::string::npos) << group;
+    const std::string room = group.substr(group.find(R"("room":")") + 8, 36);
+    EXPECT_NE(answer(R"({"type":"add_members","room":")" + room + R"(","users":["carol"]})")
+                  .find(R"("users":["carol"])"),
+              std::string::npos);
+    EXPECT_NE(answer(R"({"type":"remove_member","room":")" + room + R"(","user":"carol"})")
+                  .find(R"("type":"removed")"),
+              std::string::npos);
+    EXPECT_NE(answer(R"({"type":"members","room":")" + room + R"("})").find(R"("more":false)"),
+              std::string::npos);
+    EXPECT_NE(answer(R"({"type":"rooms"})").find(R"("type":"rooms")"), std::string::npos);
+    EXPECT_NE(answer(R"({"type":"leave","room":")" + room + R"("})").find(R"("promoted":"bob")"),
+              std::string::npos);
+    const auto metrics = ulw::test::http_get(node_->port(), "/metrics").body;
+    for (const std::string_view line :
+         {"directs_opened_total 1\n", "groups_created_total 1\n",
+          "members_changed_total{change=\"added\"} 1\n",
+          "members_changed_total{change=\"removed\"} 1\n",
+          "members_changed_total{change=\"left\"} 1\n",
+          "membership_refusals_total{reason=\"not_member\"} 0\n",
+          "membership_refusals_total{reason=\"not_admin\"} 0\n",
+          "membership_refusals_total{reason=\"not_group\"} 0\n",
+          "membership_refusals_total{reason=\"too_many_members\"} 0\n",
+          "membership_refusals_total{reason=\"room_limit\"} 0\n",
+          "membership_refusals_total{reason=\"gone\"} 0\n",
+          "membership_refusals_total{reason=\"rate_limited\"} 0\n",
+          "membership_refusals_total{reason=\"unavailable\"} 0\n", "member_events_total "}) {
+        EXPECT_NE(metrics.find(line), std::string::npos) << line;
+    }
+}
+
+// The node's metrics are one text of many features (calls, rings, group calls, member lists):
+// every line is a name and a whole number, each name once, and each feature's lines are there.
+TEST_P(ChatSessionTest, EveryMetricsLineIsANameAndANumberAndEveryFeatureHasItsLines) {
+    const auto body = ulw::test::http_get(node_->port(), "/metrics").body;
+    std::vector<std::string> names;
+    std::size_t at = 0;
+    while (at < body.size()) {
+        const std::size_t end = body.find('\n', at);
+        ASSERT_NE(end, std::string::npos) << "the last line has no newline";
+        const std::string line = body.substr(at, end - at);
+        const std::size_t space = line.rfind(' ');
+        ASSERT_NE(space, std::string::npos) << line;
+        const std::string value = line.substr(space + 1);
+        EXPECT_FALSE(value.empty()) << line;
+        EXPECT_TRUE(std::ranges::all_of(value, [](char c) { return c >= '0' && c <= '9'; }))
+            << line;
+        names.push_back(line.substr(0, space));
+        at = end + 1;
+    }
+    auto sorted = names;
+    std::ranges::sort(sorted);
+    EXPECT_EQ(std::ranges::adjacent_find(sorted), sorted.end()) << "a name appears twice";
+    for (const std::string_view name :
+         {// Calls and their ring (ADR-0087, ADR-0091).
+          "call_tickets_total", "call_refusals_total{reason=\"no_call\"}",
+          "call_refusals_total{reason=\"ring_limited\"}", "calls_ringing_or_answered",
+          "call_rings_total{outcome=\"graced\"}", "call_notices_malformed_total",
+          "notices_total{stage=\"dropped\"}",
+          // Group calls (ADR-0095).
+          "call_refusals_total{reason=\"expelled\"}", "call_refusals_total{reason=\"call_full\"}",
+          "call_rings_total{outcome=\"left\"}", "call_rings_total{outcome=\"emptied\"}",
+          "call_expulsions_total", "call_moves_total{reason=\"expel\"}",
+          "call_moves_total{reason=\"removal\"}", "call_moves_total{reason=\"end\"}",
+          "call_moves_failed_total{why=\"fenced\"}", "call_moves_failed_total{why=\"unavailable\"}",
+          "call_generations_closed_total", "call_generations_abandoned_total",
+          "call_generations_closing", "call_occupancy_checks_total",
+          "call_occupancy_unavailable_total", "call_resync_checks_total",
+          "call_expulsions_kept_total", "call_expulsions_cleared_total",
+          "call_announcements_dropped_total",
+          // Member lists (ADR-0096).
+          "directs_opened_total", "groups_created_total", "members_changed_total{change=\"added\"}",
+          "members_changed_total{change=\"removed\"}", "members_changed_total{change=\"left\"}",
+          "membership_refusals_total{reason=\"not_member\"}",
+          "membership_refusals_total{reason=\"not_admin\"}",
+          "membership_refusals_total{reason=\"not_group\"}",
+          "membership_refusals_total{reason=\"too_many_members\"}",
+          "membership_refusals_total{reason=\"room_limit\"}",
+          "membership_refusals_total{reason=\"gone\"}",
+          "membership_refusals_total{reason=\"rate_limited\"}",
+          "membership_refusals_total{reason=\"unavailable\"}", "member_events_total"}) {
+        EXPECT_NE(std::ranges::find(names, name), names.end()) << name;
+    }
 }
 
 TEST_P(ChatSessionTest, AnUpgradeNeedsAValidToken) {
