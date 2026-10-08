@@ -1,6 +1,6 @@
 // End-to-end encryption for the page's encrypted room. chat.js uses only openSession below.
 //
-// MLS (RFC 9420) through the OpenMLS browser client, clients/web-mls (feat/e2ee-wasm, ADR-0099),
+// MLS (RFC 9420) through the OpenMLS browser client, clients/web-mls (ADR-0098),
 // which the web proxy serves at /mls/ from this checkout. Every body in the room is one
 // MLSMessage, as docs/integration/e2ee.md ("Browser client") lays out; MlsRoom (mls-room.js)
 // does the group's bookkeeping. A build without that client gets the WebCrypto stand-in
