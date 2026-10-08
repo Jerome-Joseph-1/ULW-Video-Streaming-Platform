@@ -741,7 +741,7 @@ TEST(Envelope, MemberListRepliesAreTheDocumentedShapes) {
     out.clear();
     chat::write_error_with(out, "rate_limited",
                            {.room = std::nullopt,
-                            .id = *rt::MessageKey::parse("g-1"),
+                            .id = rt::MessageKey::parse("g-1"),
                             .user = uid("bob"),
                             .retry_after = core::Millis{2500}});
     EXPECT_EQ(
