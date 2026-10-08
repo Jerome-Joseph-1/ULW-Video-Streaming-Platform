@@ -103,16 +103,17 @@ TEST_P(GatewayPlayback, AFailedVideoTellsItsOwnerWhy) {
     ASSERT_EQ(r->status, 200) << r->body;
     EXPECT_EQ(r->body, R"({"id":")" + std::string(kVideo) +
                            R"(","title":"trip","state":"failed","version":3,"duration_ms":null,)"
-                           R"("error_reason":"the file could not be decoded as \"video\""})");
+                           R"("error_reason":"the file could not be decoded as \"video\"",)"
+                           R"("visibility":"private"})");
 
     // Any other state has no reason to give, and the field is left out.
     gw.put_video(video(core::VideoState::Ready));
     const auto ready = c.request("GET", resource, kAlice);
     ASSERT_TRUE(ready);
     ASSERT_EQ(ready->status, 200) << ready->body;
-    EXPECT_EQ(ready->body,
-              R"({"id":")" + std::string(kVideo) +
-                  R"(","title":"trip","state":"ready","version":3,"duration_ms":5000})");
+    EXPECT_EQ(ready->body, R"({"id":")" + std::string(kVideo) +
+                               R"(","title":"trip","state":"ready","version":3,"duration_ms":5000,)"
+                               R"("visibility":"private"})");
 }
 
 TEST_P(GatewayPlayback, MasterRoutesEachRenditionBackThroughTheGateway) {

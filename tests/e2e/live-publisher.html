@@ -21,7 +21,9 @@ async function api(token, method, path) {
   return { status: response.status, body };
 }
 
-window.publish = async (token) => {
+// With start: false the page never calls start or end, as an encoder with a fixed token does
+// not: the media server's webhooks take the stream live and end it (ADR-0093).
+window.publish = async (token, { start = true } = {}) => {
   const created = await api(token, 'POST', '/api/v1/live');
   if (created.status !== 201) return { created: created.status };
   const stream = created.body;
@@ -82,6 +84,23 @@ window.publish = async (token) => {
     pc.addEventListener('connectionstatechange', check);
     check();
   });
+
+  // A client that vanishes: no WHIP DELETE, no end; the peer connection just goes.
+  window.dropPublisher = () => {
+    pc.close();
+    for (const track of media.getTracks()) track.stop();
+  };
+  // How a WHIP client stops on its own (RFC 9725): DELETE its session, with a fresh ticket.
+  // No call to the gateway's end.
+  window.closePublisher = async () => {
+    const deleted = await fetch(resource, { method: 'DELETE', headers: { authorization: await fresh() } });
+    state.steps.push({ method: 'DELETE', path: 'whip', status: deleted.status });
+    window.dropPublisher();
+    return deleted.status;
+  };
+  if (!start) {
+    return { id: stream.id, stream, whip: posted.status, patched: patched.status };
+  }
 
   // The POST was answered and the media flows: go live.
   const live = await api(token, 'POST', `/api/v1/live/${stream.id}/start`);

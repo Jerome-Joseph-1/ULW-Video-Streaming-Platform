@@ -135,6 +135,8 @@ LiveFailure LiveStreams::media_failure(MediaError e) noexcept {
     ++counters_.media_failures;
     switch (e) {
     case MediaError::Unavailable:
+    // A room a close could not get rid of yet: a later one may.
+    case MediaError::Remains:
         return LiveFailure::Unavailable;
     // Only a handle closed through itself answers this, and every handle here is opened per
     // request; it means the stream's room was closed, which is its end.
@@ -504,6 +506,69 @@ void LiveStreams::status(const core::LiveStreamId& id, LiveDone<Stream> done) {
             }
             done(std::move(*found));
         });
+}
+
+void LiveStreams::publisher_left(const core::LiveStreamId& id, LiveDone<Departure> done) {
+    ++pending_;
+    LiveDone<Departure> finished =
+        [this, done = std::move(done)](std::expected<Departure, LiveFailure> r) mutable noexcept {
+            --pending_;
+            done(r);
+        };
+    deps_.store.find(id, [this, finished = std::move(finished)](
+                             core::ports::LiveResult<Stream> found) mutable noexcept {
+        if (!found) {
+            finished(std::unexpected(store_failure(found.error())));
+            return;
+        }
+        // A starting stream keeps its start window: a broadcaster may take a while to set an
+        // encoder up, and its room comes and goes with the tickets meanwhile.
+        if (found->state != LiveState::Live) {
+            finished(found->state == LiveState::Ended ? Departure::Over : Departure::NotLive);
+            return;
+        }
+        const core::LiveStreamId stream = found->id;
+        deps_.sfu.present(
+            room_of(stream), kGeneration, found->owner, device_of(stream),
+            [this, stream, finished = std::move(finished)](
+                std::expected<bool, MediaError> present) mutable noexcept {
+                if (!present) {
+                    finished(std::unexpected(media_failure(present.error())));
+                    return;
+                }
+                if (*present) {
+                    finished(Departure::Present);
+                    return;
+                }
+                deps_.store.end(
+                    stream, LiveEnd::PublisherLeft, deps_.clock.wall_now(),
+                    [this, finished = std::move(finished)](
+                        core::ports::LiveResult<core::ports::EndedLiveStream>
+                            ended) mutable noexcept {
+                        if (!ended) {
+                            finished(std::unexpected(store_failure(ended.error())));
+                            return;
+                        }
+                        // Someone else's end got there first: the owner's, or the sweep's.
+                        if (!ended->ended) {
+                            finished(Departure::Over);
+                            return;
+                        }
+                        ++counters_.ended.at(end_index(LiveEnd::PublisherLeft));
+                        deps_.log.info(
+                            "live stream ended",
+                            {{"stream", ended->stream.id.to_string()},
+                             {"reason", core::ports::to_string(LiveEnd::PublisherLeft)}});
+                        // The room goes too, so no ticket still in a client's hands brings it
+                        // back; the row has ended whether or not that works.
+                        close_room(std::move(ended->stream),
+                                   [finished = std::move(finished)](
+                                       std::expected<Stream, LiveFailure>) mutable noexcept {
+                                       finished(Departure::Ended);
+                                   });
+                    });
+            });
+    });
 }
 
 void LiveStreams::playlist_ended(const core::LiveStreamId& id) {

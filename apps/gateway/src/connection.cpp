@@ -76,22 +76,6 @@ std::string_view method_name(http::Method m) noexcept {
     return "OTHER";
 }
 
-std::string_view state_name(core::VideoState s) noexcept {
-    switch (s) {
-    case core::VideoState::Init:
-        return "init";
-    case core::VideoState::Uploading:
-        return "uploading";
-    case core::VideoState::Processing:
-        return "processing";
-    case core::VideoState::Ready:
-        return "ready";
-    case core::VideoState::Failed:
-        return "failed";
-    }
-    return "unknown";
-}
-
 // A cross-site page can make a browser send a POST that carries the auth cookie, with a body of
 // its choosing, only under a CORS-safelisted Content-Type (text/plain, a form's two types);
 // application/json needs a preflight, which this gateway never answers.
@@ -136,9 +120,10 @@ std::string_view state_name(core::VideoState s) noexcept {
     if (!safe && !origin) {
         return false;
     }
-    // A second layer for the one route that reads a body as JSON: even from an allowed page,
-    // a body is believed only under the type no other page can send without a preflight.
-    return route != RouteId::CreateUpload || declares_json(head.headers);
+    // A second layer for the routes that read a body as JSON: even from an allowed page, a
+    // body is believed only under the type no other page can send without a preflight.
+    const bool json_body = route == RouteId::CreateUpload || route == RouteId::UpdateVideo;
+    return !json_body || declares_json(head.headers);
 }
 
 // An upload past its expires_at that was never committed takes nothing more: 410, as tus's
@@ -341,6 +326,7 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
 
     switch (match->id) {
     case RouteId::CreateUpload:
+    case RouteId::UpdateVideo:
         if (head.content_length == 0) {
             return http::HeadVerdict::reject(Status::BadRequest);
         }
@@ -356,6 +342,12 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
         }
         break;
     }
+    case RouteId::ListGrants:
+        req_.grant_query = grant_query(head.target);
+        if (head.content_length != 0) {
+            return http::HeadVerdict::reject(Status::BadRequest);
+        }
+        break;
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
     case RouteId::LivePlaylist:
@@ -372,6 +364,9 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     case RouteId::CancelUpload:
     case RouteId::CommitUpload:
     case RouteId::GetVideo:
+    // The operator's backend names the video and the user in the path.
+    case RouteId::GrantAccess:
+    case RouteId::RevokeAccess:
     case RouteId::Healthz:
     case RouteId::Readyz:
     case RouteId::Metrics:
@@ -400,8 +395,8 @@ http::HeadVerdict Connection::authenticate_head(const http::RequestHead& head) n
     // Authorization wins over the cookie, so without one the token is the cookie. Checked before
     // the token is verified: a request some other page made is refused whatever it carries, and
     // charges none of the user's quota.
-    if (!http::find_header(head.headers, "authorization") &&
-        !cookie_request_trusted(head, req_.route, gw().limits())) {
+    req_.bearer = http::find_header(head.headers, "authorization").has_value();
+    if (!req_.bearer && !cookie_request_trusted(head, req_.route, gw().limits())) {
         ++gw().counters().cross_site_rejections;
         return http::HeadVerdict::reject(Status::Forbidden);
     }
@@ -480,7 +475,7 @@ void Connection::on_keys_refreshed() noexcept {
 http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept {
     last_activity_ = now();
     last_progress_ = last_activity_;
-    if (req_.route == RouteId::CreateUpload) {
+    if (req_.route == RouteId::CreateUpload || req_.route == RouteId::UpdateVideo) {
         std::ranges::transform(bytes, std::back_inserter(req_.body),
                                [](std::byte b) { return static_cast<char>(b); });
         return http::BodyVerdict::Continue;
@@ -541,6 +536,12 @@ void Connection::advance() noexcept {
             start_create();
         }
         return;
+    case RouteId::UpdateVideo:
+        if (req_.message_complete && !req_.started) {
+            req_.started = true;
+            start_update();
+        }
+        return;
     case RouteId::AppendChunk:
         if (!req_.started) {
             req_.started = true;
@@ -562,6 +563,9 @@ void Connection::advance() noexcept {
     case RouteId::StreamTicket:
     case RouteId::StartStream:
     case RouteId::EndStream:
+    case RouteId::ListGrants:
+    case RouteId::GrantAccess:
+    case RouteId::RevokeAccess:
         if (req_.message_complete && !req_.started) {
             req_.started = true;
             start_bodiless();
@@ -578,6 +582,9 @@ void Connection::start_bodiless() noexcept {
                req_.route == RouteId::StreamTicket || req_.route == RouteId::StartStream ||
                req_.route == RouteId::EndStream) {
         start_stream_route();
+    } else if (req_.route == RouteId::ListGrants || req_.route == RouteId::GrantAccess ||
+               req_.route == RouteId::RevokeAccess) {
+        start_service_route();
     } else {
         start_lookup();
     }
@@ -861,12 +868,14 @@ void Connection::start_lookup() noexcept {
     if (req_.route == RouteId::GetVideo || req_.route == RouteId::MasterPlaylist ||
         req_.route == RouteId::MediaPlaylist) {
         const auto id = core::VideoId::parse(req_.params[0]);
-        if (!id) {
-            fail(Status::NotFound);
+        const core::ports::Claims* claims = get(req_.claims);
+        if (!id || claims == nullptr) {
+            fail(id ? Status::InternalServerError : Status::NotFound);
             return;
         }
+        // What the viewer is to the video comes in the same read as the video (ADR-0097).
         ++pending_;
-        deps().catalog.find_video(*id, [this](auto result) noexcept {
+        deps().catalog.find_video_for(*id, claims->subject, [this](auto result) noexcept {
             --pending_;
             on_video(std::move(result));
         });
@@ -941,6 +950,10 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
         return;
     case RouteId::CreateUpload:
     case RouteId::GetVideo:
+    case RouteId::UpdateVideo:
+    case RouteId::ListGrants:
+    case RouteId::GrantAccess:
+    case RouteId::RevokeAccess:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
     case RouteId::LivePlaylist:
@@ -957,7 +970,10 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     }
 }
 
-void Connection::on_video(core::ports::CatalogResult<core::VideoRecord> result) noexcept {
+// Every path that serves a video (its metadata, both playlists and so the signed segment URLs,
+// a live recording's video as any other) passes core::access_of here, and anyone it refuses
+// gets the answer a missing video gets (ADR-0097).
+void Connection::on_video(core::ports::CatalogResult<core::ports::VideoView> result) noexcept {
     if (phase_ != Phase::Request) {
         return;
     }
@@ -970,33 +986,22 @@ void Connection::on_video(core::ports::CatalogResult<core::VideoRecord> result) 
         fail_catalog(result.error());
         return;
     }
-    if (!(result->owner == claims->subject)) {
+    const core::VideoRecord& v = result->video;
+    const core::VideoAccess access = core::access_of(v, claims->subject, result->viewer);
+    if (access == core::VideoAccess::None) {
         fail(Status::NotFound);
         return;
     }
-    const core::VideoRecord& v = *result;
     if (req_.route != RouteId::GetVideo) {
         start_playlist(v);
         return;
     }
-    std::string json = R"({"id":")" + v.id.to_string() + R"(","title":)";
-    core::json::append_string(json, v.title);
-    json +=
-        std::format(R"(,"state":"{}","version":{},"duration_ms":)", state_name(v.state), v.version);
-    json += v.duration ? std::to_string(v.duration->count()) : "null";
-    // Only a failed video has one, and it is written for its owner (the worker's public_reason,
-    // the reaper's "upload expired"); the details stay in the logs.
-    if (v.state == core::VideoState::Failed && v.error_reason) {
-        json += R"(,"error_reason":)";
-        core::json::append_string(json, *v.error_reason);
-    }
-    json += "}";
-    respond_json(Status::Ok, json);
+    respond_json(Status::Ok, video_json(v, access));
 }
 
-// 409 for a video that exists but has nothing to play yet, or never will: the owner learns
-// why, and a player that retries a 409 later gets the playlist once the worker is done. Only
-// the owner gets this far, so it tells nobody else the id exists.
+// 409 for a video that exists but has nothing to play yet, or never will: whoever may see it
+// learns why, and a player that retries a 409 later gets the playlist once the worker is done.
+// Only those who may see the video get this far, so it tells nobody else the id exists.
 void Connection::start_playlist(const core::VideoRecord& video) noexcept {
     if (video.state != core::VideoState::Ready) {
         fail(Status::Conflict);
@@ -1059,6 +1064,157 @@ void Connection::fail_playlist(PlaylistFailure failure) noexcept {
         return;
     }
     fail(Status::InternalServerError);
+}
+
+// The owner alone sets a video's visibility. Someone who may not see the video gets the 404 a
+// missing one gets; a viewer, who knows it exists, a 403. The room must be one the owner is a
+// member of, which the catalog checks in the statement that writes it.
+void Connection::start_update() noexcept {
+    const auto id = core::VideoId::parse(req_.params[0]);
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (!id) {
+        fail_with(Status::NotFound, "not_found");
+        return;
+    }
+    req_.visibility = visibility_from_body(req_.body);
+    if (!req_.visibility) {
+        fail_with(Status::BadRequest, "bad_visibility");
+        return;
+    }
+    ++pending_;
+    deps().catalog.find_video_for(*id, claims->subject,
+                                  [this, request = request_seq_](auto result) noexcept {
+                                      --pending_;
+                                      on_update_view(request, std::move(result));
+                                  });
+}
+
+void Connection::on_update_view(
+    std::uint64_t request, core::ports::CatalogResult<core::ports::VideoView> result) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    const core::ports::Claims* claims = get(req_.claims);
+    const core::Visibility* visibility = get(req_.visibility);
+    if (claims == nullptr || visibility == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (!result) {
+        fail_access(result.error(), "forbidden");
+        return;
+    }
+    switch (core::access_of(result->video, claims->subject, result->viewer)) {
+    case core::VideoAccess::None:
+        fail_with(Status::NotFound, "not_found");
+        return;
+    case core::VideoAccess::Viewer:
+        fail_with(Status::Forbidden, "forbidden");
+        return;
+    case core::VideoAccess::Owner:
+        break;
+    }
+    ++pending_;
+    deps().catalog.set_visibility(result->video.id, claims->subject, *visibility,
+                                  [this, request](auto changed) noexcept {
+                                      --pending_;
+                                      on_visibility_set(request, std::move(changed));
+                                  });
+}
+
+void Connection::on_visibility_set(std::uint64_t request,
+                                   core::ports::CatalogResult<core::VideoRecord> result) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    if (!result) {
+        // Forbidden: the room is not one the owner is listed in.
+        fail_access(result.error(), "not_member");
+        return;
+    }
+    respond_json(Status::Ok, video_json(*result, core::VideoAccess::Owner));
+}
+
+// The operator's backend, by its token's service claim (ULW_SERVICE_CLAIM, ULW_SERVICE_SCOPE,
+// ULW_SERVICE_CLIENT_ID), and only in the Authorization header: a browser attaches the cookie to
+// requests other pages make, and the backend has no reason to send one. Any other request is
+// refused before anything about the video is looked at; the service may learn that a video
+// does not exist.
+void Connection::start_service_route() noexcept {
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (!claims->is_service || !req_.bearer) {
+        fail_with(Status::Forbidden, "forbidden");
+        return;
+    }
+    const auto id = core::VideoId::parse(req_.params[0]);
+    if (!id) {
+        fail_with(Status::NotFound, "not_found");
+        return;
+    }
+    const std::uint64_t request = request_seq_;
+    if (req_.route == RouteId::ListGrants) {
+        const GrantQuery* query = get(req_.grant_query);
+        if (query == nullptr) {
+            fail_with(Status::BadRequest, "bad_query");
+            return;
+        }
+        ++pending_;
+        deps().catalog.list_grants(*id, query->after, query->limit,
+                                   [this, request, video = *id](auto result) noexcept {
+                                       --pending_;
+                                       on_grants(request, video, std::move(result));
+                                   });
+        return;
+    }
+    const auto user = user_from_segment(req_.params[1]);
+    if (!user) {
+        fail_with(Status::BadRequest, "bad_user");
+        return;
+    }
+    auto done = [this, request](core::ports::CatalogResult<void> result) noexcept {
+        --pending_;
+        on_grant_changed(request, std::move(result));
+    };
+    ++pending_;
+    if (req_.route == RouteId::GrantAccess) {
+        deps().catalog.grant_access(*id, *user, std::move(done));
+    } else {
+        deps().catalog.revoke_access(*id, *user, std::move(done));
+    }
+}
+
+void Connection::on_grants(std::uint64_t request, const core::VideoId& video,
+                           core::ports::CatalogResult<core::ports::GrantPage> result) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    if (!result) {
+        fail_access(result.error(), "forbidden");
+        return;
+    }
+    // Who holds a grant is the operator's business, not a cache's.
+    respond({.status = Status::Ok, .content_type = "application/json", .cache_control = "no-store"},
+            grants_json(video, *result));
+}
+
+void Connection::on_grant_changed(std::uint64_t request,
+                                  core::ports::CatalogResult<void> result) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    if (!result) {
+        fail_access(result.error(), "forbidden");
+        return;
+    }
+    respond({.status = Status::NoContent}, {});
 }
 
 // Any signed-in viewer may watch any stream: a live stream is a broadcast, and nothing on the
@@ -1620,6 +1776,32 @@ void Connection::fail_catalog(CatalogError error) noexcept {
         return;
     case CatalogError::Corrupt:
         fail(Status::InternalServerError);
+        return;
+    case CatalogError::Forbidden:
+        fail(Status::Forbidden);
+        return;
+    }
+}
+
+void Connection::fail_with(Status status, std::string_view code) noexcept {
+    if (!req_.message_complete) {
+        req_.keep_alive = false;
+    }
+    respond_json(status, error_json(code));
+}
+
+void Connection::fail_access(CatalogError error, std::string_view forbidden_code) noexcept {
+    switch (error) {
+    case CatalogError::NotFound:
+        fail_with(Status::NotFound, "not_found");
+        return;
+    case CatalogError::Forbidden:
+        fail_with(Status::Forbidden, forbidden_code);
+        return;
+    case CatalogError::Conflict:
+    case CatalogError::Unavailable:
+    case CatalogError::Corrupt:
+        fail_catalog(error);
         return;
     }
 }

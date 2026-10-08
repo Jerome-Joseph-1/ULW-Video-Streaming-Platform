@@ -368,7 +368,7 @@ int run(const Args& args) {
     limits.max_upload_slots = args.uploads;
     limits.max_connections_per_ip = args.uploads;
     limits.new_connections_per_ip_per_second = static_cast<std::uint32_t>(args.uploads);
-    s.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*s.reactor);
+    s.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*s.reactor, s.clock);
     s.gateway = std::make_unique<gateway::Gateway>(gateway::Deps{.reactor = *s.reactor,
                                                                  .transports = *s.transports,
                                                                  .pool = *s.pool,

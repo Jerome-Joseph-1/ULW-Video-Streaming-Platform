@@ -19,6 +19,13 @@ struct ClaimRules {
     // NOLINTBEGIN(readability-redundant-member-init)
     std::string broadcaster_claim{};
     std::string broadcaster_value{};
+    // ULW_SERVICE_CLAIM and ULW_SERVICE_SCOPE (ADR-0096, read by read_service_claim): a token is
+    // the operator's backend when its claim of this name holds this value. No value: none is.
+    std::string service_claim{};
+    std::string service_value{};
+    // ULW_SERVICE_CLIENT_ID: when set, the service's token must also name this client (azp or
+    // client_id). Empty: any client.
+    std::string service_client_id{};
     // NOLINTEND(readability-redundant-member-init)
 };
 

@@ -2,6 +2,7 @@
 
 #include "core/errors/domain_error.hpp"
 #include "core/models/ids.hpp"
+#include "core/models/visibility.hpp"
 #include "core/util/time.hpp"
 
 #include <cstddef>
@@ -27,6 +28,9 @@ struct VideoRecord {
     std::uint64_t version = 0;
     std::optional<std::string> error_reason;
     std::optional<Millis> duration;
+    // Who besides the owner may see it; private until the owner says otherwise (ADR-0097). The
+    // initializer lets designated initializers that predate the field leave it out.
+    Visibility visibility{}; // NOLINT(readability-redundant-member-init)
 };
 
 // A rejected transition leaves every field untouched, so the caller can report the error without

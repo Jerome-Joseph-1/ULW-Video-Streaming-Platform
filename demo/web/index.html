@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ULW demo</title>
+<link rel="stylesheet" href="style.css">
+<!-- Vendored, with their npm versions in the names; README.md says how to check them. -->
+<script src="vendor/hls-1.7.3.min.js"
+        integrity="sha384-cciJ0zi8d1uMKC2zJd7jvPY4HQt7W4ByUI/FlMkltvBi31aW61rcpVBhpmW8/NwX"></script>
+<script src="vendor/livekit-client-2.22.3.umd.js"
+        integrity="sha384-G/xxtkVytOx/ia9Q8MXxM+V0ohsaY1fZAgVP3iSGTPz4wJ0s3+ulJNKXh/gnzEDZ"></script>
+<script type="module" src="js/app.js"></script>
+</head>
+<body>
+<header>
+  <h1>ULW <span class="muted">local demo</span></h1>
+  <nav id="tabs" hidden>
+    <button data-tab="videos" class="active">Upload &amp; Watch</button>
+    <button data-tab="chat">Chat <span class="badge" id="chat-unread" hidden></span></button>
+    <button data-tab="calls">Calls</button>
+    <button data-tab="live">Live</button>
+  </nav>
+  <div id="whoami" hidden>
+    <span class="dot" id="conn-dot" title="chat connection"></span>
+    <strong id="me"></strong>
+    <button id="switch-user" class="link">switch user</button>
+  </div>
+</header>
+
+<main>
+  <!-- Who is using this window. Each window (or tab) signs in on its own. -->
+  <section id="picker" class="card narrow">
+    <h2>Who are you?</h2>
+    <p class="muted">Pick a demo user. Open a second window and pick another to talk, call or
+      watch between them.</p>
+    <div class="row" id="user-buttons"></div>
+  </section>
+
+  <section id="tab-videos" class="tab" hidden>
+    <div class="grid two">
+      <div class="card">
+        <h2>Upload</h2>
+        <p class="muted">Resumable, in 8 MiB chunks straight into the store through the gateway.</p>
+        <div class="row">
+          <input type="file" id="file" accept="video/*" aria-label="Video file to upload" data-testid="file">
+          <button id="make-clip" title="Records a short clip from a canvas in this browser">Make a 6 s test clip</button>
+        </div>
+        <div class="row">
+          <button id="upload" class="primary" disabled>Upload</button>
+          <button id="pause" disabled>Pause</button>
+        </div>
+        <progress id="upload-progress" max="1" value="0"></progress>
+        <div id="upload-status" class="muted" data-testid="upload-status"></div>
+      </div>
+      <div class="card">
+        <h2>My videos</h2>
+        <p class="muted">Uploads and live recordings, polled until ready. Only the owner can see a video.</p>
+        <ul id="videos" class="list" data-testid="videos"></ul>
+      </div>
+    </div>
+    <div class="card">
+      <h2 id="player-title">Player</h2>
+      <video id="player" controls playsinline data-testid="player"></video>
+      <div id="player-status" class="muted"></div>
+    </div>
+  </section>
+
+  <section id="tab-chat" class="tab" hidden>
+    <div id="e2ee-asks"></div>
+    <div class="grid chat">
+      <div class="card">
+        <h2>Rooms</h2>
+        <ul id="rooms" class="list"></ul>
+        <h3>People</h3>
+        <ul id="people" class="list"></ul>
+      </div>
+      <div class="card room">
+        <div class="room-head">
+          <h2 id="room-title">Pick a room</h2>
+          <span id="raw-toggle" hidden>
+            <label><input type="checkbox" id="show-raw" data-testid="show-raw"> show what the server stores</label>
+            <button id="reset-e2ee" class="link" title="Make a new device for this user in this browser">reset encryption</button>
+          </span>
+        </div>
+        <div id="e2ee-banner" class="banner" hidden></div>
+        <ol id="messages" class="messages" data-testid="messages"></ol>
+        <form id="composer" class="row" hidden>
+          <input id="message" autocomplete="off" placeholder="Message" aria-label="Message" data-testid="message">
+          <button class="primary">Send</button>
+        </form>
+      </div>
+    </div>
+  </section>
+
+  <section id="tab-calls" class="tab" hidden>
+    <div class="grid two">
+      <div class="card">
+        <h2>1:1 calls</h2>
+        <p class="muted">The callee rings in any open window of theirs.</p>
+        <ul id="contacts" class="list"></ul>
+      </div>
+      <div class="card">
+        <h2>Group call</h2>
+        <ul id="groups" class="list"></ul>
+        <div id="group-note" class="muted"></div>
+      </div>
+    </div>
+    <div class="card" id="call-panel" hidden>
+      <div class="row spread">
+        <h2 id="call-title">Call</h2>
+        <div class="row">
+          <button id="toggle-mic">Mute</button>
+          <button id="toggle-cam">Camera off</button>
+          <button id="end-for-all" hidden title="Ends the group call for everyone in it">End for everyone</button>
+          <button id="hangup" class="danger" data-testid="hangup">Hang up</button>
+        </div>
+      </div>
+      <div id="call-status" class="muted" data-testid="call-status"></div>
+      <div id="tiles" class="tiles"></div>
+    </div>
+  </section>
+
+  <section id="tab-live" class="tab" hidden>
+    <div class="grid two">
+      <div class="card">
+        <h2>Go live</h2>
+        <p class="muted">Camera and microphone over WHIP to the media server; viewers watch HLS.</p>
+        <video id="live-preview" muted playsinline autoplay></video>
+        <div class="row">
+          <button id="go-live" class="primary" data-testid="go-live">Go live</button>
+          <button id="end-live" class="danger" disabled data-testid="end-live">End stream</button>
+        </div>
+        <div id="live-status" class="muted" data-testid="live-status"></div>
+      </div>
+      <div class="card">
+        <h2>Watch</h2>
+        <ul id="streams" class="list" data-testid="streams"></ul>
+        <form id="watch-form" class="row">
+          <input id="watch-id" placeholder="stream id" aria-label="Stream id to watch" autocomplete="off">
+          <button>Watch</button>
+        </form>
+      </div>
+    </div>
+    <div class="card" id="viewer" hidden>
+      <div class="row spread">
+        <h2 id="viewer-title">Live</h2>
+        <span id="viewer-latency" class="muted" data-testid="latency"></span>
+      </div>
+      <div class="grid live">
+        <video id="live-player" controls muted playsinline data-testid="live-player"></video>
+        <div class="live-chat">
+          <ol id="live-messages" class="messages"></ol>
+          <form id="live-composer" class="row">
+            <input id="live-message" autocomplete="off" placeholder="Say something" aria-label="Live chat message">
+            <button>Send</button>
+          </form>
+        </div>
+      </div>
+      <div id="viewer-status" class="muted"></div>
+    </div>
+  </section>
+</main>
+
+<!-- Incoming call. -->
+<dialog id="ring" data-testid="ring">
+  <h2 id="ring-title">Incoming call</h2>
+  <p id="ring-detail" class="muted"></p>
+  <div class="row">
+    <button id="answer" class="primary" data-testid="answer">Answer</button>
+    <button id="decline" class="danger" data-testid="decline">Decline</button>
+  </div>
+</dialog>
+
+<div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

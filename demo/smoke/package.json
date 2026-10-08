@@ -1,0 +1,9 @@
+{
+  "name": "ulw-demo-smoke",
+  "private": true,
+  "type": "module",
+  "description": "The demo's smoke test: every tab of the demo page, end to end, in headless Chrome with fake media.",
+  "devDependencies": {
+    "@playwright/test": "1.56.1"
+  }
+}
