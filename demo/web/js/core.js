@@ -49,6 +49,10 @@ export async function signIn(user) {
   const r = await fetch(`/auth/token?sub=${encodeURIComponent(user)}`, { method: 'POST' });
   if (!r.ok) throw new Error(`token for ${user}: ${r.status}`);
   const body = await r.json();
+  // A compact JWS (three base64url parts) and nothing else goes into a header or the socket's URL.
+  if (typeof body.token !== 'string' || !/^[\w-]+\.[\w-]+\.[\w-]+$/.test(body.token)) {
+    throw new Error(`token for ${user}: not a JWT`);
+  }
   session.user = user;
   session.token = body.token;
   session.expiresAt = Date.now() + body.expires_in * 1000;
