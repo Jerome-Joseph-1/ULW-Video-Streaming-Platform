@@ -1,8 +1,8 @@
 # Live streams
 
-> **Draft.** [Publishing](#publishing) is settled by M30, [Watching a stream](#watching-a-stream)
-> by M31 and [When a stream ends](#when-a-stream-ends) by M33. How a client asks for its
-> publisher ticket is not served yet and may still change.
+> **Draft.** [Starting a stream](#starting-a-stream) is served by the gateway (ADR-0092),
+> [Publishing](#publishing) is settled by M30, [Watching a stream](#watching-a-stream) by M31 and
+> [When a stream ends](#when-a-stream-ends) by M33.
 
 A broadcaster publishes into the realtime tier with WHIP (RFC 9725). The SFU's recorder relays
 the stream to a packager, which turns it into HLS and writes its segments to the same object
@@ -11,13 +11,98 @@ store (ADR-0014), fetched the same way as VOD ([videos-and-playback.md](videos-a
 playlists through the gateway, segments from presigned store URLs. Live playlists are cached for
 less than VOD's 60 s. When a stream ends its recording becomes an ordinary video that goes
 through `processing` to `ready`. Live chat is a chat room in lossy delivery mode
-([chat.md](chat.md)).
+([chat.md](chat.md)), joined by the stream's id, open from the moment the stream is started and
+closed to new joins once it ends.
+
+## Starting a stream
+
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_stream_route, respond_stream, fail_live), apps/gateway/src/live_streams.cpp, infra/postgres/src/live_streams.cpp, migrations/0011_live_streams.sql, docs/adr/0092-the-stream-service-lives-in-the-gateway.md -->
+
+The gateway's stream service starts a stream for the signed-in user, hands its owner publisher
+tickets, takes it live, and ends it. Every request is authenticated like the rest of the API
+(bearer token or the auth cookie, and with the cookie an allowed `Origin`), carries no body, and
+counts against the user's request rate. The owner of a stream is the user whose token started
+it; only they can get its tickets, take it live or end it, and someone else's stream answers
+`404`, as a video does. A user has **one unfinished stream at a time**.
+
+| Endpoint | Who | Success | Errors |
+|---|---|---|---|
+| `POST /api/v1/live` | Any signed-in user | `201` a new stream, with its first ticket in `publish`; `200` the user's unfinished stream, with a fresh ticket | `401`, `403`, `429`, `503`, `500` |
+| `POST /api/v1/live/{id}/ticket` | The owner | `200` a fresh publisher ticket: `url`, `token`, `expires_at` | `401`, `404`, `409`, `429`, `503`, `500` |
+| `POST /api/v1/live/{id}/start` | The owner, after the WHIP POST's `201` | `200` the stream, `live` | `401`, `404`, `409`, `429`, `503`, `500` |
+| `POST /api/v1/live/{id}/end` | The owner | `200` the stream, `ended` | `401`, `404`, `429`, `503`, `500` |
+| `GET /api/v1/live/{id}` | Any signed-in user | `200` the stream | `401`, `404`, `429`, `503`, `500` |
+
+The stream, as every one of these answers it (`Cache-Control: no-store`):
+
+| Field | Value |
+|---|---|
+| `id` | The stream id: a UUID. It is also the stream's name for its playlist, its chat and its recording |
+| `state` | `starting` (tickets issued, nothing relayed yet), `live` (its packager runs and the publisher is relayed to it) or `ended`. It only moves forward |
+| `playlist` | Where viewers watch: `/api/v1/live/{id}/index.m3u8` ([Watching a stream](#watching-a-stream)) |
+| `created_at`, `live_at`, `ended_at` | Unix seconds, or `null` until then |
+| `ended_by` | `null` until it ends; then `owner` (ended with `end`), `finished` (the publisher went: a WHIP DELETE, the media server dropping it, 12 hours, or a broken stream), `failed` (its packager could not run) or `timeout` (not taken live within 2 minutes of `POST /api/v1/live`, or past 13 hours) |
+| `video_id` | The owner only: the recording's video once it is queued, else `null` ([When a stream ends](#when-a-stream-ends)). Absent for anyone else |
+| `publish` | `POST /api/v1/live` only: the first publisher ticket |
+
+Who may broadcast: any signed-in user, unless the deployment names a claim
+(`ULW_LIVE_BROADCASTER_CLAIM`, [operator-contract.md](operator-contract.md)): then only a
+token whose claim holds the value it names (a string equal to it, an array holding it, or
+`true`) may start a stream; anyone signed in may still watch. Each user may start a few streams
+an hour, however each ends, and the platform runs a fixed number at once.
+
+The flow:
+
+1. `POST /api/v1/live`. Keep `id`; `publish` is the ticket for the WHIP POST. Asking again
+   before the stream ends answers the same stream with a fresh ticket (`200`), so a lost answer
+   is retried safely. To start another stream, end this one first.
+2. `POST` the offer to `publish.url` with `publish.token` ([Publishing](#publishing)).
+3. Once the POST is answered `201`, `POST /api/v1/live/{id}/start`. The gateway starts the
+   stream's packager, waits for it (seconds; up to 30), and has the media server relay the
+   publisher to it; the answer is the stream, `live`. Call it within 30 s of the POST's `201`:
+   the media server's recorder looks for the publisher that long. It is idempotent: retry it on
+   `503` or a lost answer. A stream nobody takes live within 2 minutes is ended (`timeout`).
+4. Before every WHIP request after the POST (each PATCH, an ICE restart, the DELETE), `POST
+   /api/v1/live/{id}/ticket` for a fresh ticket.
+5. To stop, DELETE the WHIP session with a fresh ticket, or `POST /api/v1/live/{id}/end`, or
+   both. Either ends the stream, and its playlist gets `EXT-X-ENDLIST` within a second or two.
+   `end` answers the ended stream, and is idempotent.
+6. Poll `GET /api/v1/live/{id}` for `video_id`; then follow the video as any other
+   (`GET /api/v1/videos/{video_id}`).
+
+A viewer's client needs only the id: `GET /api/v1/live/{id}` says whether it is live and where
+the playlist is, and the stream's chat is joined by the same id ([chat.md](chat.md)).
+
+| Status | Meaning | Client action |
+|---|---|---|
+| `401` | No token, or a bad one | Sign in again |
+| `403` | The auth cookie from a page that is not allowed, or without `Origin`; or, on `POST /api/v1/live`, a user the deployment does not let broadcast (below) | Send the request from the app's own page, or with `Authorization`; a user who may not broadcast should not be offered it |
+| `404` | No such stream, or not the caller's to act on | Stop |
+| `409` | The stream has ended: no ticket, and no going live again | Start a new stream |
+| `429` | The user's request rate is used up, or, on `POST /api/v1/live`, the user started as many streams in the last hour as one may (6 by default; `Retry-After: 600`) | Wait `Retry-After` |
+| `503` | The platform runs as many streams as it takes (`Retry-After: 60`), or the database, the media server or the packager runtime is unavailable or slow (`Retry-After: 2`). An `end` answered `503` has ended the stream all the same; repeat it so the publisher is disconnected | Retry after `Retry-After` |
+| `500` | A dependency refused the request as made | Report with `X-Request-Id` |
+
+```http
+POST /api/v1/live
+Authorization: Bearer <jwt>
+Content-Length: 0
+
+HTTP/1.1 201 Created
+Content-Type: application/json
+Cache-Control: no-store
+
+{"id":"01999a3c-7b2e-7c41-9d0e-3a5f4c2b1e77","state":"starting",
+ "playlist":"/api/v1/live/01999a3c-7b2e-7c41-9d0e-3a5f4c2b1e77/index.m3u8",
+ "created_at":1759510800,"live_at":null,"ended_at":null,"ended_by":null,"video_id":null,
+ "publish":{"url":"https://<media host>/whip/v1","token":"<jwt>","expires_at":1759510860}}
+```
 
 ## Publishing
 
-The stream's owner gets a **publisher ticket** from the stream service, on the same
-authenticated path as a call ticket ([calls.md](calls.md)); that request is not fixed yet. The
-ticket has three fields:
+The stream's owner gets a **publisher ticket** from the stream service: the first with the
+stream, and a fresh one from `POST /api/v1/live/{id}/ticket` ([Starting a
+stream](#starting-a-stream)). The ticket has three fields:
 
 | Field | Meaning |
 |---|---|
@@ -60,8 +145,9 @@ handed out earlier. Nothing else of the platform is between the client and the m
   give up on it (17 s in three local runs of a killed `whipsink`), and the stream ends then.
 - **Encoders with one fixed token.** An encoder configured with a token rather than a way to ask
   for one (OBS, `whipsink`) must POST within the ticket's minute, and its own DELETE after that
-  is refused (`401`); its stream then ends through the drop above, not at once. A server-side
-  DELETE on its behalf waits for the stream service (ADR-0053).
+  is refused (`401`); its stream then ends through the drop above, not at once. The page that set
+  the encoder up calls `start` once the encoder shows it is connected, and `end` to stop it at
+  once.
 
 | Status | Meaning |
 |---|---|
@@ -96,8 +182,9 @@ source.
 
 - **Who may watch.** Any signed-in user (a valid token, as for every API route) may watch any
   stream by its id. A live stream is a broadcast; its recording is the broadcaster's own video
-  like any upload ([When a stream ends](#when-a-stream-ends)). `{id}` is the stream id the
-  packager was started with: 1 to 64 of `A-Z a-z 0-9 _ -`.
+  like any upload ([When a stream ends](#when-a-stream-ends)). `{id}` is the stream's `id`
+  ([Starting a stream](#starting-a-stream)); a stream an operator started by hand has the id it
+  was given, 1 to 64 of `A-Z a-z 0-9 _ -`.
 - **The playlist.** RFC 8216 live: `EXT-X-VERSION:7`, `EXT-X-TARGETDURATION` (the segment length,
   2 to 10 s, 2 by default), `EXT-X-MEDIA-SEQUENCE`, which never decreases, the last 10 segments
   (fMP4, each with `EXT-X-PROGRAM-DATE-TIME`), and after a packager restart
@@ -169,8 +256,8 @@ at 5 Mbit/s. A longer recording's video goes to `failed` with `error_reason` `no
 the source`. A stream whose stored media cannot be read back (its segments expired, or ffmpeg
 refuses them) becomes no video either; the platform records why (`live_recordings.failure`).
 
-No endpoint maps a stream to its video yet. The platform keeps the pair (`live_recordings`:
-stream id to video id or to the reason there is none, written in the same transaction as the
-video), and the packager logs
-`recording: queued as video <id>`, for the component that owns stream lifecycles to report to
-clients.
+`GET /api/v1/live/{id}` answers the owner the stream's video as `video_id` once the recording is
+queued ([Starting a stream](#starting-a-stream)); until then, and for a stream that becomes no
+video, it is `null`. The platform keeps the pair (`live_recordings`: stream id to video id or to
+the reason there is none, written in the same transaction as the video), and the packager logs
+`recording: queued as video <id>`.

@@ -92,6 +92,16 @@ TEST_F(LiveConfigTest, TheMaximumBitrateIsBounded) {
     EXPECT_EQ(load()->max_kbps, 8000U);
 }
 
+TEST_F(LiveConfigTest, TheWaitForACallerIsUnlimitedUnlessSetAndBounded) {
+    EXPECT_EQ(load()->caller_wait, core::Seconds{0});
+    env["ULW_LIVE_CALLER_WAIT_SECONDS"] = "60";
+    EXPECT_EQ(load()->caller_wait, core::Seconds{60});
+    for (const char* bad : {"86401", "-1", "soon"}) {
+        env["ULW_LIVE_CALLER_WAIT_SECONDS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_LIVE_CALLER_WAIT_SECONDS") << bad;
+    }
+}
+
 TEST_F(LiveConfigTest, AStreamIdThatIsNotOneKeySegmentIsRefused) {
     env["ULW_STREAM_ID"] = "../other";
     EXPECT_EQ(refused_variable(), "ULW_STREAM_ID");
@@ -175,7 +185,17 @@ TEST_F(LiveConfigTest, EmptyValuesCountAsUnset) {
     const auto config = load();
     ASSERT_TRUE(config);
     EXPECT_EQ(config->ingest_host, "127.0.0.1");
-    EXPECT_EQ(config->ffmpeg, "ffmpeg");
+}
+
+// The sandbox runs the ffmpeg and ffprobe it was built with (docs/adr/0089).
+TEST_F(LiveConfigTest, TheRetiredProgramPathsAreRefusedNotIgnored) {
+    for (const char* variable : {"ULW_FFMPEG", "ULW_FFPROBE"}) {
+        env[variable] = "ffmpeg";
+        EXPECT_EQ(refused_variable(), variable);
+        EXPECT_NE(load().error().reason.find("ULW_SANDBOX_FFPROBE"), std::string::npos);
+        env.erase(variable);
+    }
+    EXPECT_TRUE(load());
 }
 
 TEST_F(LiveConfigTest, RecordingIsOffUnlessADatabaseAndAnOwnerAreBothGiven) {

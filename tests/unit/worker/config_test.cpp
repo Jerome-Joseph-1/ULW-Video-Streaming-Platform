@@ -45,10 +45,21 @@ TEST_F(WorkerConfigTest, TheMinimalProductionEnvironmentLoadsWithDefaults) {
     EXPECT_EQ(config->node.view(), "transcode-worker-7d9f-x2x");
     EXPECT_EQ(config->scratch, "/var/cache/ulw-worker/transcode-worker-7d9f-x2x");
     EXPECT_TRUE(config->sandbox.empty());
-    EXPECT_EQ(config->ffmpeg, "ffmpeg");
-    EXPECT_EQ(config->ffprobe, "ffprobe");
     EXPECT_EQ(config->search_path, "/usr/local/bin:/usr/bin:/bin");
     EXPECT_EQ(config->ffmpeg_threads, 4U);
+}
+
+// The sandbox runs the ffmpeg and ffprobe it was built with (docs/adr/0089); a path given for
+// either is refused, never ignored, and an empty one is unset as everywhere else.
+TEST_F(WorkerConfigTest, TheRetiredProgramPathsAreRefusedNotIgnored) {
+    for (const char* variable : {"ULW_FFMPEG", "ULW_FFPROBE"}) {
+        env[variable] = "";
+        EXPECT_TRUE(load()) << variable;
+        env[variable] = "/opt/ffmpeg/bin/ffmpeg";
+        EXPECT_EQ(refused_variable(), variable);
+        EXPECT_NE(load().error().reason.find("ULW_SANDBOX_FFMPEG"), std::string::npos);
+        env.erase(variable);
+    }
 }
 
 TEST_F(WorkerConfigTest, TheUserToDropToIsOptionalAndTakenAsGiven) {

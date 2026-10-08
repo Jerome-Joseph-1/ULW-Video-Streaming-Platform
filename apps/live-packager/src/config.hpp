@@ -40,15 +40,21 @@ struct Config {
     std::string bucket;
     // ULW_SCRATCH_DIR/<stream>: this packager's alone, which startup clears.
     std::filesystem::path scratch;
+    // The ulw_sandbox helper, which runs the ffmpeg and ffprobe it was built with and no other
+    // (docs/adr/0089); empty means the one installed beside this executable.
     std::filesystem::path sandbox;
-    std::string ffmpeg;
-    std::string ffprobe;
+    // PATH for the sandboxed children, which inherit nothing else. Nothing looks the programs
+    // up in it.
     std::string search_path;
     std::uint32_t segment_seconds = 0;
     std::size_t window_segments = 0;
     core::Seconds max_duration{};
     // The most the publisher may send, in kbit/s; it bounds the size of a segment file.
     std::uint32_t max_kbps = 0;
+    // How long to wait for the relay's SRT caller before ending the stream without one; zero
+    // waits until a signal. A stream service sets it, so that a packager whose relay never
+    // came, or that restarted after its relay went, ends and records its stream by itself.
+    core::Seconds caller_wait{0};
     // Unset: the stream is live only, and nothing is recorded.
     std::optional<RecordingTarget> recording;
 };
