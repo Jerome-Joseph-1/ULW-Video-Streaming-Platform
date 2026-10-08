@@ -155,7 +155,7 @@ export class Socket {
     }
 
     wait(test, what, ms = 10000) {
-        const found = this.frames.find(test);
+        const found = this.frames.find((f) => test(f));
         if (found) {
             return Promise.resolve(found);
         }

@@ -237,7 +237,7 @@ async function roomTwo(db) {
     }
 }
 
-run(async () => {
+await run(async () => {
     const db = scratchDatabase();
     const chatOutput = await startChat(db);
     try {

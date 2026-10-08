@@ -33,9 +33,8 @@ fi
 # linux/amd64 everywhere, Apple silicon included (under emulation), so the one pinned
 # wasm-bindgen binary serves and every machine builds alike.
 docker build --quiet --platform linux/amd64 -t "$IMAGE" -f "$here/Dockerfile.build" "$here" >/dev/null
-docker run --rm --platform linux/amd64 \
+docker run --rm --platform linux/amd64 --user "$(id -u):$(id -g)" \
     -v "$here:/src:ro" -v "$out:/out" "${ca_args[@]}" \
-    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     -e CARGO_TARGET_DIR=/build/target -e SOURCE_DATE_EPOCH=0 \
     "$IMAGE" bash -euo pipefail -c '
         cd /src
@@ -47,7 +46,6 @@ docker run --rm --platform linux/amd64 \
         cd /out
         sha256sum mls-room.js web_mls.d.ts web_mls.js web_mls_bg.wasm web_mls_bg.wasm.d.ts \
             > SHA256SUMS
-        chown -R "$HOST_UID:$HOST_GID" /out
     '
 
 if ((check)); then

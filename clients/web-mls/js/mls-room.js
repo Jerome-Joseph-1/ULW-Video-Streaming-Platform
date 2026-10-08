@@ -57,7 +57,7 @@ export function toBase64url(bytes) {
     for (let i = 0; i < bytes.length; i += 0x8000) {
         binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
     }
-    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/={1,2}$/, "");
 }
 
 export function fromBase64url(body) {
@@ -207,7 +207,7 @@ export class MlsRoom {
         const saved = this.#commit();
         this.onEvent({ type: "created", epoch: this.group.epoch, fingerprint: this.client.fingerprint });
         await saved;
-        this.#drain();
+        void this.#drain();
     }
 
     /** Posts a fresh key package, asking the group's first member to add this device. */
@@ -250,7 +250,7 @@ export class MlsRoom {
             this.group.clearPendingCommit();
         }
         await this.#commit();
-        this.#drain();
+        void this.#drain();
     }
 
     /** Hands over one `message` frame of the room ({seq, sender, id, body}). Callbacks for it
@@ -284,7 +284,7 @@ export class MlsRoom {
         switch (info.wireFormat) {
             case "key_package":
                 this.queue.push({ bytes, info, frame });
-                this.#drain();
+                void this.#drain();
                 return Promise.resolve();
             case "welcome":
                 return this.#welcome(bytes, frame);
@@ -308,7 +308,7 @@ export class MlsRoom {
             const welcome = this.#outbox("welcome", fromBase64url(entry.welcome));
             this.onEvent({ type: "added", seq: frame.seq, epoch: this.group.epoch, members: this.members() });
             const done = this.#commit([welcome]);
-            this.#drain();
+            void this.#drain();
             return done;
         }
         if (this.group?.hasPendingCommit) {
@@ -322,7 +322,7 @@ export class MlsRoom {
         }
         this.onEvent({ type: "lost", seq: frame.seq, epoch: entry.epoch });
         const done = this.#commit();
-        this.#drain();
+        void this.#drain();
         return done;
     }
 
@@ -333,7 +333,8 @@ export class MlsRoom {
         return sameBytes(this.group.members()[0].identity, this.client.identity);
     }
 
-    // Decides on queued key packages one at a time, while this device may add.
+    // Decides on queued key packages one at a time, while this device may add. Never rejects (a
+    // failure is already an error event), so callers start it with `void` and go on.
     async #drain() {
         if (this.draining) {
             return;
@@ -409,7 +410,7 @@ export class MlsRoom {
         for (const m of early) {
             quiet(this.#groupMessage(m.bytes, m.info, m.frame));
         }
-        this.#drain();
+        void this.#drain();
         return done;
     }
 
@@ -457,7 +458,7 @@ export class MlsRoom {
             this.onEvent({ type: "removed", seq: frame.seq, sender: text(r.sender) });
         } else {
             this.onEvent({ type: r.kind, seq: frame.seq, sender: text(r.sender), epoch: this.group.epoch, members: this.members() });
-            this.#drain();
+            void this.#drain();
         }
         return done;
     }

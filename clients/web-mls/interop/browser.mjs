@@ -87,7 +87,7 @@ async function inGroup(page, members) {
         (m) => document.getElementById("status").textContent.includes(`${m} members`), members, { timeout: 10000 });
 }
 
-run(async () => {
+await run(async () => {
     const db = scratchDatabase();
     await startChat(db, { ULW_ALLOWED_ORIGINS: origin });
     serveSite();
