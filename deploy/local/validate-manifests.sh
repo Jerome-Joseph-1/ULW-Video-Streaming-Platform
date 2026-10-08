@@ -86,11 +86,31 @@ if [[ ${1:-} == --server ]]; then
     # shellcheck source=deploy/local/sandbox.sh
     source "$here/sandbox.sh"
     require_sandbox
-    # The overlays name namespaces of their own, which a dry run cannot create, so they are
-    # created in the sandbox, empty; the server-side dry runs persist nothing else.
+    # The overlays name namespaces of their own, NAMESPACE and LIVE_NAMESPACE, which a dry run
+    # cannot create, so each one the sandbox lacks is created in it, empty: as the overlay
+    # renders it when it renders one (the live namespace, whose Pod Security labels the
+    # packager's Job is admitted under), bare otherwise. One the sandbox already has is left as
+    # it is: the sandbox's own live namespace is production's, and applying a bare one over it
+    # would drop the labels its packagers run under. The server-side dry runs persist nothing
+    # else.
     for overlay in staging production; do
-        ns=$(sed -n 's/^NAMESPACE=//p' "$kube/overlays/$overlay/config.env")
-        kubectl create namespace "$ns" --dry-run=client -o yaml | kubectl apply -f - >/dev/null
+        for key in NAMESPACE LIVE_NAMESPACE; do
+            ns=$(sed -n "s/^$key=//p" "$kube/overlays/$overlay/config.env")
+            if ! kubectl get namespace "$ns" >/dev/null 2>&1; then
+                python3 - "$manifests/$overlay.yaml" "$ns" <<'EOF' | kubectl apply -f - >/dev/null
+import sys
+
+import yaml
+
+path, name = sys.argv[1], sys.argv[2]
+with open(path, encoding="utf-8") as f:
+    found = [doc for doc in yaml.safe_load_all(f) if doc and doc.get("kind") == "Namespace"
+             and doc.get("metadata", {}).get("name") == name]
+yaml.safe_dump(found[0] if found else {"apiVersion": "v1", "kind": "Namespace",
+                                       "metadata": {"name": name}}, sys.stdout)
+EOF
+            fi
+        done
     done
     kubectl apply --dry-run=server -f "$kube/cluster/stunner"
     kubectl apply --dry-run=server -f "$manifests/staging.yaml" -f "$manifests/production.yaml" \
