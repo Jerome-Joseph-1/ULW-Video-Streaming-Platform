@@ -88,7 +88,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0082](0082-sighup-drops-the-auth-caches.md) | SIGHUP drops the auth caches: the JWKS keys and every remembered verified token | Accepted, amended by 0088 |
 | [0083](0083-chat-and-the-live-packager-on-the-cluster.md) | Chat and the live packager on the cluster: a Deployment of three, and a Job per stream | Accepted, image publishing amended by 0085, deployment by 0088 |
 | [0084](0084-prod-turn-gateway-on-its-own-port.md) | Prod's TURN Gateway on its own port (UDP 3479), sharing the cluster's STUNner configuration | Accepted, amended by 0088 |
-| [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted, amended by 0088 |
+| [0085](0085-images-published-to-ghcr-from-main.md) | Images are published to GHCR from main; stage follows `main`, prod is pinned | Accepted, amended by 0088 and 0099 |
 | [0086](0086-one-coverage-run-and-parallel-integration-tests.md) | Coverage is measured once for the report and the SonarQube scan, and the integration label runs one test per core | Accepted, amended by 0090 |
 | [0087](0087-call-tickets-from-the-rooms-owner.md) | A call's ticket comes from the room's owner, asked over the node channel, in one generation | Accepted, amended by 0091 and 0095 |
 | [0088](0088-standalone-product.md) | ULW is a standalone product; operators configure it, nothing assumes one of them | Accepted |
@@ -102,3 +102,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0096](0096-member-lists-changed-by-their-users.md) | Member lists are changed under the room's lock, by their users where the operator allows it and by the operator's backend; presence is seen only within shared chats | Accepted |
 | [0097](0097-videos-shared-by-visibility-and-service-grants.md) | Videos are shared by a visibility their owner sets and by grants the operator's backend makes, checked against the catalog on every read | Accepted |
 | [0098](0098-the-browser-runs-openmls-as-webassembly.md) | The browser runs the bridge's OpenMLS as WebAssembly, built in a pinned image | Accepted |
+| [0099](0099-releases-are-version-tags-on-published-images.md) | A release is a version tag on a commit and images already published from main | Accepted |

@@ -648,9 +648,10 @@ kubectl kustomize overlays/<env> > /tmp/ulw.yaml
 ../local/check-image-pins.py --pinned /tmp/ulw.yaml    # exit 0, or the image at fault
 ```
 
-1. Take the images from the publish run's summary for the commit you mean to deploy (Actions,
-   publish-images, the run, Summary, "Published images"), each as `<sha>@sha256:<digest>`, or
-   resolve them from its SHA tag; both give the same `sha256:...`:
+1. Take the images from the release you mean to deploy (its GitHub Release lists each as
+   `<sha>@sha256:<digest>`; docs/integration/versioning.md, Releases), or from the publish run's
+   summary for the commit (Actions, publish-images, the run, Summary, "Published images"), or
+   resolve them from its SHA tag; all give the same `sha256:...`:
 
    ```sh
    SHA=<full commit sha on main>
