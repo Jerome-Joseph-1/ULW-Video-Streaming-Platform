@@ -1,8 +1,16 @@
 name: ci
 
+# Two lanes (docs/operations/ci-lanes.md). A pull request runs the quick lane: the `changes` job,
+# one build with the unit label (gcc/ci), lint as one job over the changed files, coverage and the
+# SonarQube scan, secrets, manifests when deploy/ changed, and the browser MLS client's checks
+# (web-mls-dist, and its step of lint) when clients/web-mls/ changed; a pull request that touches
+# only docs/, Markdown, deploy/ or .github/ skips the build and coverage. A push to main or to a
+# batch/** branch, the nightly run and a manual run run the full suite: every job below. The merge
+# loop pushes batch/N (main plus the queued pull requests' heads) and squash-merges them only once
+# that run is green, so every check runs on the tree main ends up with.
 on:
   push:
-    branches: [main]
+    branches: [main, "batch/**"]
   pull_request:
   schedule:
     - cron: "17 3 * * *"
@@ -21,19 +29,90 @@ env:
   TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
 
 jobs:
+  # Which lane this run is, and on a pull request what it changed (docs/operations/ci-lanes.md).
+  # Outside a pull request every output is the full lane's. On a pull request, `code` is false when
+  # every changed path (both sides of a rename) is under docs/, deploy/ or .github/ or ends in .md,
+  # `deploy` is whether any is under deploy/, and `web-mls` whether any is under clients/web-mls/.
+  # The diff is against the merge base, as lint's clang-tidy step takes it.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      full: ${{ steps.lane.outputs.full }}
+      code: ${{ steps.lane.outputs.code }}
+      deploy: ${{ steps.lane.outputs.deploy }}
+      web-mls: ${{ steps.lane.outputs.web-mls }}
+      build-test: ${{ steps.lane.outputs.build-test }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Choose the lane
+        id: lane
+        # Through the environment, not spliced into the script: a branch name is the pull
+        # request author's text.
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          entry() {
+            printf '{"compiler":"%s","cc":"%s","cxx":"%s","preset":"%s","test":"%s","label":"%s"}' "$@"
+          }
+          gcc_ci=$(entry gcc gcc-14 g++-14 ci ci "")
+          gcc_unit=$(entry gcc gcc-14 g++-14 ci ci unit)
+          clang_ci=$(entry clang clang-19 clang++-19 ci ci "")
+          clang_asan=$(entry clang clang-19 clang++-19 asan unit "")
+          if [[ $EVENT != pull_request ]]; then
+            {
+              echo "full=true"
+              echo "code=true"
+              echo "deploy=true"
+              echo "web-mls=true"
+              echo "build-test=[$gcc_ci,$clang_ci,$clang_asan]"
+            } >>"$GITHUB_OUTPUT"
+            echo "full lane ($EVENT)"
+            exit 0
+          fi
+          changed=$(git -c core.quotePath=false diff --name-only --no-renames "origin/$BASE_REF...HEAD")
+          code=false
+          deploy=false
+          web_mls=false
+          while IFS= read -r path; do
+            [[ -n $path ]] || continue
+            case $path in
+              deploy/*) deploy=true ;;
+              clients/web-mls/*) code=true web_mls=true ;;
+              docs/* | .github/* | *.md) ;;
+              *) code=true ;;
+            esac
+          done <<<"$changed"
+          {
+            echo "full=false"
+            echo "code=$code"
+            echo "deploy=$deploy"
+            echo "web-mls=$web_mls"
+            echo "build-test=[$gcc_unit]"
+          } >>"$GITHUB_OUTPUT"
+          echo "quick lane: code=$code deploy=$deploy web-mls=$web_mls, $(grep -c . <<<"$changed") paths changed"
+
+  # The full lane: gcc and clang with every test, and clang's ASan/UBSan build with the unit
+  # label. The quick lane: gcc with the unit label, on pull requests that change code.
   build-test:
-    name: build-test (${{ matrix.compiler }}/${{ matrix.preset }})
+    name: build-test (${{ matrix.compiler }}/${{ matrix.preset }}${{ matrix.label && format(', {0}', matrix.label) || '' }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - { compiler: gcc, cc: gcc-14, cxx: g++-14, preset: ci, test: ci }
-          - { compiler: clang, cc: clang-19, cxx: clang++-19, preset: ci, test: ci }
-          - { compiler: clang, cc: clang-19, cxx: clang++-19, preset: asan, test: unit }
+        include: ${{ fromJSON(needs.changes.outputs.build-test) }}
     env:
       CC: ${{ matrix.cc }}
       CXX: ${{ matrix.cxx }}
+      PRESET: ${{ matrix.preset }}
+      TEST_PRESET: ${{ matrix.test }}
+      TEST_LABEL: ${{ matrix.label }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -41,10 +120,10 @@ jobs:
       - uses: ./.github/actions/setup
         with:
           cache-key: ${{ matrix.compiler }}-${{ matrix.preset }}
-      - run: cmake --preset ${{ matrix.preset }}
-      - run: cmake --build --preset ${{ matrix.preset }}
+      - run: cmake --preset "$PRESET"
+      - run: cmake --build --preset "$PRESET"
         id: build
-      - run: ctest --preset ${{ matrix.test }}
+      - run: ctest --preset "$TEST_PRESET" ${TEST_LABEL:+-L "$TEST_LABEL"}
       # PIE, full RELRO, NX, no RWX segment, stack protector, IBT and SHSTK on every server and
       # tool, and the hardening flags on every unit that goes into them (docs/adr/0072). Runs
       # whenever the build did, whatever the tests did, so each failure shows on its own. Not
@@ -57,13 +136,15 @@ jobs:
       # own run covers both reactors, since it binds its listener before the drop.
       - name: privilege drop, as root
         run: |
-          sudo -E ctest --test-dir build/${{ matrix.preset }} -R '^(DropPrivilegesTest|LeaveRootTest)\.' --no-tests=error --output-on-failure
+          sudo -E ctest --test-dir "build/$PRESET" -R '^(DropPrivilegesTest|LeaveRootTest)\.' --no-tests=error --output-on-failure
           for reactor in io_uring epoll; do
-            sudo -E env ULW_REACTOR=$reactor ctest --test-dir build/${{ matrix.preset }} -R '^GatewayAsRoot\.' --no-tests=error --output-on-failure
+            sudo -E env ULW_REACTOR=$reactor ctest --test-dir "build/$PRESET" -R '^GatewayAsRoot\.' --no-tests=error --output-on-failure
           done
       - run: ccache --show-stats
 
   tsan:
+    # The full lane only (docs/operations/ci-lanes.md).
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     env:
       CC: clang-19
@@ -81,6 +162,8 @@ jobs:
 
   reactor-matrix:
     name: reactor-matrix (${{ matrix.reactor }})
+    # The full lane only (docs/operations/ci-lanes.md).
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -117,6 +200,8 @@ jobs:
   # never overlaps another. The conformance label still runs one test at a time, after it.
   integration:
     name: integration (${{ matrix.preset }})
+    # The full lane only (docs/operations/ci-lanes.md).
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -200,12 +285,17 @@ jobs:
   # summary; the HTML report is an artifact. Its own ccache key: the instrumented objects never
   # match another job's, and pull requests restore what main's last run left. On pull requests
   # from this repository (the ones the scan has a token for) and on those labelled `coverage`;
-  # a fork's unlabelled pull request skips it, as it skipped both before.
+  # a fork's unlabelled pull request skips it, as it skipped both before. In both lanes
+  # (docs/operations/ci-lanes.md): SonarQube Cloud's quality gate on new code is decided on the pull
+  # request's analysis, so the pull request must carry it. A push to a batch/** branch measures but
+  # does not scan: the batch's tree reaches main as squash commits, and main's push scans those.
   coverage:
+    needs: changes
     if: >-
+      needs.changes.outputs.code == 'true' && (
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository ||
-      contains(github.event.pull_request.labels.*.name, 'coverage')
+      contains(github.event.pull_request.labels.*.name, 'coverage'))
     runs-on: ubuntu-24.04
     # The unit label one test at a time (6 min on main), the integration label one test per
     # core (19 min one at a time on main), the report and the scan (2 min).
@@ -239,19 +329,21 @@ jobs:
     steps:
       # Only whether the secret is set reaches this step, never its value; the value is in the
       # scan step's env alone. Without it (a fork's or Dependabot's pull request, or the owner
-      # has not added it) and on the nightly run, the scan and the reports only it reads are
-      # skipped, with a notice.
+      # has not added it), on the nightly run and on a batch/** push, the scan and the reports
+      # only it reads are skipped, with a notice.
       - name: Check for SONAR_TOKEN
         id: token
         env:
           HAS_SONAR_TOKEN: ${{ secrets.SONAR_TOKEN != '' }}
           EVENT: ${{ github.event_name }}
+          REF: ${{ github.ref }}
         run: |
-          if [ "${HAS_SONAR_TOKEN:-}" = "true" ] && [ "$EVENT" != "schedule" ]; then
+          if [ "${HAS_SONAR_TOKEN:-}" = "true" ] && [ "$EVENT" != "schedule" ] &&
+              [[ $REF != refs/heads/batch/* ]]; then
             echo "present=true" >>"$GITHUB_OUTPUT"
           else
             echo "present=false" >>"$GITHUB_OUTPUT"
-            echo "::notice::SONAR_TOKEN is not set or this is the nightly run; skipping SonarQube Cloud analysis"
+            echo "::notice::SONAR_TOKEN is not set, or this is the nightly run or a batch; skipping SonarQube Cloud analysis"
           fi
       # Full history for the scan's blame and new-code detection.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -380,6 +472,8 @@ jobs:
   # shrink, and no plaintext anywhere. The tests are parameterised over both reactors, so one
   # run covers io_uring and epoll.
   cluster:
+    # The full lane only (docs/operations/ci-lanes.md).
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -417,6 +511,8 @@ jobs:
   # call of four (tests/call/group-call.spec.mjs, ADR-0095) through an owner killed mid-call and
   # an expulsion.
   ingest:
+    # The full lane only (docs/operations/ci-lanes.md).
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     services:
       postgres:
@@ -477,15 +573,18 @@ jobs:
   # sorted list: the full tree in one job took 59-95 min. Shard I/N checks files I, I+N, ...;
   # run-clang-tidy_test.sh proves the shards disjoint and complete. Shard 0 also runs the quick
   # checks. Four shards, not more: a ci run is already close to the 20 concurrent hosted jobs.
+  # The quick lane (docs/operations/ci-lanes.md) runs one shard, 0/1, over the pull request's
+  # changed files.
   lint:
     name: boundaries + format + tidy (${{ strategy.job-index }}/${{ strategy.job-total }})
+    needs: changes
     runs-on: ubuntu-24.04
     # A quarter of the tree took 15-24 min (runner speed varies); well past that is a hang.
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && '[0]' || '[0, 1, 2, 3]') }}
     env:
       CC: clang-19
       CXX: clang++-19
@@ -520,8 +619,9 @@ jobs:
           cargo test --locked --offline
       # The browser client (ADR-0098): the same checks, natively and for wasm32, and its room
       # logic against an in-memory room. Its lock adds crates the bridge's fetch does not cover.
+      # The quick lane runs them only when the pull request changed clients/web-mls/.
       - name: Browser MLS client (rustfmt, clippy, cargo test, room tests)
-        if: matrix.shard == 0
+        if: matrix.shard == 0 && needs.changes.outputs.web-mls == 'true'
         working-directory: clients/web-mls
         run: |
           rustup component add rustfmt clippy
@@ -563,6 +663,8 @@ jobs:
   # reactor. run.sh pins the image by digest and fails on any verdict outside its allowlist.
   autobahn:
     name: autobahn (${{ matrix.reactor }})
+    # The full lane only (docs/operations/ci-lanes.md).
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -590,11 +692,13 @@ jobs:
           name: autobahn-reports-${{ matrix.reactor }}
           path: build/ci/autobahn
 
-  # Five minutes per target on pull requests that touch a parser or codec, and on pushes to
-  # main; thirty on the nightly and manual runs. Other pull requests skip the build: the unit
-  # label already replays the committed corpora on every build.
+  # Five minutes per target on pushes to main and to batch/** branches; thirty on the nightly and
+  # manual runs. Pull requests skip it (docs/operations/ci-lanes.md): the unit label already replays
+  # the committed corpora on every build, and the batch fuzzes the tree before it reaches main.
   fuzz:
     name: fuzz
+    # The full lane only (docs/operations/ci-lanes.md).
+    if: github.event_name != 'pull_request'
     # Seven targets on four cores: two rounds of the run length (30 min nightly), plus the build.
     timeout-minutes: 120
     runs-on: ubuntu-24.04
@@ -606,42 +710,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
       - name: Choose the run length
         id: scope
         env:
           EVENT: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
         run: |
           case $EVENT in
             schedule | workflow_dispatch) seconds=1800 ;;
-            push) seconds=300 ;;
-            *)
-              if git diff --quiet "origin/$BASE_REF...HEAD" -- http codec ops tests/fuzz \
-                  core/src/hls.cpp core/include/core/util/hls.hpp infra/e2ee; then
-                seconds=0
-              else
-                seconds=300
-              fi
-              ;;
+            *) seconds=300 ;;
           esac
           echo "seconds=$seconds" >>"$GITHUB_OUTPUT"
-      - if: steps.scope.outputs.seconds != '0'
-        uses: ./.github/actions/setup
+      - uses: ./.github/actions/setup
         with:
           cache-key: clang-fuzz
-      - if: steps.scope.outputs.seconds != '0'
-        run: cmake --preset fuzz
+      - run: cmake --preset fuzz
       # All the fuzzers in one build, which shares the libraries they link.
-      - if: steps.scope.outputs.seconds != '0'
-        run: |
+      - run: |
           read -ra targets <<<"$FUZZ_TARGETS"
           cmake --build --preset fuzz --target "${targets[@]/%/_fuzz}"
       # Each target for the full run length on a core of its own, nproc at a time; any crash
       # fails the job. A scratch corpus per target, so what a run discovers never lands in the
       # checkout.
-      - if: steps.scope.outputs.seconds != '0'
-        env:
+      - env:
           SECONDS_TO_RUN: ${{ steps.scope.outputs.seconds }}
         run: |
           read -ra targets <<<"$FUZZ_TARGETS"
@@ -678,7 +768,11 @@ jobs:
 
   # Offline: every manifest against pinned schemas (deploy/local/tools.sh). The server-side
   # dry run against the sandbox cluster is a step of e2e.yml, where a cluster exists.
+  # The quick lane runs it only when the pull request changed deploy/
+  # (docs/operations/ci-lanes.md).
   manifests:
+    needs: changes
+    if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -688,8 +782,11 @@ jobs:
       - run: deploy/local/validate-manifests.sh
 
   # The browser client's dist/ is committed (ADR-0098); rebuilt in its pinned image it must
-  # match, byte for byte.
+  # match, byte for byte. The quick lane runs it only when the pull request changed
+  # clients/web-mls/ (docs/operations/ci-lanes.md).
   web-mls-dist:
+    needs: changes
+    if: needs.changes.outputs.web-mls == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:

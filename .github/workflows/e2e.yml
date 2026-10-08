@@ -1,9 +1,10 @@
 name: e2e
 
 # The sandbox cluster end to end: bring it up, run the VOD and chat checks, the STUNner checks
-# and the resource check under load, take it down. A manual run, the nightly one and a phase
-# tag's are the same job with the same steps. Everything happens inside this runner's kind
-# cluster; the workflow has no credentials and reaches no operator's infrastructure.
+# and the resource check under load, take it down. A manual run, the nightly one, a phase tag's
+# and a push to main's are the same job with the same steps. Everything happens inside this
+# runner's kind cluster; the workflow has no credentials and reaches no operator's
+# infrastructure.
 #
 # Beside it, two jobs run on a build tree, with no cluster, each starting its own services from
 # it and serving its own page, so neither can be pointed at the sandbox route. browser runs the
@@ -28,7 +29,10 @@ on:
         default: false
   schedule:
     - cron: "43 3 * * *"
+  # Every push to main as well (docs/operations/ci-lanes.md): the commits a green batch
+  # squash-merges. The concurrency group below queues at most one run behind the current one.
   push:
+    branches: [main]
     tags: ["phase-*"]
 
 permissions:
