@@ -16,7 +16,15 @@ namespace {
 // without it (docs/integration/operator-contract.md).
 constexpr std::string_view kDefaultScratch = "/var/cache/ulw-live";
 constexpr std::string_view kDefaultPath = "/usr/local/bin:/usr/bin:/bin";
+// A day: past it a caller that has not come is not coming.
+constexpr std::uint32_t kMaxCallerWaitSeconds = 86'400;
 constexpr std::string_view kDefaultIngestHost = "127.0.0.1";
+// ULW_FFMPEG and ULW_FFPROBE named the programs once. The sandbox helper now runs only the ffmpeg
+// and ffprobe it was built with (docs/adr/0089), so a value given for either is refused rather
+// than ignored: the operator meant some other ffmpeg, and would not get it.
+constexpr std::string_view kRetiredProgram =
+    "no longer read: the ffmpeg and ffprobe run are fixed when ulw_sandbox is built "
+    "(ULW_SANDBOX_FFMPEG, ULW_SANDBOX_FFPROBE); unset it";
 
 // The playlist is rewritten once per segment and R2 takes one write per second per key
 // (ADR-0014), so a segment must last more than a second. Past 10 s the stream is not live to
@@ -199,9 +207,20 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!kbps) {
         return std::unexpected(kbps.error());
     }
+    // 0, the default, waits for as long as it takes; a stream service sets it (ADR-0092).
+    const auto caller_wait =
+        bounded<std::uint32_t>(env, "ULW_LIVE_CALLER_WAIT_SECONDS", 0, 0, kMaxCallerWaitSeconds);
+    if (!caller_wait) {
+        return std::unexpected(caller_wait.error());
+    }
     auto recording = load_recording(env);
     if (!recording) {
         return std::unexpected(std::move(recording.error()));
+    }
+    for (const std::string_view retired : {"ULW_FFMPEG", "ULW_FFPROBE"}) {
+        if (lookup(env, retired)) {
+            return error(retired, kRetiredProgram);
+        }
     }
     return Config{.stream = std::move(*stream),
                   .ingest_host =
@@ -215,13 +234,12 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   // default, must not clear each other's.
                   .scratch = *scratch / *stream_text,
                   .sandbox = std::move(*sandbox),
-                  .ffmpeg = lookup(env, "ULW_FFMPEG").value_or("ffmpeg"),
-                  .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .segment_seconds = *segment,
                   .window_segments = *window,
                   .max_duration = core::Seconds{static_cast<std::int64_t>(*hours) * 3600},
                   .max_kbps = *kbps,
+                  .caller_wait = core::Seconds{*caller_wait},
                   .recording = std::move(*recording)};
 }
 

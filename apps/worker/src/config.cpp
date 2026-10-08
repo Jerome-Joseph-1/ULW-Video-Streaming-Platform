@@ -27,6 +27,8 @@ constexpr std::array kSettings{
     ops::Setting{.env = "HOSTNAME", .key = ""},
     ops::Setting{.env = "ULW_SCRATCH_DIR", .key = "worker.scratch_dir"},
     ops::Setting{.env = "ULW_SANDBOX_BIN", .key = "ffmpeg.sandbox_bin"},
+    // Retired (docs/adr/0089): read only to refuse them, so that a value an operator set is
+    // not silently ignored.
     ops::Setting{.env = "ULW_FFMPEG", .key = "ffmpeg.ffmpeg"},
     ops::Setting{.env = "ULW_FFPROBE", .key = "ffmpeg.ffprobe"},
     ops::Setting{.env = "ULW_FFMPEG_THREADS", .key = "ffmpeg.threads"},
@@ -52,6 +54,12 @@ constexpr std::string_view kDefaultPath = "/usr/local/bin:/usr/bin:/bin";
 constexpr unsigned kDefaultThreads = 4;
 // Past this, x264's frame threads stop scaling and only multiply the lookahead memory.
 constexpr unsigned kMaxThreads = 64;
+// ULW_FFMPEG and ULW_FFPROBE named the programs once. The sandbox helper now runs only the ffmpeg
+// and ffprobe it was built with (docs/adr/0089), so a value given for either is refused rather
+// than ignored: the operator meant some other ffmpeg, and would not get it.
+constexpr std::string_view kRetiredProgram =
+    "no longer read: the ffmpeg and ffprobe run are fixed when ulw_sandbox is built "
+    "(ULW_SANDBOX_FFMPEG, ULW_SANDBOX_FFPROBE); unset it";
 
 std::unexpected<ConfigError> error(std::string_view variable, std::string_view reason) {
     return std::unexpected(
@@ -199,6 +207,11 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!allow_root) {
         return error("ULW_ALLOW_ROOT", "expected 0 or 1");
     }
+    for (const std::string_view retired : {"ULW_FFMPEG", "ULW_FFPROBE"}) {
+        if (lookup(env, retired)) {
+            return error(retired, kRetiredProgram);
+        }
+    }
     unsigned threads = kDefaultThreads;
     if (const auto text = lookup(env, "ULW_FFMPEG_THREADS")) {
         const auto value = core::parse_integer<unsigned>(*text);
@@ -216,8 +229,6 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   // default, must not clear each other's jobs.
                   .scratch = *scratch / node->view(),
                   .sandbox = std::move(*sandbox),
-                  .ffmpeg = lookup(env, "ULW_FFMPEG").value_or("ffmpeg"),
-                  .ffprobe = lookup(env, "ULW_FFPROBE").value_or("ffprobe"),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .ffmpeg_threads = threads,
                   .log_level = level,
@@ -238,7 +249,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         }
         return {"r2", "ULW_R2_ACCOUNT_ID"};
     }();
-    const std::array<std::pair<std::string_view, std::string>, 14> values{{
+    const std::array<std::pair<std::string_view, std::string>, 12> values{{
         {"ULW_DATABASE_URL", config.database_url},
         {"ULW_STORAGE", std::string(storage)},
         {location_variable, config.storage_location},
@@ -246,8 +257,6 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_NODE_ID", std::string(config.node.view())},
         {"ULW_SCRATCH_DIR", config.scratch.parent_path().string()},
         {"ULW_SANDBOX_BIN", config.sandbox.string()},
-        {"ULW_FFMPEG", config.ffmpeg},
-        {"ULW_FFPROBE", config.ffprobe},
         {"ULW_FFMPEG_THREADS", std::to_string(config.ffmpeg_threads)},
         {"PATH", config.search_path},
         {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},

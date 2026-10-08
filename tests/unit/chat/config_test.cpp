@@ -182,6 +182,16 @@ TEST_F(ChatConfigTest, ThePresenceGraceIsTheServicesUnlessSetInMilliseconds) {
     }
 }
 
+TEST_F(ChatConfigTest, TheRingTimeoutIsTheServicesUnlessSetInMilliseconds) {
+    EXPECT_FALSE(load()->ring_timeout);
+    env["ULW_CALL_RING_TIMEOUT_MS"] = "3000";
+    EXPECT_EQ(load()->ring_timeout, core::Millis{3'000});
+    for (const char* bad : {"-1", "999", "300001", "45s"}) {
+        env["ULW_CALL_RING_TIMEOUT_MS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_CALL_RING_TIMEOUT_MS") << bad;
+    }
+}
+
 TEST_F(ChatConfigTest, ADevelopmentKeySetReplacesTheJwksUrlButNotBoth) {
     env["ULW_DEV_JWKS_FILE"] = "/etc/ulw/dev-jwks.json";
     env["ULW_DEV_MODE"] = "1";

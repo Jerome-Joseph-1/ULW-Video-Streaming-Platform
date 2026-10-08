@@ -12,6 +12,7 @@
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
+#include "call_bell.hpp"
 #include "chat.hpp"
 #include "chat_service.hpp"
 #include "presence.hpp"
@@ -157,6 +158,7 @@ private:
     // Set by the upgrade.
     std::optional<ClientId> client_;
     std::optional<PresenceClientId> presence_;
+    std::optional<BellId> bell_;
 
     codec::ws::Decoder decoder_;
     std::uint32_t control_tokens_;
