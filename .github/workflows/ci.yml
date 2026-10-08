@@ -613,8 +613,10 @@ jobs:
     name: boundaries + format + tidy (${{ strategy.job-index }}/${{ strategy.job-total }})
     needs: changes
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
-    # A quarter of the tree took 15-24 min (runner speed varies); well past that is a hang.
-    timeout-minutes: 60
+    # A quarter of the tree took 15-24 min on a hosted runner (runner speed varies) and over 50
+    # on the self-hosted host, where each job has three cores and shares the host with three
+    # others; well past that is a hang.
+    timeout-minutes: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 150 || 60 }}
     strategy:
       fail-fast: false
       matrix:
