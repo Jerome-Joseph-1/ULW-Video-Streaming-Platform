@@ -97,3 +97,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0091](0091-a-calls-ring-from-the-rooms-owner-through-presence-rooms.md) | A call's ring lives on the room's owner and reaches each member through their presence room | Accepted |
 | [0092](0092-the-stream-service-lives-in-the-gateway.md) | The stream service lives in the gateway, starts each stream's packager as a Job, and goes live on the owner's word | Accepted, amended by 0093 |
 | [0093](0093-livekit-webhooks-on-an-internal-listener.md) | LiveKit's webhooks take a stream live and end it, on a listener of the gateway's own that only LiveKit reaches | Accepted |
+| [0094](0094-gateway-malloc-one-arena-and-a-fixed-mmap-threshold.md) | gateway_server's malloc: one arena and a fixed 128 KiB mmap threshold, tried and measured, not adopted | Rejected |
