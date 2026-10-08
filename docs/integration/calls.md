@@ -1,8 +1,9 @@
 # Calls
 
-> **Draft until M26 is tagged.** The flow below is what chat serves wherever LiveKit is
-> configured (deploy/kubernetes/RUNBOOK.md, step 7). A deployment without LiveKit answers every
-> call with `calls_disabled`.
+> **Stable.** 1:1 and group calls, as below, are kept under the compatibility rules in
+> [versioning.md](versioning.md). Chat serves them wherever LiveKit is configured
+> (deploy/kubernetes/RUNBOOK.md, step 7); a deployment without LiveKit answers every call with
+> `calls_disabled`.
 
 Calls go through LiveKit as the SFU (ADR-0020), with media entering the cluster through STUNner
 (ADR-0013), and are always relayed. The service does not expose LiveKit's server API: a client

@@ -12,7 +12,9 @@
   order is not significant.
 - **Chat envelope.** No version field. The server refuses unknown `type`s and unknown fields
   with `error` `malformed`, so a client cannot send fields the server does not know. The envelope
-  ([chat.md](chat.md#messages)) is a draft until phase 2 is tagged (ADR-0036, ADR-0043).
+  ([chat.md](chat.md#messages)) is Stable (ADR-0036, ADR-0043). Like the HTTP API it may gain
+  fields, message `type`s and `error` reasons under rule 1 below; a client ignores the ones it
+  does not know, and a request field the server adds is optional to send.
 - **Playlists.** HLS as the worker writes it: fMP4 segments, an `EXT-X-MAP` init segment, a
   master with one variant per rendition. Rendition names are `<height>p`.
 
@@ -52,7 +54,9 @@ exists already; it builds nothing.
 | Video and playback endpoints ([videos-and-playback.md](videos-and-playback.md)) | Stable under `/api/v1` |
 | Auth ([auth.md](auth.md)) | Stable |
 | Probes and metrics ([operator-contract.md](operator-contract.md)) | Stable paths; metric set may grow |
-| Chat, calls, live, E2EE | Draft until the milestone named at the top of each page merges |
+| Chat: the WebSocket envelope and the service API ([chat.md](chat.md)) | Stable |
+| Calls, 1:1 and group ([calls.md](calls.md)) | Stable |
+| Live, E2EE ([live.md](live.md), [e2ee.md](e2ee.md)) | Draft until the milestone named at the top of each page merges |
 
 ## Proposal: compatibility policy
 
