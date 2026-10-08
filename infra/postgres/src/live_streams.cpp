@@ -152,7 +152,8 @@ std::optional<LiveState> parse_state(std::string_view text) noexcept {
 }
 
 std::optional<LiveEnd> parse_end(std::string_view text) noexcept {
-    for (const LiveEnd e : {LiveEnd::Owner, LiveEnd::Finished, LiveEnd::Failed, LiveEnd::Timeout}) {
+    for (const LiveEnd e : {LiveEnd::Owner, LiveEnd::Finished, LiveEnd::Failed, LiveEnd::Timeout,
+                            LiveEnd::PublisherLeft}) {
         if (text == core::ports::to_string(e)) {
             return e;
         }

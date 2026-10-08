@@ -58,7 +58,25 @@ public:
     void abort_upload(const core::UploadId& /*id*/, CatalogCallback<void> done) override {
         done(std::unexpected(CatalogError::Unavailable));
     }
-    void find_video(const core::VideoId& /*id*/, CatalogCallback<core::VideoRecord> done) override {
+    void find_video_for(const core::VideoId& /*id*/, const core::UserId& /*viewer*/,
+                        CatalogCallback<core::ports::VideoView> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void set_visibility(const core::VideoId& /*id*/, const core::UserId& /*owner*/,
+                        const core::Visibility& /*visibility*/,
+                        CatalogCallback<core::VideoRecord> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void grant_access(const core::VideoId& /*id*/, const core::UserId& /*user*/,
+                      CatalogCallback<void> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void revoke_access(const core::VideoId& /*id*/, const core::UserId& /*user*/,
+                       CatalogCallback<void> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void list_grants(const core::VideoId& /*id*/, std::optional<core::UserId> /*after*/,
+                     std::size_t /*limit*/, CatalogCallback<core::ports::GrantPage> done) override {
         done(std::unexpected(CatalogError::Unavailable));
     }
 
@@ -199,7 +217,7 @@ protected:
     os::SystemRandom random;
     std::unique_ptr<net::IReactor> reactor =
         std::move(*net::make_reactor(ulw::test::reactor_kind_from_env(), clock, 64));
-    infra::catalog::MemoryCatalog catalog{*reactor};
+    infra::catalog::MemoryCatalog catalog{*reactor, clock};
     core::UserId owner = *core::UserId::parse("alice");
     core::VideoId video = core::VideoId::generate(clock, random);
     core::UploadId id = core::UploadId::generate(clock, random);

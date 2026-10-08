@@ -31,6 +31,8 @@ std::string_view write_name(rt::OwnerWrite write) noexcept {
         return "append";
     case rt::OwnerWrite::Heartbeat:
         return "heartbeat";
+    case rt::OwnerWrite::MediaGeneration:
+        return "media_generation";
     }
     return "append";
 }
@@ -80,9 +82,10 @@ ServiceLimits service_limits(const Limits& limits) noexcept {
 
 ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     : deps_(deps), access_(std::move(access)), limits_(std::move(limits)), rooms_(deps.router),
-      chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
-      presence_(rooms_, deps.reactor, deps.clock, deps.node, limits_.presence),
+      shared_(deps.messages), chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
+      presence_(rooms_, shared_, deps.reactor, deps.clock, deps.node, limits_.presence),
       calls_(deps.messages, deps.sfu, rooms_, deps.clock, deps.random, limits_.calls),
+      service_api_(deps.reactor, deps.clock, deps.verifier, deps.messages, limits_.service_api),
       // One more than the connections that can pin an entry, so a new client always finds one.
       clients_(std::max(kClientEntries, limits_.max_connections + 1),
                http::AddressHash{http::SeededHash(seed(deps_.random))}),
@@ -92,12 +95,15 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       sessions_(limits_.max_connections) {
     deps_.router.serve(&calls_);
     deps_.router.hear(&bell_);
+    chat_.also_tell(&calls_);
+    chat_.also_tell(&presence_);
 }
 
 ChatServer::~ChatServer() {
     // The message store is destroyed first (Services in main.cpp), and reap() below sweeps the
     // service, which would otherwise ask it what a resync still owes.
     chat_.stop();
+    chat_.also_tell(nullptr);
     deps_.router.serve(nullptr);
     deps_.router.hear(nullptr);
     deps_.reactor.cancel_timer(drain_timer_);
@@ -263,6 +269,7 @@ void ChatServer::begin_drain() noexcept {
     draining_ = true;
     deps_.reactor.stop_listening();
     sessions_.for_each_live([](Session& s) { s.drain(); });
+    service_api_.stop();
     // A release that fails leaves the rooms to go stale, which costs the other nodes
     // rt::kOwnerStaleAfter; the drain goes on either way.
     deps_.router.release_rooms([this](rt::StoreResult<void>) noexcept { released_ = true; });
@@ -277,6 +284,7 @@ void ChatServer::on_timeout() noexcept {
 
 void ChatServer::reap() noexcept {
     sessions_.reap([this](Session& s) { return deps_.reactor.is_quiescent(s.conn()); });
+    service_api_.reap();
     deps_.router.reap();
     chat_.sweep();
     calls_.sweep();
@@ -306,109 +314,181 @@ std::string ChatServer::render_metrics() const {
     const CallCounters& call = calls_.counters();
     const RingCounters& ring = calls_.ring_counters();
     const BellCounters& bell = bell_.counters();
-    return std::format(
-        "connections_accepted_total {}\n"
-        "connections_rejected_total{{reason=\"capacity\"}} {}\n"
-        "connections_rejected_total{{reason=\"socket\"}} {}\n"
-        "connections_rejected_total{{reason=\"ip_connections\"}} {}\n"
-        "connections_rejected_total{{reason=\"ip_block\"}} {}\n"
-        "connections_rejected_total{{reason=\"ip_rate\"}} {}\n"
-        "upgrades_limited_total{{limit=\"ip\"}} {}\n"
-        "upgrades_limited_total{{limit=\"user_sessions\"}} {}\n"
-        "rate_limit_entries{{table=\"client\"}} {}\n"
-        "rate_limit_entries{{table=\"user\"}} {}\n"
-        "rate_limit_entries{{table=\"ip_block\"}} {}\n"
-        "rate_limit_evictions_total{{table=\"client\"}} {}\n"
-        "connections_current {}\n"
-        "websocket_upgrades_total {}\n"
-        "auth_failures_total {}\n"
-        "origin_rejections_total {}\n"
-        "messages_received_total {}\n"
-        "messages_delivered_total {}\n"
-        "messages_rate_limited_total {}\n"
-        "messages_deduplicated_total {}\n"
-        "lossy_drops_total {}\n"
-        "messages_replayed_total {}\n"
-        "history_messages_total {}\n"
-        "messages_kept_bytes {}\n"
-        "protocol_errors_total {}\n"
-        "control_floods_total {}\n"
-        "slow_consumers_total {}\n"
-        "stalled_readers_total {}\n"
-        "allocation_failures_total {}\n"
-        "rooms_active {}\n"
-        "rooms_joined {}\n"
-        "room_reassignments_total {}\n"
-        "fenced_writes_total {}\n"
-        "forwards_total {}\n"
-        "forward_timeouts_total {}\n"
-        "peers_lost_total {}\n"
-        "peers_refused_total {}\n"
-        "slow_peers_total {}\n"
-        "presence_rooms {}\n"
-        "presence_events_sent_total {}\n"
-        "presence_events_received_total {}\n"
-        "presence_notifications_total {}\n"
-        "presence_expired_total {}\n"
-        "presence_gaps_total {}\n"
-        "token_expiries_total {}\n"
-        "member_removals_total {}\n"
-        "member_check_failures_total {}\n"
-        "jwks_keys_expired {}\n"
-        "auth_cache_drops_total {}\n"
-        "auth_cache_drop_pending {}\n"
-        "unrecorded_joins_total {}\n"
-        "calls_enabled {}\n"
-        "call_tickets_total {}\n"
-        "call_refusals_total{{reason=\"not_member\"}} {}\n"
-        "call_refusals_total{{reason=\"not_callable\"}} {}\n"
-        "call_refusals_total{{reason=\"busy\"}} {}\n"
-        "call_rooms_opened_total {}\n"
-        "call_rooms {}\n"
-        "call_errors_total{{source=\"sfu\",kind=\"unavailable\"}} {}\n"
-        "call_errors_total{{source=\"sfu\",kind=\"refused\"}} {}\n"
-        "call_errors_total{{source=\"store\",kind=\"unavailable\"}} {}\n"
-        "call_refusals_total{{reason=\"no_call\"}} {}\n"
-        "call_refusals_total{{reason=\"ring_limited\"}} {}\n"
-        "calls_ringing_or_answered {}\n"
-        "call_rings_total{{outcome=\"started\"}} {}\n"
-        "call_rings_total{{outcome=\"answered\"}} {}\n"
-        "call_rings_total{{outcome=\"declined\"}} {}\n"
-        "call_rings_total{{outcome=\"cancelled\"}} {}\n"
-        "call_rings_total{{outcome=\"missed\"}} {}\n"
-        "call_rings_total{{outcome=\"ended\"}} {}\n"
-        "call_rings_total{{outcome=\"orphaned\"}} {}\n"
-        "call_rings_total{{outcome=\"busy\"}} {}\n"
-        "call_rings_total{{outcome=\"graced\"}} {}\n"
-        "call_notices_sent_total {}\n"
-        "call_events_pushed_total {}\n"
-        "call_notices_unheard_total {}\n"
-        "call_notices_malformed_total {}\n"
-        "notices_total{{stage=\"forwarded\"}} {}\n"
-        "notices_total{{stage=\"fanned_out\"}} {}\n"
-        "notices_total{{stage=\"heard\"}} {}\n"
-        "notices_total{{stage=\"dropped\"}} {}\n",
-        c.connections_accepted, c.rejected_capacity, c.rejected_socket, c.rejected_ip_connections,
-        c.rejected_ip_block, c.rejected_ip_rate, c.limited_ip_upgrades, c.limited_user_sessions,
-        clients_.size(), users_.size(), blocks_.size(), clients_.evictions(), sessions_.size(),
-        c.upgrades, c.auth_failures, c.origin_rejections, c.messages_received, chat.delivered,
-        chat.rate_limited, router.duplicates, chat.lossy_drops, chat.replayed,
-        chat.history_messages, chat_.buffered_bytes(), c.protocol_errors, c.control_floods,
-        c.slow_consumers, c.stalled_readers,
-        c.allocation_failures + router.allocation_failures + chat.allocation_failures +
-            presence.allocation_failures,
-        deps_.router.rooms_owned(), deps_.router.rooms_joined(), registry.reassignments,
-        registry.fenced_writes, router.forwarded, router.forward_timeouts, router.peers_lost,
-        router.peers_refused, router.slow_peers, presence_.rooms(), presence.sent,
-        presence.received, presence.notified, presence.expired, presence.gaps, c.token_expiries,
-        chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0,
-        c.auth_cache_drops, deps_.verifier.drop_pending() ? 1 : 0, chat.unrecorded_joins,
-        calls_.enabled() ? 1 : 0, call.tickets, call.not_member, call.not_callable, call.busy,
-        call.opens, calls_.rooms(), call.sfu_unavailable, call.sfu_refused, call.store_unavailable,
-        call.no_call, ring.limited, calls_.calls(), ring.started, ring.answered, ring.declined,
-        ring.cancelled, ring.missed, ring.ended, ring.orphaned, ring.busy, ring.graced,
-        ring.notices, bell.pushed, bell.unheard, bell.malformed, router.notices_forwarded,
-        router.notices_fanned_out, router.notices_heard, router.notices_dropped);
+    const ServiceApiCounters& api = service_api_.counters();
+    return std::format("connections_accepted_total {}\n"
+                       "connections_rejected_total{{reason=\"capacity\"}} {}\n"
+                       "connections_rejected_total{{reason=\"socket\"}} {}\n"
+                       "connections_rejected_total{{reason=\"ip_connections\"}} {}\n"
+                       "connections_rejected_total{{reason=\"ip_block\"}} {}\n"
+                       "connections_rejected_total{{reason=\"ip_rate\"}} {}\n"
+                       "upgrades_limited_total{{limit=\"ip\"}} {}\n"
+                       "upgrades_limited_total{{limit=\"user_sessions\"}} {}\n"
+                       "rate_limit_entries{{table=\"client\"}} {}\n"
+                       "rate_limit_entries{{table=\"user\"}} {}\n"
+                       "rate_limit_entries{{table=\"ip_block\"}} {}\n"
+                       "rate_limit_evictions_total{{table=\"client\"}} {}\n"
+                       "connections_current {}\n"
+                       "websocket_upgrades_total {}\n"
+                       "auth_failures_total {}\n"
+                       "origin_rejections_total {}\n"
+                       "messages_received_total {}\n"
+                       "messages_delivered_total {}\n"
+                       "messages_rate_limited_total {}\n"
+                       "messages_deduplicated_total {}\n"
+                       "lossy_drops_total {}\n"
+                       "messages_replayed_total {}\n"
+                       "history_messages_total {}\n"
+                       "messages_kept_bytes {}\n"
+                       "protocol_errors_total {}\n"
+                       "control_floods_total {}\n"
+                       "slow_consumers_total {}\n"
+                       "stalled_readers_total {}\n"
+                       "allocation_failures_total {}\n"
+                       "rooms_active {}\n"
+                       "rooms_joined {}\n"
+                       "room_reassignments_total {}\n"
+                       "fenced_writes_total {}\n"
+                       "forwards_total {}\n"
+                       "forward_timeouts_total {}\n"
+                       "peers_lost_total {}\n"
+                       "peers_refused_total {}\n"
+                       "slow_peers_total {}\n"
+                       "presence_rooms {}\n"
+                       "presence_events_sent_total {}\n"
+                       "presence_events_received_total {}\n"
+                       "presence_notifications_total {}\n"
+                       "presence_expired_total {}\n"
+                       "presence_gaps_total {}\n"
+                       "token_expiries_total {}\n"
+                       "member_removals_total {}\n"
+                       "member_check_failures_total {}\n"
+                       "jwks_keys_expired {}\n"
+                       "auth_cache_drops_total {}\n"
+                       "auth_cache_drop_pending {}\n"
+                       "unrecorded_joins_total {}\n"
+                       "calls_enabled {}\n"
+                       "call_tickets_total {}\n"
+                       "call_refusals_total{{reason=\"not_member\"}} {}\n"
+                       "call_refusals_total{{reason=\"not_callable\"}} {}\n"
+                       "call_refusals_total{{reason=\"busy\"}} {}\n"
+                       "call_rooms_opened_total {}\n"
+                       "call_rooms {}\n"
+                       "call_errors_total{{source=\"sfu\",kind=\"unavailable\"}} {}\n"
+                       "call_errors_total{{source=\"sfu\",kind=\"refused\"}} {}\n"
+                       "call_errors_total{{source=\"store\",kind=\"unavailable\"}} {}\n"
+                       "call_refusals_total{{reason=\"no_call\"}} {}\n"
+                       "call_refusals_total{{reason=\"ring_limited\"}} {}\n"
+                       "calls_ringing_or_answered {}\n"
+                       "call_rings_total{{outcome=\"started\"}} {}\n"
+                       "call_rings_total{{outcome=\"answered\"}} {}\n"
+                       "call_rings_total{{outcome=\"declined\"}} {}\n"
+                       "call_rings_total{{outcome=\"cancelled\"}} {}\n"
+                       "call_rings_total{{outcome=\"missed\"}} {}\n"
+                       "call_rings_total{{outcome=\"ended\"}} {}\n"
+                       "call_rings_total{{outcome=\"orphaned\"}} {}\n"
+                       "call_rings_total{{outcome=\"busy\"}} {}\n"
+                       "call_rings_total{{outcome=\"graced\"}} {}\n"
+                       "call_notices_sent_total {}\n"
+                       "call_events_pushed_total {}\n"
+                       "call_notices_unheard_total {}\n"
+                       "call_notices_malformed_total {}\n"
+                       "notices_total{{stage=\"forwarded\"}} {}\n"
+                       "notices_total{{stage=\"fanned_out\"}} {}\n"
+                       "notices_total{{stage=\"heard\"}} {}\n"
+                       "notices_total{{stage=\"dropped\"}} {}\n",
+                       c.connections_accepted, c.rejected_capacity, c.rejected_socket,
+                       c.rejected_ip_connections, c.rejected_ip_block, c.rejected_ip_rate,
+                       c.limited_ip_upgrades, c.limited_user_sessions, clients_.size(),
+                       users_.size(), blocks_.size(), clients_.evictions(), sessions_.size(),
+                       c.upgrades, c.auth_failures, c.origin_rejections, c.messages_received,
+                       chat.delivered, chat.rate_limited, router.duplicates, chat.lossy_drops,
+                       chat.replayed, chat.history_messages, chat_.buffered_bytes(),
+                       c.protocol_errors, c.control_floods, c.slow_consumers, c.stalled_readers,
+                       c.allocation_failures + router.allocation_failures +
+                           chat.allocation_failures + presence.allocation_failures,
+                       deps_.router.rooms_owned(), deps_.router.rooms_joined(),
+                       registry.reassignments, registry.fenced_writes, router.forwarded,
+                       router.forward_timeouts, router.peers_lost, router.peers_refused,
+                       router.slow_peers, presence_.rooms(), presence.sent, presence.received,
+                       presence.notified, presence.expired, presence.gaps, c.token_expiries,
+                       chat.removals, chat.failed_rechecks, deps_.verifier.keys_expired() ? 1 : 0,
+                       c.auth_cache_drops, deps_.verifier.drop_pending() ? 1 : 0,
+                       chat.unrecorded_joins, calls_.enabled() ? 1 : 0, call.tickets,
+                       call.not_member, call.not_callable, call.busy, call.opens, calls_.rooms(),
+                       call.sfu_unavailable, call.sfu_refused, call.store_unavailable, call.no_call,
+                       ring.limited, calls_.calls(), ring.started, ring.answered, ring.declined,
+                       ring.cancelled, ring.missed, ring.ended, ring.orphaned, ring.busy,
+                       ring.graced, ring.notices, bell.pushed, bell.unheard, bell.malformed,
+                       router.notices_forwarded, router.notices_fanned_out, router.notices_heard,
+                       router.notices_dropped) +
+           // Group calls and putting members out (ADR-0095).
+           std::format("call_refusals_total{{reason=\"expelled\"}} {}\n"
+                       "call_refusals_total{{reason=\"call_full\"}} {}\n"
+                       "call_rings_total{{outcome=\"left\"}} {}\n"
+                       "call_rings_total{{outcome=\"emptied\"}} {}\n"
+                       "call_expulsions_total {}\n"
+                       "call_moves_total{{reason=\"expel\"}} {}\n"
+                       "call_moves_total{{reason=\"removal\"}} {}\n"
+                       "call_moves_total{{reason=\"end\"}} {}\n"
+                       "call_moves_failed_total{{why=\"fenced\"}} {}\n"
+                       "call_moves_failed_total{{why=\"unavailable\"}} {}\n"
+                       "call_generations_closed_total {}\n"
+                       "call_generations_abandoned_total {}\n"
+                       "call_generations_closing {}\n"
+                       "call_occupancy_checks_total {}\n"
+                       "call_occupancy_unavailable_total {}\n"
+                       "call_resync_checks_total {}\n"
+                       "call_expulsions_kept_total {}\n"
+                       "call_expulsions_cleared_total {}\n"
+                       "call_announcements_dropped_total {}\n",
+                       call.expelled, call.full, ring.left, ring.emptied, ring.expelled,
+                       call.moves_expel, call.moves_removal, call.moves_end, call.moves_fenced,
+                       call.moves_unavailable, call.retired_closed, call.retired_abandoned,
+                       calls_.retired(), call.occupancy_checks, call.occupancy_unavailable,
+                       call.resync_checks, call.expulsions_kept, call.expulsions_cleared,
+                       call.announcements_dropped) +
+           // Member lists changed by their users (ADR-0096).
+           std::format("directs_opened_total {}\n"
+                       "groups_created_total {}\n"
+                       "members_changed_total{{change=\"added\"}} {}\n"
+                       "members_changed_total{{change=\"removed\"}} {}\n"
+                       "members_changed_total{{change=\"left\"}} {}\n"
+                       "membership_refusals_total{{reason=\"not_member\"}} {}\n"
+                       "membership_refusals_total{{reason=\"not_admin\"}} {}\n"
+                       "membership_refusals_total{{reason=\"not_group\"}} {}\n"
+                       "membership_refusals_total{{reason=\"too_many_members\"}} {}\n"
+                       "membership_refusals_total{{reason=\"room_limit\"}} {}\n"
+                       "membership_refusals_total{{reason=\"gone\"}} {}\n"
+                       "membership_refusals_total{{reason=\"rate_limited\"}} {}\n"
+                       "membership_refusals_total{{reason=\"unavailable\"}} {}\n"
+                       "member_events_total {}\n"
+                       "membership_refusals_total{{reason=\"not_allowed\"}} {}\n",
+                       chat.directs_opened, chat.groups_created, chat.members_added,
+                       chat.members_removed, chat.members_left, chat.membership_not_member,
+                       chat.membership_not_admin, chat.membership_not_group, chat.membership_full,
+                       chat.membership_room_limit, chat.membership_gone,
+                       chat.membership_rate_limited, chat.membership_unavailable,
+                       chat.member_events, chat.membership_not_allowed) +
+           // Who may see whose presence, and the operator's service API (ADR-0096).
+           std::format("presence_checks_total {}\n"
+                       "presence_refusals_total{{reason=\"not_shared\"}} {}\n"
+                       "presence_watches_revoked_total {}\n"
+                       "service_api_connections_total {}\n"
+                       "service_api_connections_refused_total {}\n"
+                       "service_api_connections_current {}\n"
+                       "service_api_requests_total {}\n"
+                       "service_api_answers_total{{result=\"changed\"}} {}\n"
+                       "service_api_answers_total{{result=\"read\"}} {}\n"
+                       "service_api_answers_total{{result=\"unauthorized\"}} {}\n"
+                       "service_api_answers_total{{result=\"forbidden\"}} {}\n"
+                       "service_api_answers_total{{result=\"rate_limited\"}} {}\n"
+                       "service_api_answers_total{{result=\"bad_request\"}} {}\n"
+                       "service_api_answers_total{{result=\"refused\"}} {}\n"
+                       "service_api_answers_total{{result=\"unavailable\"}} {}\n",
+                       presence.checks, presence.not_shared, presence.revoked, api.connections,
+                       api.refused_connections, service_api_.connections(), api.requests,
+                       api.changes, api.reads, api.unauthorized, api.forbidden, api.limited,
+                       api.bad_requests, api.refused, api.unavailable);
 }
 
 } // namespace chat

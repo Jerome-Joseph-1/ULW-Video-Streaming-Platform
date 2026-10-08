@@ -303,7 +303,9 @@ jobs:
   # broadcaster's page starts a stream through the gateway, publishes Chromium's fake camera
   # over WHIP with the ticket the gateway issued, goes live; the gateway starts the packager
   # and LiveKit's recorder relays to it; a second user watches in hls.js; the broadcaster ends
-  # it, and its recording becomes a video the worker makes ready.
+  # it, and its recording becomes a video the worker makes ready. A second run never calls start
+  # or end: LiveKit's webhooks to the gateway take the stream live and, once the page drops its
+  # connection, end it (docs/adr/0093).
   live-publish:
     if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox) }}
     runs-on: ubuntu-24.04
@@ -377,6 +379,11 @@ jobs:
       - run: >-
           sudo "$RUNNER_TEMP/callcap/bin/python" tests/load/call_capacity/call_capacity.py
           --calls 4 --seconds 60 --out call-capacity
+        timeout-minutes: 10
+      # M29 (ADR-0095): group calls of four, against n x (n - 1) streams out per call.
+      - run: >-
+          sudo "$RUNNER_TEMP/callcap/bin/python" tests/load/call_capacity/call_capacity.py
+          --calls 2 --participants 4 --seconds 60 --out call-capacity/group-of-4
         timeout-minutes: 10
       - if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

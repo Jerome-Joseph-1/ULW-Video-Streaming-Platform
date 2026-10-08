@@ -17,11 +17,14 @@
 #include "playback.hpp"
 #include "routes.hpp"
 #include "upload_claim.hpp"
+#include "video_access.hpp"
 
 #include <array>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace gateway {
@@ -108,10 +111,16 @@ private:
     // Fields ordered largest first so the struct packs without holes.
     struct Request {
         std::optional<core::ports::StoredUpload> upload;
+        // GET .../grants: its query, nullopt when malformed (answered once the caller is known
+        // to be the service, so that nobody else learns how it parses).
+        std::optional<GrantQuery> grant_query;
         std::optional<PendingCreate> create;
         std::optional<core::ports::Claims> claims;
         // A live stream's status, held while the playlist says whether it has ended.
         std::optional<core::ports::LiveStream> stream;
+        // PATCH /api/v1/videos/{id}: what the owner asked for, held while the catalog says
+        // whether they own the video.
+        std::optional<core::Visibility> visibility;
         std::string body;
         http::PathParams params{};
         std::string_view token;
@@ -135,6 +144,9 @@ private:
         std::optional<http::Method> method;
         bool keep_alive = true;
         bool authenticated = false;
+        // The token came in the Authorization header, not the cookie: only such a token may be
+        // the service's (ADR-0097).
+        bool bearer = false;
         bool message_complete = false;
         bool started = false;
         bool finishing = false;
@@ -180,7 +192,19 @@ private:
     void on_claimed(std::uint64_t request, const core::UploadId& upload,
                     core::ports::CatalogResult<core::ports::ClaimedUpload> result) noexcept;
     void on_found(core::ports::CatalogResult<core::ports::StoredUpload> result) noexcept;
-    void on_video(core::ports::CatalogResult<core::VideoRecord> result) noexcept;
+    void on_video(core::ports::CatalogResult<core::ports::VideoView> result) noexcept;
+    // PATCH /api/v1/videos/{id} (ADR-0097): the owner's visibility, after a read that tells
+    // the owner from a viewer and from someone who may not see the video at all.
+    void start_update() noexcept;
+    void on_update_view(std::uint64_t request,
+                        core::ports::CatalogResult<core::ports::VideoView> result) noexcept;
+    void on_visibility_set(std::uint64_t request,
+                           core::ports::CatalogResult<core::VideoRecord> result) noexcept;
+    // The operator's backend's grants (ADR-0097).
+    void start_service_route() noexcept;
+    void on_grants(std::uint64_t request, const core::VideoId& video,
+                   core::ports::CatalogResult<core::ports::GrantPage> result) noexcept;
+    void on_grant_changed(std::uint64_t request, core::ports::CatalogResult<void> result) noexcept;
     void start_playlist(const core::VideoRecord& video) noexcept;
     void on_playlist(ControlJob job) noexcept;
     void fail_playlist(PlaylistFailure failure) noexcept;
@@ -215,6 +239,11 @@ private:
               std::optional<std::uint64_t> upload_offset = std::nullopt) noexcept;
     void fail_storage(core::ports::StorageError error) noexcept;
     void fail_catalog(core::ports::CatalogError error) noexcept;
+    // The access API's refusals carry a code in a JSON body: {"error":"<code>"}.
+    void fail_with(http::Status status, std::string_view code) noexcept;
+    // A catalog error on the access API: not_found, forbidden or not_member with their codes,
+    // the rest as fail_catalog answers them.
+    void fail_access(core::ports::CatalogError error, std::string_view forbidden_code) noexcept;
     void finish_request() noexcept;
     // Releases the claim the current request holds, if it holds one.
     void release_claim() noexcept;

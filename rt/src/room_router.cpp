@@ -8,6 +8,7 @@
 #include "wire.hpp"
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <format>
 #include <optional>
@@ -928,6 +929,21 @@ public:
 
     [[nodiscard]] bool owns(const core::RoomId& room) const noexcept {
         return registry_.owned(room).has_value();
+    }
+
+    [[nodiscard]] std::optional<std::uint64_t>
+    owner_generation(const core::RoomId& room) const noexcept {
+        return registry_.owned(room);
+    }
+
+    void media_generation(const core::RoomId& room, const MediaChange& change,
+                          StoreCallback<std::optional<MediaState>> done) {
+        if (!registry_.owned(room)) {
+            done(std::optional<MediaState>{});
+            return;
+        }
+        [[maybe_unused]] const bool asked =
+            registry_.media_generation(room, change, std::move(done));
     }
 
     // The node a notice of a room goes to: this one's idea of its owner, if it has one.
@@ -2033,6 +2049,15 @@ void RoomRouter::notify(const core::RoomId& room, std::span<const std::byte> bod
 
 void RoomRouter::hear(INoticeListener* listener) noexcept {
     impl_->hear(listener);
+}
+
+std::optional<std::uint64_t> RoomRouter::owner_generation(const core::RoomId& room) const noexcept {
+    return impl_->owner_generation(room);
+}
+
+void RoomRouter::media_generation(const core::RoomId& room, const MediaChange& change,
+                                  StoreCallback<std::optional<MediaState>> done) {
+    impl_->media_generation(room, change, std::move(done));
 }
 
 bool RoomRouter::owns(const core::RoomId& room) const noexcept {

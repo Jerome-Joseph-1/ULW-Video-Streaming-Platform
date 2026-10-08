@@ -32,6 +32,12 @@ public:
         std::uint64_t generation;
         rt::StoreCallback<std::optional<std::uint64_t>> done;
     };
+    struct MediaGeneration {
+        core::RoomId room;
+        std::uint64_t generation;
+        rt::MediaChange change;
+        rt::StoreCallback<std::optional<rt::MediaState>> done;
+    };
     struct Lookup {
         core::NodeId node;
         rt::StoreCallback<std::optional<std::string>> done;
@@ -64,6 +70,12 @@ public:
                 rt::StoreCallback<std::optional<std::uint64_t>> done) override {
         appends.push_back({.room = room, .generation = generation, .done = std::move(done)});
     }
+    void media_generation(const core::RoomId& room, std::uint64_t generation,
+                          const rt::MediaChange& change,
+                          rt::StoreCallback<std::optional<rt::MediaState>> done) override {
+        media.push_back(
+            {.room = room, .generation = generation, .change = change, .done = std::move(done)});
+    }
     void release(const core::NodeId& /*node*/, std::vector<rt::OwnedRoom> rooms,
                  rt::StoreCallback<void> done) override {
         releases.push_back({.rooms = std::move(rooms), .done = std::move(done)});
@@ -94,6 +106,7 @@ public:
     std::deque<ClaimStale> claims;
     std::deque<Heartbeat> heartbeats;
     std::deque<Append> appends;
+    std::deque<MediaGeneration> media;
     std::deque<Release> releases;
     std::deque<rt::StoreCallback<void>> advertisements;
     std::deque<Lookup> lookups;

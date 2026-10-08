@@ -6,9 +6,10 @@ gateway. The gateway authorizes each playlist request and rewrites the
 playlist; the segment bytes come straight from the object store over presigned URLs and never
 pass through the gateway (ADR-0002, ADR-0024).
 
-Only the video's owner (the user whose token created the upload, or the broadcaster of the
-stream it recorded) can see or play it in this version. For anyone else every endpoint below
-answers `404`, exactly as for a video that does not exist.
+A video's owner (the user whose token created the upload, or the broadcaster of the stream it
+recorded) decides who else may see and play it ([Who can see a video](#who-can-see-a-video)).
+For anyone who may not, every endpoint below answers `404`, exactly as for a video that does not
+exist.
 
 ## Lifecycle
 
@@ -55,13 +56,16 @@ The video object:
 | `state` | string | One of the states above |
 | `version` | integer | Rises by one on every state change. Use it to tell two answers apart, not as a count of anything. |
 | `duration_ms` | integer or `null` | Set once `ready` |
-| `error_reason` | string, only when `failed` | Why, in a short English phrase meant for the video's owner, such as `the file could not be decoded as video`, `transcoding exceeded its time budget` or `upload expired`. Show it or log it; do not parse it, as the wording may change. Absent in every other state. |
+| `error_reason` | string, only when `failed`, owner only | Why, in a short English phrase meant for the video's owner, such as `the file could not be decoded as video`, `transcoding exceeded its time budget` or `upload expired`. Show it or log it; do not parse it, as the wording may change. Absent in every other state, and for anyone but the owner. |
+| `visibility` | string, owner only | Who else may see it: `private`, `unlisted` or `room:<room id>` ([Who can see a video](#who-can-see-a-video)). Absent for anyone but the owner. |
 
-A failed video:
+A failed video, as its owner sees it:
 
 ```json
-{"id":"0199950c-...","title":"clip.mp4","state":"failed","version":3,"duration_ms":null,"error_reason":"the file could not be decoded as video"}
+{"id":"0199950c-...","title":"clip.mp4","state":"failed","version":3,"duration_ms":null,"error_reason":"the file could not be decoded as video","visibility":"private"}
 ```
+
+Anyone else who may see it gets the same object without `error_reason` and `visibility`.
 
 ### Playlists
 
@@ -130,12 +134,103 @@ Playlist errors:
 | Status | Meaning | Client action |
 |---|---|---|
 | `401` | No valid token | Refresh the token, retry once |
-| `404` | Not your video, no such video, bad id, or a rendition the master does not list | Stop |
+| `404` | A video you may not see, no such video, bad id, or a rendition the master does not list | Stop |
 | `409` | The video is not `ready` (still processing, or `failed`) | Poll `GET /api/v1/videos/{id}`; fetch again once `ready` |
 | `503` | The store is throttling or unreachable; `Retry-After: 5` | Retry after the delay |
 | `500` | The stored playlist is broken or a URL could not be signed | Report with `X-Request-Id`; do not retry in a loop |
 
 All error bodies are empty.
+
+## Who can see a video
+
+<!-- core/src/video_access.cpp (access_of), core/src/visibility.cpp, infra/postgres/src/upload_catalog.cpp (kFindVideoFor, kSetVisibility, kGrantAccess), apps/gateway/src/connection.cpp (on_video, start_update, start_service_route), apps/gateway/src/video_access.cpp, migrations/0016_video_access.sql, docs/adr/0097-videos-shared-by-visibility-and-service-grants.md -->
+
+Every video has a **visibility**, which its owner sets:
+
+| Visibility | Who besides the owner may see and play it |
+|---|---|
+| `private` | Nobody. Every video starts so, a live stream's recording included. |
+| `unlisted` | Any signed-in user who has the video id. |
+| `room:<room id>` | The current members of that chat room, direct or group: whoever chat lists in it ([chat.md](chat.md#changing-member-lists)) at the moment of each request, while it also lists the owner. Someone taken off the list loses the video at their next request; someone added gains it. When the owner leaves the room, nobody in it sees the video any more; listed again, the owner shares into it again. |
+
+On top of any visibility, the operator's backend may **grant** a video to single users
+([Service API](#service-api-grants)); a grant lasts until it is revoked.
+
+Whatever the visibility and the grants say, a video whose upload is still in progress (`init`,
+`uploading`) is its owner's alone. Once committed (`processing`, `ready`, `failed`) it follows
+the rules above.
+
+The same check runs on every request for the video's metadata and for both playlists: the media
+playlist, and so every presigned segment URL, is only built for someone who may see the video.
+Nothing is cached, on any gateway. A segment URL already handed out stays valid until it expires
+(see [Playlists](#playlists)); revoking access stops new playlists, not URLs already issued.
+
+There is no listing of videos in this version: a client keeps the ids it was given (by the
+upload, by a chat message, by the operator's product).
+
+### Setting the visibility
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `PATCH /api/v1/videos/{id}` | `200`, `application/json`, the video object as its owner sees it | `400`, `401`, `403`, `404`, `413`, `503`, `500` |
+
+The owner only. The body is JSON, `Content-Type: application/json`, at most 4 KiB:
+
+```json
+{"visibility":"room:0192f3c4-7a1b-7c2d-8e3f-0123456789ab"}
+```
+
+`visibility` is `private`, `unlisted` or `room:<room id>`, the room id a lowercase canonical UUID.
+A room must be one the owner is a member of at that moment (a direct chat they are one of the
+two of, or a group they are listed in). Leaving the room later stops the share for everyone in it,
+until the owner is listed again or sets another visibility. A cookie request needs an allowed `Origin`, as an upload's create does
+([auth.md](auth.md#cookies-and-other-sites)).
+
+Refusals carry a JSON body, `{"error":"<code>"}`:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| `400` | `bad_visibility` | The body is not an object with one of the three forms; an empty body is `400` with no body |
+| `403` | `forbidden` | You may see the video but are not its owner |
+| `403` | `not_member` | The room is not one you are a member of |
+| `404` | `not_found` | No such video, a bad id, or a video you may not see: the three are indistinguishable |
+
+`401`, `413` and `503` (`Retry-After: 5`) come with an empty body, as elsewhere.
+
+### Service API: grants
+
+For the operator's backend only: a token whose claim `ULW_SERVICE_CLAIM` (default `scope`) holds
+`ULW_SERVICE_SCOPE` and, when `ULW_SERVICE_CLIENT_ID` is set, that was issued to that client
+([auth.md](auth.md#service-tokens)), typically one the backend obtains from the identity provider
+with the client-credentials grant. It must come in the `Authorization: Bearer` header: the cookie
+never carries a service token. Any other request is `403` `forbidden` on all three, before
+anything about the video is looked at; with `ULW_SERVICE_SCOPE` unset, every one is.
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `POST /api/v1/service/videos/{id}/grants/{user}` | `204`: `{user}` may see the video. Granting again changes nothing. | `400`, `401`, `403`, `404`, `503`, `500` |
+| `DELETE /api/v1/service/videos/{id}/grants/{user}` | `204`: the grant is gone. Revoking one not held changes nothing. | `400`, `401`, `403`, `404`, `503`, `500` |
+| `GET /api/v1/service/videos/{id}/grants` | `200`, `application/json`, `Cache-Control: no-store`, a page of grants | `400`, `401`, `403`, `404`, `503`, `500` |
+
+`{user}` is the user id as the user's token names it (its subject claim, [auth.md](auth.md#how-the-user-id-is-derived)),
+percent-encoded or not (`auth0%7C123` and `auth0|123` are the same user). None takes a body.
+A grant is not checked against anything: a user who never signed in simply holds it.
+
+The listing takes `limit` (1 to 1000, default 100) and `after` (a user id from a previous
+page's `next`, percent-encoded) in its query, and returns grants in bytewise order of user id:
+
+```json
+{"video_id":"0199950c-...","grants":[{"user_id":"auth0|123","granted_at":1759600000}],"next":"auth0|123"}
+```
+
+`granted_at` is in Unix seconds; `next` is `null` on the last page.
+
+| Status | `error` | Meaning |
+|---|---|---|
+| `400` | `bad_user` | `{user}` does not decode to a user id |
+| `400` | `bad_query` | `limit` or `after` malformed, or given twice |
+| `403` | `forbidden` | Not a service token |
+| `404` | `not_found` | No such video, or a bad id. The service may learn this; nobody else does. |
 
 ## CORS
 

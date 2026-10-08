@@ -1,6 +1,6 @@
 # 0073. A chat socket ends with its token, and a room with its membership
 
-Status: Accepted
+Status: Accepted, amended by 0096 (additions are notified too, on the chat_members channel)
 Date: 2026-09-30
 
 ## Context

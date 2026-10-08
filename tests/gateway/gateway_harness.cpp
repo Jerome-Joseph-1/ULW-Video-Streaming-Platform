@@ -195,7 +195,7 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
         break;
     }
     }
-    l.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*l.reactor);
+    l.catalog = std::make_unique<infra::catalog::MemoryCatalog>(*l.reactor, *l.clock);
     if (options.live_streams) {
         l.live_store = std::make_unique<FakeLiveStore>(*l.reactor);
         l.sfu = std::make_unique<FakeSfu>(*l.reactor);
@@ -406,6 +406,20 @@ void GatewayUnderTest::set_drop_pending(bool pending) {
 
 void GatewayUnderTest::put_video(const core::VideoRecord& video) {
     on_loop([&] { loop_->catalog->put_video(video); });
+}
+
+void GatewayUnderTest::add_member(std::string_view room, std::string_view user) {
+    const auto r = core::RoomId::parse(room);
+    const auto u = core::UserId::parse(user);
+    ASSERT_TRUE(r && u) << room << " " << user;
+    on_loop([&] { loop_->catalog->add_member(*r, *u); });
+}
+
+void GatewayUnderTest::remove_member(std::string_view room, std::string_view user) {
+    const auto r = core::RoomId::parse(room);
+    const auto u = core::UserId::parse(user);
+    ASSERT_TRUE(r && u) << room << " " << user;
+    on_loop([&] { loop_->catalog->remove_member(*r, *u); });
 }
 
 void GatewayUnderTest::put_object(std::string_view key, std::string_view bytes) {

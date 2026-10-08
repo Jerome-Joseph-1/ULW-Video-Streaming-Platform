@@ -35,6 +35,10 @@ std::vector<std::byte> encode_notice(const CallNotice& notice) {
     const auto ms =
         std::chrono::duration_cast<core::Millis>(notice.expires_at.time_since_epoch()).count();
     layout::put_u64(out, static_cast<std::uint64_t>(ms));
+    // After everything a node of the first ring read, so its notices read as they did there.
+    if (notice.event == RingEvent::Moved) {
+        layout::put_short(out, notice.subject.value_or(notice.to).view());
+    }
     return out;
 }
 
@@ -44,7 +48,7 @@ std::optional<CallNotice> decode_notice(std::span<const std::byte> bytes) {
         return std::nullopt;
     }
     const auto event = in.u8();
-    if (!event || *event > static_cast<std::uint8_t>(RingEvent::Ended)) {
+    if (!event || *event > static_cast<std::uint8_t>(RingEvent::Moved)) {
         return std::nullopt;
     }
     auto to = in.user();
@@ -63,7 +67,17 @@ std::optional<CallNotice> decode_notice(std::span<const std::byte> bytes) {
         }
     }
     const auto ms = in.u64();
-    if (!ms || !in.empty()) {
+    if (!ms) {
+        return std::nullopt;
+    }
+    std::optional<core::UserId> subject;
+    if (static_cast<RingEvent>(*event) == RingEvent::Moved) {
+        subject = in.user();
+        if (!subject) {
+            return std::nullopt;
+        }
+    }
+    if (!in.empty()) {
         return std::nullopt;
     }
     return CallNotice{.event = static_cast<RingEvent>(*event),
@@ -73,7 +87,8 @@ std::optional<CallNotice> decode_notice(std::span<const std::byte> bytes) {
                       .from = *from,
                       .by = by,
                       .expires_at =
-                          core::WallTime{core::Millis{static_cast<core::Millis::rep>(*ms)}}};
+                          core::WallTime{core::Millis{static_cast<core::Millis::rep>(*ms)}},
+                      .subject = subject};
 }
 
 Ringer::Ringer(IRingPlane& plane, const core::ports::IClock& clock, core::ports::IRandom& random,
@@ -153,16 +168,97 @@ bool Ringer::idle(const core::RoomId& room) const noexcept {
 }
 
 bool Ringer::member_of(const Call& call, const core::UserId& user) noexcept {
-    return call.caller == user || std::ranges::find(call.callees, user) != call.callees.end();
+    return call.caller == user || std::ranges::find(call.callees, user) != call.callees.end() ||
+           std::ranges::find(call.joined, user) != call.joined.end();
+}
+
+bool Ringer::expelled(const core::RoomId& room, const core::UserId& user) const noexcept {
+    const auto it = calls_.find(room);
+    return it != calls_.end() &&
+           std::ranges::find(it->second.expelled, user) != it->second.expelled.end();
+}
+
+bool Ringer::fits(const core::RoomId& room, const core::UserId& user) const noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end() || it->second.kind != CallKind::Group) {
+        return true;
+    }
+    const Call& call = it->second;
+    return call.joined.size() < kMaxGroupJoined ||
+           std::ranges::find(call.joined, user) != call.joined.end();
+}
+
+std::optional<CallId> Ringer::call_of(const core::RoomId& room) const noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end()) {
+        return std::nullopt;
+    }
+    return it->second.id;
+}
+
+bool Ringer::answerable(const core::RoomId& room, const core::UserId& user) const noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end()) {
+        return false;
+    }
+    const Call& call = it->second;
+    // A direct call still ringing from the asker is theirs, not one they could answer: the call
+    // they were answering crossed with a new one of their own.
+    return call.kind == CallKind::Group || call.answered || call.caller != user;
+}
+
+std::optional<CallKind> Ringer::kind_of(const core::RoomId& room) const noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end()) {
+        return std::nullopt;
+    }
+    return it->second.kind;
+}
+
+std::vector<core::UserId> Ringer::joined(const core::RoomId& room) const {
+    const auto it = calls_.find(room);
+    if (it == calls_.end()) {
+        return {};
+    }
+    const Call& call = it->second;
+    if (call.kind == CallKind::Group) {
+        return call.joined;
+    }
+    // A direct call's tickets: the caller's, and the callee's once answered.
+    std::vector<core::UserId> out{call.caller};
+    if (call.answered) {
+        out.insert(out.end(), call.callees.begin(), call.callees.end());
+    }
+    return out;
+}
+
+std::vector<core::RoomId> Ringer::rooms() const {
+    std::vector<core::RoomId> out;
+    out.reserve(calls_.size());
+    for (const auto& [room, call] : calls_) {
+        out.push_back(room);
+    }
+    return out;
 }
 
 std::expected<std::optional<CallId>, RingRefusal>
 Ringer::ticketed(const core::RoomId& room, const core::UserId& user,
-                 const std::optional<std::vector<core::UserId>>& members) noexcept {
+                 const std::optional<std::vector<core::UserId>>& members, CallKind kind) noexcept {
     try {
         const auto it = calls_.find(room);
         if (it != calls_.end()) {
             Call& call = it->second;
+            if (std::ranges::find(call.expelled, user) != call.expelled.end()) {
+                return std::unexpected(RingRefusal{.why = RingRefusal::Why::Expelled});
+            }
+            if (call.kind == CallKind::Group) {
+                if (!fits(room, user)) {
+                    ++counters_.busy;
+                    return std::unexpected(RingRefusal{.why = RingRefusal::Why::Busy});
+                }
+                joined_group(room, call, user);
+                return call.id;
+            }
             if (!call.answered && call.caller != user &&
                 std::ranges::find(call.callees, user) != call.callees.end()) {
                 // The callee picked up: on every device of either, the ringing stops.
@@ -180,9 +276,10 @@ Ringer::ticketed(const core::RoomId& room, const core::UserId& user,
         if (!members) {
             return std::nullopt;
         }
+        const std::size_t most = kind == CallKind::Group ? kMaxGroupCallees : kMaxCallees;
         std::vector<core::UserId> callees;
         for (const core::UserId& member : *members) {
-            if (member != user && callees.size() < kMaxCallees &&
+            if (member != user && callees.size() < most &&
                 std::ranges::find(callees, member) == callees.end()) {
                 callees.push_back(member);
             }
@@ -199,7 +296,7 @@ Ringer::ticketed(const core::RoomId& room, const core::UserId& user,
             return std::unexpected(RingRefusal{.why = RingRefusal::Why::Busy});
         }
         const CallId id = CallId::generate(clock_, random_);
-        start(room, user, std::move(callees), id);
+        start(room, user, std::move(callees), id, kind);
         return id;
     } catch (const std::bad_alloc&) {
         ++counters_.allocation_failures;
@@ -207,14 +304,45 @@ Ringer::ticketed(const core::RoomId& room, const core::UserId& user,
     }
 }
 
+void Ringer::joined_group(const core::RoomId& room, Call& call, const core::UserId& user) {
+    const bool was_ringing = std::ranges::find(call.ringing, user) != call.ringing.end();
+    const bool was_in = std::ranges::find(call.joined, user) != call.joined.end();
+    if (!was_in) {
+        call.joined.push_back(user);
+    }
+    std::erase(call.ringing, user);
+    if (user != call.caller && !call.answered) {
+        call.answered = true;
+        ++counters_.answered;
+    }
+    // Joining is answering, for whoever was not in the call: everyone hears who came, and the
+    // member's other devices stop ringing.
+    if (was_ringing || (!was_in && call.answered)) {
+        announce(room, call, RingEvent::Answered, user);
+    }
+    if (call.answered) {
+        call.hold_until = clock_.now() + limits_.answered_hold;
+    }
+    reschedule(room, call);
+}
+
 void Ringer::start(const core::RoomId& room, const core::UserId& caller,
-                   std::vector<core::UserId> callees, const CallId& id) {
+                   std::vector<core::UserId> callees, const CallId& id, CallKind kind) {
     const core::MonoTime now = clock_.now();
+    std::vector<core::UserId> ringing;
+    std::vector<core::UserId> joined;
+    if (kind == CallKind::Group) {
+        ringing = callees;
+        joined.push_back(caller);
+    }
     Call& call = calls_
                      .try_emplace(room, Call{.id = id,
                                              .caller = caller,
                                              .callees = std::move(callees),
                                              .answered = false,
+                                             .kind = kind,
+                                             .ringing = std::move(ringing),
+                                             .joined = std::move(joined),
                                              .ring_deadline = now + limits_.ring_timeout,
                                              .expires_at = clock_.wall_now() + limits_.ring_timeout,
                                              .next_announce = now + limits_.announce_every,
@@ -251,9 +379,40 @@ void Ringer::schedule(const core::RoomId& room, Call& call, core::MonoTime due) 
     call.due = due;
 }
 
+void Ringer::reschedule(const core::RoomId& room, Call& call) {
+    std::optional<core::MonoTime> due;
+    const auto sooner = [&](core::MonoTime t) { due = due ? std::min(*due, t) : t; };
+    const bool rings = !call.answered || !call.ringing.empty();
+    if (rings) {
+        sooner(std::max(call.ring_deadline, call.answering_until));
+        if (clock_.now() < call.ring_deadline) {
+            sooner(std::min(call.ring_deadline, call.next_announce));
+        }
+    }
+    if (call.answered && !call.checking) {
+        sooner(call.hold_until);
+    }
+    if (!due) {
+        // Waiting on the SFU's answer, which reschedules it.
+        due_.erase({call.due, room});
+        call.due = core::MonoTime::max();
+        return;
+    }
+    schedule(room, call, *due);
+}
+
 void Ringer::forget(Calls::iterator it) noexcept {
     due_.erase({it->second.due, it->first});
     calls_.erase(it);
+}
+
+void Ringer::forget_ended(Calls::iterator it) noexcept {
+    const bool group = it->second.kind == CallKind::Group;
+    const core::RoomId room = it->first;
+    forget(it);
+    if (group && group_ended_) {
+        group_ended_(room);
+    }
 }
 
 std::optional<core::UserId> Ringer::signal(const core::RoomId& room, const core::UserId& user,
@@ -263,10 +422,27 @@ std::optional<core::UserId> Ringer::signal(const core::RoomId& room, const core:
         return std::nullopt;
     }
     Call& c = it->second;
+    const bool group = c.kind == CallKind::Group;
     const bool callee = std::ranges::find(c.callees, user) != c.callees.end();
     RingEvent event = RingEvent::Ended;
     switch (signal) {
     case CallSignal::Decline:
+        if (group) {
+            if (std::ranges::find(c.ringing, user) == c.ringing.end()) {
+                return std::nullopt;
+            }
+            std::erase(c.ringing, user);
+            ++counters_.declined;
+            const core::UserId caller = c.caller;
+            announce(room, c, RingEvent::Declined, user);
+            // Everyone rung turned it down before anyone came: nobody answered.
+            if (!c.answered && c.ringing.empty()) {
+                ++counters_.missed;
+                announce(room, c, RingEvent::Missed, std::nullopt);
+                forget_ended(it);
+            }
+            return caller;
+        }
         if (c.answered || !callee) {
             return std::nullopt;
         }
@@ -286,17 +462,184 @@ std::optional<core::UserId> Ringer::signal(const core::RoomId& room, const core:
         ++counters_.cancelled;
         break;
     case CallSignal::End:
-        if (!c.answered || !member_of(c, user)) {
+        // A group call is ended for everyone by its caller, through may_end().
+        if (group || !c.answered || !member_of(c, user)) {
             return std::nullopt;
         }
         event = RingEvent::Ended;
         ++counters_.ended;
         break;
+    case CallSignal::Leave: {
+        if (!group || std::ranges::find(c.joined, user) == c.joined.end()) {
+            return std::nullopt;
+        }
+        std::erase(c.joined, user);
+        ++counters_.left;
+        const core::UserId caller = c.caller;
+        announce(room, c, RingEvent::Left, user);
+        if (c.joined.empty() && !c.checking) {
+            // The last one known: the SFU says whether anyone is still in it (a device that
+            // joined from a ticket of an earlier owner, a member who left without saying so
+            // left nobody behind), and nobody there ends it.
+            try {
+                checks_.emplace_back(room, c.id);
+                c.checking = true;
+            } catch (const std::bad_alloc&) {
+                // Asked at the next hold's end instead.
+                ++counters_.allocation_failures;
+            }
+        }
+        return caller;
+    }
+    case CallSignal::Expel:
+        // Through expel(), which the call handler follows with its fenced write.
+        return std::nullopt;
     }
     const core::UserId caller = c.caller;
     announce(room, c, event, user);
     forget(it);
     return caller;
+}
+
+std::optional<MediaStepNeeded> Ringer::may_end(const core::RoomId& room, const core::UserId& user,
+                                               const CallId& call) const noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end() || it->second.id != call || it->second.kind != CallKind::Group ||
+        it->second.caller != user) {
+        return std::nullopt;
+    }
+    return MediaStepNeeded::Close;
+}
+
+std::optional<MediaStepNeeded> Ringer::expel(const core::RoomId& room, const core::UserId& user,
+                                             const CallId& call,
+                                             const core::UserId& target) noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end() || it->second.id != call || it->second.kind != CallKind::Group ||
+        it->second.caller != user || target == user) {
+        return std::nullopt;
+    }
+    try {
+        return put_out(room, it->second, target);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        return std::nullopt;
+    }
+}
+
+MediaStepNeeded Ringer::put_out(const core::RoomId& room, Call& call, const core::UserId& target) {
+    if (std::ranges::find(call.expelled, target) == call.expelled.end()) {
+        // The oldest is forgotten first: it was put out of the media room long ago.
+        if (call.expelled.size() >= kMaxExpelled) {
+            call.expelled.erase(call.expelled.begin());
+        }
+        call.expelled.push_back(target);
+    }
+    ++counters_.expelled;
+    std::erase(call.ringing, target);
+    std::erase(call.callees, target);
+    const bool had_ticket = std::ranges::find(call.joined, target) != call.joined.end();
+    std::erase(call.joined, target);
+    reschedule(room, call);
+    return had_ticket ? MediaStepNeeded::Move : MediaStepNeeded::None;
+}
+
+MediaStepNeeded Ringer::removed(const core::RoomId& room, const core::UserId& user) noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end() || !member_of(it->second, user)) {
+        return MediaStepNeeded::None;
+    }
+    Call& call = it->second;
+    if (call.kind == CallKind::Direct) {
+        // A direct chat without one of its two members has no call left: it ends, and its media
+        // room closes under whoever is still in it.
+        return MediaStepNeeded::Close;
+    }
+    try {
+        const MediaStepNeeded step = put_out(room, call, user);
+        if (!call.answered && call.ringing.empty() && call.joined.size() <= 1 &&
+            step == MediaStepNeeded::None) {
+            // Nobody left to ring: the caller's call was missed.
+            ++counters_.missed;
+            announce(room, call, RingEvent::Missed, std::nullopt);
+            forget_ended(it);
+        }
+        return step;
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        return MediaStepNeeded::Move;
+    }
+}
+
+void Ringer::ended(const core::RoomId& room, const CallId& call,
+                   const std::optional<core::UserId>& by) noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end() || it->second.id != call) {
+        return;
+    }
+    ++counters_.ended;
+    announce(room, it->second, RingEvent::Ended, by);
+    forget(it);
+}
+
+void Ringer::moved(const core::RoomId& room, const CallId& call,
+                   const std::optional<core::UserId>& by, const core::UserId& subject,
+                   bool everyone) noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end() || it->second.id != call) {
+        return;
+    }
+    const Call& c = it->second;
+    if (!everyone) {
+        // Nothing moved: only the one put out needs to know.
+        tell(room, c, subject, RingEvent::Moved, by, subject);
+        return;
+    }
+    try {
+        for (const core::UserId& to : members(c)) {
+            tell(room, c, to, RingEvent::Moved, by, subject);
+        }
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+    }
+    if (!member_of(c, subject)) {
+        tell(room, c, subject, RingEvent::Moved, by, subject);
+    }
+}
+
+std::vector<std::pair<core::RoomId, CallId>> Ringer::take_checks() {
+    return std::exchange(checks_, {});
+}
+
+void Ringer::occupied(const core::RoomId& room, const CallId& call, std::optional<bool> anyone,
+                      bool asked) noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end() || it->second.id != call || !it->second.checking) {
+        return;
+    }
+    Call& c = it->second;
+    c.checking = false;
+    // An SFU that cannot say, so many checks running, is taken to hold nobody: a room it has
+    // dropped answers no better, and the call would otherwise never end.
+    if (anyone) {
+        c.unanswered = 0;
+    } else if (asked) {
+        ++c.unanswered;
+    }
+    if (anyone == false || c.unanswered >= kMaxUnansweredChecks) {
+        ++counters_.emptied;
+        announce(room, c, RingEvent::Ended, std::nullopt);
+        forget_ended(it);
+        return;
+    }
+    c.hold_until = clock_.now() + limits_.occupancy_check;
+    try {
+        reschedule(room, c);
+    } catch (const std::bad_alloc&) {
+        // Kept with nothing due would be kept for ever: forgotten without a word instead.
+        ++counters_.allocation_failures;
+        forget_ended(it);
+    }
 }
 
 void Ringer::tick() noexcept {
@@ -319,6 +662,10 @@ void Ringer::tick() noexcept {
         if (!plane_.owns(room)) {
             ++counters_.orphaned;
             forget(it);
+            continue;
+        }
+        if (call.kind == CallKind::Group) {
+            tick_group(room, it, now);
             continue;
         }
         if (call.answered) {
@@ -357,26 +704,105 @@ void Ringer::tick() noexcept {
     }
 }
 
-void Ringer::announce(const core::RoomId& room, const Call& call, RingEvent event,
-                      const std::optional<core::UserId>& by) noexcept {
-    const auto tell = [&](const core::UserId& to) noexcept {
+void Ringer::tick_group(const core::RoomId& room, Calls::iterator it, core::MonoTime now) noexcept {
+    Call& call = it->second;
+    const bool rings = !call.answered || !call.ringing.empty();
+    if (rings && now >= call.ring_deadline) {
+        if (now < call.answering_until) {
+            // A callee's ticket is on its way: rung out only if it never comes.
+            if (call.due < call.answering_until) {
+                ++counters_.graced;
+            }
+        } else if (!call.answered) {
+            ++counters_.missed;
+            announce(room, call, RingEvent::Missed, std::nullopt);
+            forget_ended(it);
+            return;
+        } else {
+            // The call goes on; each member still rung missed it, and only they are told.
+            for (const core::UserId& member : call.ringing) {
+                ++counters_.missed;
+                tell(room, call, member, RingEvent::Missed, std::nullopt);
+            }
+            call.ringing.clear();
+        }
+    } else if (rings && now >= call.next_announce) {
+        // Again, to those still rung: the caller until someone comes, and the callees.
+        if (!call.answered) {
+            tell(room, call, call.caller, RingEvent::Ringing, std::nullopt);
+        }
+        for (const core::UserId& member : call.ringing) {
+            tell(room, call, member, RingEvent::Ringing, std::nullopt);
+        }
+        while (call.next_announce <= now) {
+            call.next_announce += limits_.announce_every;
+        }
+    }
+    if (call.answered && !call.checking && now >= call.hold_until) {
         try {
-            const std::vector<std::byte> notice = encode_notice({.event = event,
-                                                                 .to = to,
-                                                                 .room = room,
-                                                                 .call = call.id,
-                                                                 .from = call.caller,
-                                                                 .by = by,
-                                                                 .expires_at = call.expires_at});
-            ++counters_.notices;
-            plane_.notify(presence_room(to), notice);
+            checks_.emplace_back(room, call.id);
+            call.checking = true;
         } catch (const std::bad_alloc&) {
+            // Asked at the next tick.
             ++counters_.allocation_failures;
         }
-    };
-    tell(call.caller);
+    }
+    try {
+        reschedule(room, call);
+    } catch (const std::bad_alloc&) {
+        // Kept with nothing due would be kept for ever: forgotten without a word instead.
+        ++counters_.allocation_failures;
+        forget_ended(it);
+    }
+}
+
+std::vector<core::UserId> Ringer::members(const Call& call) {
+    std::vector<core::UserId> out{call.caller};
     for (const core::UserId& callee : call.callees) {
-        tell(callee);
+        out.push_back(callee);
+    }
+    for (const core::UserId& in : call.joined) {
+        if (std::ranges::find(out, in) == out.end()) {
+            out.push_back(in);
+        }
+    }
+    return out;
+}
+
+void Ringer::tell(const core::RoomId& room, const Call& call, const core::UserId& to,
+                  RingEvent event, const std::optional<core::UserId>& by,
+                  const std::optional<core::UserId>& subject) noexcept {
+    try {
+        const std::vector<std::byte> notice = encode_notice({.event = event,
+                                                             .to = to,
+                                                             .room = room,
+                                                             .call = call.id,
+                                                             .from = call.caller,
+                                                             .by = by,
+                                                             .expires_at = call.expires_at,
+                                                             .subject = subject});
+        ++counters_.notices;
+        plane_.notify(presence_room(to), notice);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+    }
+}
+
+void Ringer::announce(const core::RoomId& room, const Call& call, RingEvent event,
+                      const std::optional<core::UserId>& by) noexcept {
+    if (call.kind == CallKind::Direct) {
+        tell(room, call, call.caller, event, by);
+        for (const core::UserId& callee : call.callees) {
+            tell(room, call, callee, event, by);
+        }
+        return;
+    }
+    try {
+        for (const core::UserId& to : members(call)) {
+            tell(room, call, to, event, by);
+        }
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
     }
 }
 

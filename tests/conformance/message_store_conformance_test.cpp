@@ -55,6 +55,12 @@ public:
     [[nodiscard]] virtual core::ports::IMessageStore& store() = 0;
     // Makes `room` writable by this test, as its owner.
     virtual void open(const core::RoomId& room) = 0;
+    // Returns once changes to member lists reach `listener`, which watches the store from here on:
+    // at once in memory, once the listening session has said so (a resync) on Postgres.
+    virtual void watch(core::ports::IMemberListener& listener, const int& resyncs) {
+        store().watch_members(&listener);
+        (void)resyncs;
+    }
     // Stores a message under the room's next seq and answers that seq.
     virtual void write(const core::RoomId& room, const core::UserId& sender, std::string key,
                        std::vector<std::byte> body, MessageCallback<std::uint64_t> done) = 0;
@@ -147,6 +153,12 @@ public:
     PostgresBackend& operator=(PostgresBackend&&) = delete;
 
     core::ports::IMessageStore& store() override { return *store_; }
+
+    void watch(core::ports::IMemberListener& listener, const int& resyncs) override {
+        store().watch_members(&listener);
+        ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return resyncs > 0; }))
+            << "the store never listened";
+    }
 
     void open(const core::RoomId& room) override {
         const auto owner = ulw::test::ask_store<rt::Ownership>(
@@ -689,6 +701,506 @@ TEST_P(MessageStoreConformance, RecordLiveRefusesARoomThatIsClosedOrListsMembers
               Admission::NotLive);
 }
 
+// Member lists their users change (ADR-0096).
+
+using core::ports::MemberEntry;
+using core::ports::MemberRole;
+using core::ports::MembershipChange;
+using core::ports::MembershipOutcome;
+using core::ports::RoomEntry;
+using core::ports::RoomKind;
+using core::ports::Roster;
+
+// What a change told a listener, in the order told.
+class Heard final : public core::ports::IMemberListener {
+public:
+    void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override {
+        changes.push_back(std::format("- {} {}", room.to_string(), user.view()));
+    }
+    void on_member_added(const core::RoomId& room, const core::UserId& user) noexcept override {
+        changes.push_back(std::format("+ {} {}", room.to_string(), user.view()));
+    }
+    void on_member_role(const core::RoomId& room, const core::UserId& user,
+                        core::ports::MemberRole role) noexcept override {
+        changes.push_back(std::format("* {} {} {}", room.to_string(),
+                                      role == MemberRole::Admin ? "admin" : "member", user.view()));
+    }
+    void on_members_resync() noexcept override { ++resyncs; }
+
+    std::vector<std::string> changes;
+    int resyncs = 0;
+};
+
+class MembershipConformance : public MessageStoreConformance {
+protected:
+    // A room named as the chat service names a direct chat (tag 03) or a group chat (tag 04),
+    // the rest random like a digest's; nothing has recorded or created it.
+    core::RoomId named_room(std::string_view tag) {
+        std::string text = core::RoomId::generate(clock_, random_).to_string();
+        text[14] = '8';
+        text.replace(0, 2, tag);
+        return *core::RoomId::parse(text);
+    }
+
+    MessageResult<MembershipChange> open_direct(const core::RoomId& room, const core::UserId& user,
+                                                const core::UserId& peer) {
+        return ask<MembershipChange>(
+            [&](auto done) { store().open_direct(room, user, peer, std::move(done)); });
+    }
+    MessageResult<MembershipChange> create_group(const core::RoomId& room,
+                                                 const core::UserId& creator,
+                                                 std::vector<core::UserId> others) {
+        return ask<MembershipChange>([&](auto done) {
+            store().create_group(room, creator, std::move(others), std::move(done));
+        });
+    }
+    MessageResult<MembershipChange> add(const core::RoomId& room, const core::ports::Actor& actor,
+                                        std::vector<core::UserId> users) {
+        return ask<MembershipChange>([&](auto done) {
+            store().add_members(room, actor, std::move(users), std::move(done));
+        });
+    }
+    MessageResult<MembershipChange> expel(const core::RoomId& room, const core::UserId& actor,
+                                          const core::UserId& user) {
+        return ask<MembershipChange>(
+            [&](auto done) { store().expel(room, actor, user, std::move(done)); });
+    }
+    MessageResult<MembershipChange> leave(const core::RoomId& room, const core::UserId& user) {
+        return ask<MembershipChange>(
+            [&](auto done) { store().leave_room(room, user, std::move(done)); });
+    }
+    MessageResult<Roster> roster(const core::RoomId& room, const core::ports::Actor& asker,
+                                 std::optional<core::UserId> after = std::nullopt,
+                                 std::size_t limit = 100) {
+        return ask<Roster>(
+            [&](auto done) { store().roster(room, asker, after, limit, std::move(done)); });
+    }
+    MessageResult<std::vector<core::UserId>> shared(const core::UserId& user,
+                                                    std::vector<core::UserId> others) {
+        return ask<std::vector<core::UserId>>(
+            [&](auto done) { store().shared_with(user, std::move(others), std::move(done)); });
+    }
+    MessageResult<std::vector<RoomEntry>>
+    rooms_of(const core::UserId& user, std::optional<core::RoomId> after, std::size_t limit) {
+        return ask<std::vector<RoomEntry>>(
+            [&](auto done) { store().rooms_of(user, after, limit, std::move(done)); });
+    }
+
+    static MembershipChange done(std::vector<core::UserId> changed,
+                                 std::optional<core::UserId> promoted = std::nullopt) {
+        return {.outcome = MembershipOutcome::Done,
+                .changed = std::move(changed),
+                .promoted = promoted};
+    }
+    static MessageResult<MembershipChange> refused(MembershipOutcome outcome) {
+        return MembershipChange{.outcome = outcome, .changed = {}, .promoted = std::nullopt};
+    }
+
+    // A group of alice (its admin), bob and carol.
+    core::RoomId group() {
+        const core::RoomId room = named_room("04");
+        EXPECT_EQ(create_group(room, alice_, {carol_, bob_}), done({alice_, bob_, carol_}));
+        return room;
+    }
+
+    const core::UserId carol_ = user("auth0|carol");
+    const core::UserId dave_ = user("auth0|dave");
+};
+
+TEST_P(MembershipConformance, ADirectChatListsItsPairOnceWhicheverOfThemOpensIt) {
+    const core::RoomId room = named_room("03");
+    EXPECT_EQ(open_direct(room, alice_, bob_), done({alice_, bob_}));
+    // The other side, and the same side again, find it as it is.
+    EXPECT_EQ(open_direct(room, bob_, alice_), done({}));
+    EXPECT_EQ(open_direct(room, alice_, bob_), done({}));
+    EXPECT_EQ(roster(room, bob_),
+              (Roster{.asker_listed = true,
+                      .members = {{.user = alice_, .role = MemberRole::Member},
+                                  {.user = bob_, .role = MemberRole::Member}}}));
+    EXPECT_EQ(
+        ask<core::ports::RoomAccess>([&](auto d) { store().access(room, alice_, std::move(d)); }),
+        (core::ports::RoomAccess{.kind = RoomKind::DirectChat, .member = true}));
+    // Nobody else is let in by it.
+    EXPECT_EQ(open_direct(room, carol_, alice_), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(members(room, std::nullopt, 10), (std::vector<core::UserId>{alice_, bob_}));
+}
+
+// A member an operator took off a direct chat is not put back by the other opening it again.
+TEST_P(MembershipConformance, ADirectChatThatListsAnyoneIsLeftAsItIs) {
+    const core::RoomId room = named_room("03");
+    ASSERT_EQ(open_direct(room, alice_, bob_), done({alice_, bob_}));
+    ASSERT_TRUE(ask<void>([&](auto d) { store().remove_member(room, bob_, std::move(d)); }));
+    EXPECT_EQ(open_direct(room, alice_, bob_), done({}));
+    EXPECT_EQ(open_direct(room, bob_, alice_), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(members(room, std::nullopt, 10), std::vector<core::UserId>{alice_});
+}
+
+// A refused join records a room nobody opened yet (ADR-0054); opening it lists the pair.
+TEST_P(MembershipConformance, ADirectChatAJoinRecordedFirstIsOpenedAllTheSame) {
+    const core::RoomId room = named_room("03");
+    ASSERT_EQ(ask<Admission>([&](auto d) {
+                  store().admits(room, carol_, RoomKind::DirectChat, std::move(d));
+              }),
+              Admission::NotMember);
+    EXPECT_EQ(open_direct(room, alice_, bob_), done({alice_, bob_}));
+    EXPECT_EQ(ask<Admission>(
+                  [&](auto d) { store().admits(room, bob_, RoomKind::DirectChat, std::move(d)); }),
+              Admission::Admitted);
+}
+
+TEST_P(MembershipConformance, ARoomRecordedAsAnotherKindIsNeitherOpenedNorCreated) {
+    const core::RoomId room = core::RoomId::generate(clock_, random_);
+    ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(room, alice_, std::move(d)); }));
+    EXPECT_EQ(open_direct(room, alice_, bob_), refused(MembershipOutcome::WrongKind));
+    const core::RoomId direct = core::RoomId::generate(clock_, random_);
+    ASSERT_EQ(ask<Admission>([&](auto d) {
+                  store().admits(direct, carol_, RoomKind::DirectChat, std::move(d));
+              }),
+              Admission::NotMember);
+    EXPECT_EQ(create_group(direct, alice_, {bob_}), refused(MembershipOutcome::WrongKind));
+    EXPECT_EQ(members(room, std::nullopt, 10), std::vector<core::UserId>{alice_});
+    EXPECT_EQ(members(direct, std::nullopt, 10), std::vector<core::UserId>{});
+}
+
+TEST_P(MembershipConformance, AGroupsCreatorIsItsAdminAndACreateRepeatedChangesNothing) {
+    const core::RoomId room = group();
+    EXPECT_EQ(roster(room, carol_),
+              (Roster{.asker_listed = true,
+                      .members = {{.user = alice_, .role = MemberRole::Admin},
+                                  {.user = bob_, .role = MemberRole::Member},
+                                  {.user = carol_, .role = MemberRole::Member}}}));
+    // A repeat, with whatever list, lists nobody more.
+    EXPECT_EQ(create_group(room, alice_, {dave_}), done({}));
+    EXPECT_EQ(create_group(room, dave_, {}), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(members(room, std::nullopt, 10), (std::vector<core::UserId>{alice_, bob_, carol_}));
+    // A group of one is a group.
+    const core::RoomId alone = named_room("04");
+    EXPECT_EQ(create_group(alone, dave_, {}), done({dave_}));
+}
+
+TEST_P(MembershipConformance, OnlyAGroupsAdminAddsAndThoseListedAlreadyStayAsTheyAre) {
+    const core::RoomId room = group();
+    EXPECT_EQ(add(room, bob_, {dave_}), refused(MembershipOutcome::NotAdmin));
+    EXPECT_EQ(add(room, dave_, {dave_}), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(add(named_room("04"), alice_, {dave_}), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(add(room, alice_, {dave_, bob_}), done({dave_}));
+    EXPECT_EQ(add(room, alice_, {dave_}), done({}));
+    EXPECT_EQ(roster(room, alice_)->members.back(),
+              (MemberEntry{.user = dave_, .role = MemberRole::Member}));
+    // A direct chat's pair never changes.
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    EXPECT_EQ(add(direct, alice_, {carol_}), refused(MembershipOutcome::NotGroup));
+    EXPECT_EQ(members(direct, std::nullopt, 10), (std::vector<core::UserId>{alice_, bob_}));
+}
+
+TEST_P(MembershipConformance, AGroupHoldsAtMostItsCapAndAnAddPastItAddsNobody) {
+    const core::RoomId room = group();
+    std::vector<core::UserId> batch;
+    std::size_t next = 0;
+    const auto fill = [&](std::size_t n) {
+        batch.clear();
+        for (std::size_t i = 0; i < n; ++i) {
+            batch.push_back(user(std::format("u{:03}", next++)));
+        }
+        return batch;
+    };
+    ASSERT_EQ(add(room, alice_, fill(50))->changed.size(), 50U);
+    ASSERT_EQ(add(room, alice_, fill(core::ports::kMaxGroupMembers - 53))->changed.size(),
+              core::ports::kMaxGroupMembers - 53);
+    EXPECT_EQ(members(room, std::nullopt, 1000)->size(), core::ports::kMaxGroupMembers);
+    EXPECT_EQ(add(room, alice_, fill(2)), refused(MembershipOutcome::Full));
+    EXPECT_EQ(members(room, std::nullopt, 1000)->size(), core::ports::kMaxGroupMembers);
+    // Naming only those listed already fits.
+    EXPECT_EQ(add(room, alice_, {bob_}), done({}));
+}
+
+TEST_P(MembershipConformance, OnlyAGroupsAdminRemovesOthers) {
+    const core::RoomId room = group();
+    EXPECT_EQ(expel(room, bob_, carol_), refused(MembershipOutcome::NotAdmin));
+    EXPECT_EQ(expel(room, dave_, carol_), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(expel(room, alice_, carol_), done({carol_}));
+    EXPECT_EQ(expel(room, alice_, carol_), done({}));
+    EXPECT_EQ(members(room, std::nullopt, 10), (std::vector<core::UserId>{alice_, bob_}));
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    EXPECT_EQ(expel(direct, alice_, bob_), refused(MembershipOutcome::NotGroup));
+}
+
+TEST_P(MembershipConformance, WhenTheLastAdminLeavesTheFirstMemberLeftBecomesOne) {
+    const core::RoomId room = group();
+    EXPECT_EQ(leave(room, carol_), done({carol_}));
+    // Removing oneself is leaving.
+    EXPECT_EQ(expel(room, alice_, alice_), done({alice_}, bob_));
+    EXPECT_EQ(roster(room, bob_), (Roster{.asker_listed = true,
+                                          .members = {{.user = bob_, .role = MemberRole::Admin}}}));
+    EXPECT_EQ(leave(room, carol_), refused(MembershipOutcome::NotMember));
+    // The last one out leaves a list of nobody, which admits nobody.
+    EXPECT_EQ(leave(room, bob_), done({bob_}));
+    EXPECT_EQ(ask<Admission>(
+                  [&](auto d) { store().admits(room, bob_, RoomKind::GroupChat, std::move(d)); }),
+              Admission::NotMember);
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    EXPECT_EQ(leave(direct, alice_), refused(MembershipOutcome::NotGroup));
+    EXPECT_EQ(leave(named_room("04"), alice_), refused(MembershipOutcome::NotMember));
+}
+
+TEST_P(MembershipConformance, AMembersOwnRoomsPageInIdOrderWithTheirKindRoleAndPeer) {
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    const core::RoomId mine = group();
+    const core::RoomId theirs = named_room("04");
+    ASSERT_EQ(create_group(theirs, bob_, {alice_}), done({alice_, bob_}));
+    // Listed by an operator, with no kind recorded by anything else: a group chat.
+    const core::RoomId listed = core::RoomId::generate(clock_, random_);
+    ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(listed, alice_, std::move(d)); }));
+    ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(new_room(), bob_, std::move(d)); }));
+
+    std::map<std::string, RoomEntry> expected;
+    expected.emplace(direct.to_string(), RoomEntry{.room = direct,
+                                                   .kind = RoomKind::DirectChat,
+                                                   .role = MemberRole::Member,
+                                                   .peer = bob_});
+    expected.emplace(mine.to_string(), RoomEntry{.room = mine,
+                                                 .kind = RoomKind::GroupChat,
+                                                 .role = MemberRole::Admin,
+                                                 .peer = std::nullopt});
+    expected.emplace(theirs.to_string(), RoomEntry{.room = theirs,
+                                                   .kind = RoomKind::GroupChat,
+                                                   .role = MemberRole::Member,
+                                                   .peer = std::nullopt});
+    expected.emplace(listed.to_string(), RoomEntry{.room = listed,
+                                                   .kind = RoomKind::GroupChat,
+                                                   .role = MemberRole::Member,
+                                                   .peer = std::nullopt});
+    std::vector<RoomEntry> paged;
+    std::optional<core::RoomId> cursor;
+    for (;;) {
+        const auto page = rooms_of(alice_, cursor, 3);
+        ASSERT_TRUE(page);
+        ASSERT_LE(page->size(), 3U);
+        if (page->empty()) {
+            break;
+        }
+        paged.insert(paged.end(), page->begin(), page->end());
+        cursor = page->back().room;
+    }
+    std::vector<RoomEntry> ordered;
+    ordered.reserve(expected.size());
+    for (const auto& [id, entry] : expected) {
+        ordered.push_back(entry);
+    }
+    EXPECT_EQ(paged, ordered);
+    EXPECT_EQ(rooms_of(dave_, std::nullopt, 10), std::vector<RoomEntry>{});
+}
+
+TEST_P(MembershipConformance, ARoomsMembersAreReadOnlyByOneOfThemAndPageInIdOrder) {
+    const core::RoomId room = group();
+    EXPECT_EQ(roster(room, dave_), (Roster{.asker_listed = false, .members = {}}));
+    EXPECT_EQ(roster(named_room("04"), dave_), (Roster{.asker_listed = false, .members = {}}));
+    const auto first = roster(room, carol_, std::nullopt, 2);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(first->members,
+              (std::vector<MemberEntry>{{.user = alice_, .role = MemberRole::Admin},
+                                        {.user = bob_, .role = MemberRole::Member}}));
+    EXPECT_EQ(
+        roster(room, carol_, bob_, 2),
+        (Roster{.asker_listed = true, .members = {{.user = carol_, .role = MemberRole::Member}}}));
+    EXPECT_EQ(roster(room, carol_, carol_, 2), (Roster{.asker_listed = true, .members = {}}));
+}
+
+TEST_P(MembershipConformance, AUserInTheMostRoomsOpensAndCreatesNoMoreButMayBeAdded) {
+    for (std::size_t i = 0; i < core::ports::kMaxRoomsPerUser; ++i) {
+        const core::RoomId room = core::RoomId::generate(clock_, random_);
+        ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(room, dave_, std::move(d)); }));
+    }
+    EXPECT_EQ(open_direct(named_room("03"), dave_, bob_), refused(MembershipOutcome::RoomLimit));
+    EXPECT_EQ(create_group(named_room("04"), dave_, {}), refused(MembershipOutcome::RoomLimit));
+    // Others can still list him, so nobody can shut him out of new rooms.
+    EXPECT_EQ(open_direct(named_room("03"), bob_, dave_), done({bob_, dave_}));
+    const core::RoomId room = group();
+    EXPECT_EQ(add(room, alice_, {dave_}), done({dave_}));
+}
+
+TEST_P(MembershipConformance, AGroupEveryoneLeftIsNotCreatedAgainOverItsHistory) {
+    const core::RoomId room = named_room("04");
+    backend_->open(room);
+    ASSERT_EQ(create_group(room, alice_, {}), done({alice_}));
+    ASSERT_TRUE(write(room, alice_, bytes("kept")));
+    ASSERT_EQ(leave(room, alice_), done({alice_}));
+    EXPECT_EQ(create_group(room, alice_, {bob_}), refused(MembershipOutcome::Gone));
+    EXPECT_EQ(members(room, std::nullopt, 10), std::vector<core::UserId>{});
+}
+
+// The operator's backend, through chat's service API, acts as every group's admin without being
+// on its list, under the same lock, kinds and cap as a user's change.
+TEST_P(MembershipConformance, TheServiceAddsToAnyGroupAndReadsAnyListWithoutBeingOnIt) {
+    const core::ports::Actor service = core::ports::Actor::service();
+    const core::RoomId room = group();
+    EXPECT_EQ(add(room, service, {dave_, bob_}), done({dave_}));
+    EXPECT_EQ(add(room, service, {dave_}), done({}));
+    EXPECT_EQ(roster(room, service),
+              (Roster{.asker_listed = true,
+                      .members = {{.user = alice_, .role = MemberRole::Admin},
+                                  {.user = bob_, .role = MemberRole::Member},
+                                  {.user = carol_, .role = MemberRole::Member},
+                                  {.user = dave_, .role = MemberRole::Member}}}));
+    EXPECT_EQ(
+        roster(room, service, bob_, 1),
+        (Roster{.asker_listed = true, .members = {{.user = carol_, .role = MemberRole::Member}}}));
+    // A room nothing recorded is nobody's to add to, and lists nobody.
+    const core::RoomId unknown = named_room("04");
+    EXPECT_EQ(add(unknown, service, {dave_}), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(roster(unknown, service), (Roster{.asker_listed = true, .members = {}}));
+    // A direct chat's pair never changes, whoever asks.
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    EXPECT_EQ(add(direct, service, {carol_}), refused(MembershipOutcome::NotGroup));
+    // The cap holds for the service too.
+    std::size_t next = 0;
+    const auto fill = [&](std::size_t n) {
+        std::vector<core::UserId> batch;
+        batch.reserve(n);
+        for (std::size_t i = 0; i < n; ++i) {
+            batch.push_back(user(std::format("s{:03}", next++)));
+        }
+        return batch;
+    };
+    // Four listed: alice, bob, carol and dave.
+    ASSERT_EQ(add(room, service, fill(50))->changed.size(), 50U);
+    ASSERT_EQ(add(room, service, fill(core::ports::kMaxGroupMembers - 54))->changed.size(),
+              core::ports::kMaxGroupMembers - 54);
+    EXPECT_EQ(members(room, std::nullopt, 1000)->size(), core::ports::kMaxGroupMembers);
+    EXPECT_EQ(add(room, service, {user("one-more")}), refused(MembershipOutcome::Full));
+}
+
+// The service lists people only in a group someone created (ADR-0096): not in a room nothing
+// recorded, nor in one a refused join recorded that lists nobody, nor over an emptied group's
+// history.
+TEST_P(MembershipConformance, TheServiceAddsOnlyToAGroupSomeoneCreated) {
+    const core::ports::Actor service = core::ports::Actor::service();
+    EXPECT_EQ(add(named_room("04"), service, {dave_}), refused(MembershipOutcome::NotMember));
+    const core::RoomId joined = named_room("04");
+    ASSERT_EQ(ask<Admission>([&](auto d) {
+                  store().admits(joined, carol_, RoomKind::GroupChat, std::move(d));
+              }),
+              Admission::NotMember);
+    EXPECT_EQ(add(joined, service, {dave_}), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(members(joined, std::nullopt, 10), std::vector<core::UserId>{});
+    const core::RoomId emptied = named_room("04");
+    backend_->open(emptied);
+    ASSERT_EQ(create_group(emptied, alice_, {}), done({alice_}));
+    ASSERT_TRUE(write(emptied, alice_, bytes("kept")));
+    ASSERT_EQ(leave(emptied, alice_), done({alice_}));
+    EXPECT_EQ(add(emptied, service, {bob_}), refused(MembershipOutcome::Gone));
+    EXPECT_EQ(members(emptied, std::nullopt, 10), std::vector<core::UserId>{});
+}
+
+// The operator's backend takes a direct chat apart (an unfriend, a block): both unlisted, each
+// removal told, and a later open lists the pair again.
+TEST_P(MembershipConformance, AClosedDirectChatListsNobodyUntilOpenedAgain) {
+    Heard heard;
+    ASSERT_NO_FATAL_FAILURE(backend_->watch(heard, heard.resyncs));
+    const auto close = [&](const core::RoomId& room) {
+        return ask<MembershipChange>(
+            [&](auto done) { store().close_direct(room, std::move(done)); });
+    };
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    EXPECT_EQ(close(direct), done({alice_, bob_}));
+    EXPECT_EQ(close(direct), done({}));
+    EXPECT_EQ(members(direct, std::nullopt, 10), std::vector<core::UserId>{});
+    EXPECT_EQ(shared(alice_, {bob_}), std::vector<core::UserId>{});
+    EXPECT_EQ(ask<Admission>([&](auto d) {
+                  store().admits(direct, alice_, RoomKind::DirectChat, std::move(d));
+              }),
+              Admission::NotMember);
+    EXPECT_EQ(close(named_room("03")), done({}));
+    EXPECT_EQ(close(group()), refused(MembershipOutcome::NotGroup));
+    EXPECT_EQ(open_direct(direct, bob_, alice_), done({alice_, bob_}));
+    const std::string r = direct.to_string();
+    const auto told = [&](const std::string& change) {
+        return std::ranges::find(heard.changes, change) != heard.changes.end();
+    };
+    EXPECT_TRUE(ulw::test::pump_until(backend_->reactor(), [&] {
+        return told("- " + r + " auth0|alice") && told("- " + r + " auth0|bob");
+    }));
+    store().watch_members(nullptr);
+}
+
+// Whose presence a user may see (ADR-0096): those they share a direct or group chat with now.
+TEST_P(MembershipConformance, SharedWithAnswersWhoShareADirectOrGroupChatNow) {
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    const core::RoomId room = named_room("04");
+    ASSERT_EQ(create_group(room, alice_, {carol_}), done({alice_, carol_}));
+    // Listed by an operator in a room nothing else recorded: a group chat, which counts.
+    const core::RoomId listed = core::RoomId::generate(clock_, random_);
+    ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(listed, bob_, std::move(d)); }));
+    ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(listed, dave_, std::move(d)); }));
+    const auto none = std::vector<core::UserId>{};
+    EXPECT_EQ(shared(alice_, {dave_, carol_, alice_, bob_, carol_}),
+              (std::vector<core::UserId>{bob_, carol_}));
+    EXPECT_EQ(shared(alice_, {dave_}), none);
+    EXPECT_EQ(shared(bob_, {dave_, carol_}), std::vector<core::UserId>{dave_});
+    EXPECT_EQ(shared(dave_, {alice_}), none);
+    EXPECT_EQ(shared(alice_, {}), none);
+    // Leaving the only room shared ends it at once.
+    ASSERT_EQ(leave(room, carol_), done({carol_}));
+    EXPECT_EQ(shared(alice_, {carol_, bob_}), std::vector<core::UserId>{bob_});
+    EXPECT_EQ(shared(carol_, {alice_}), none);
+    ASSERT_TRUE(ask<void>([&](auto d) { store().remove_member(direct, bob_, std::move(d)); }));
+    EXPECT_EQ(shared(alice_, {bob_}), none);
+}
+
+// A caller asking for a full page and one more learns whether another page follows.
+TEST_P(MembershipConformance, ListingsAnswerOneEntryMoreThanAPage) {
+    const core::RoomId crowded = core::RoomId::generate(clock_, random_);
+    ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(crowded, alice_, std::move(d)); }));
+    for (std::size_t i = 0; i < core::ports::kMaxListPage + 1; ++i) {
+        const core::RoomId room = core::RoomId::generate(clock_, random_);
+        ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(room, alice_, std::move(d)); }));
+        const core::UserId member = user(std::format("u{:03}", i));
+        ASSERT_TRUE(ask<void>([&](auto d) { store().add_member(crowded, member, std::move(d)); }));
+    }
+    EXPECT_EQ(rooms_of(alice_, std::nullopt, 1000)->size(), core::ports::kMaxListPage + 1);
+    EXPECT_EQ(roster(crowded, alice_, std::nullopt, 1000)->members.size(),
+              core::ports::kMaxListPage + 1);
+}
+
+// Every node hears every change, whoever made it: the listener is told of each user a change
+// listed or took off, and of nobody a refused or repeated change named.
+TEST_P(MembershipConformance, EveryChangeIsToldToTheListenerUserByUser) {
+    Heard heard;
+    ASSERT_NO_FATAL_FAILURE(backend_->watch(heard, heard.resyncs));
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    ASSERT_EQ(open_direct(direct, bob_, alice_), done({}));
+    const core::RoomId room = named_room("04");
+    ASSERT_EQ(create_group(room, alice_, {bob_}), done({alice_, bob_}));
+    ASSERT_EQ(add(room, bob_, {carol_}), refused(MembershipOutcome::NotAdmin));
+    ASSERT_EQ(add(room, alice_, {carol_}), done({carol_}));
+    ASSERT_EQ(expel(room, alice_, carol_), done({carol_}));
+    ASSERT_EQ(leave(room, alice_), done({alice_}, bob_));
+    const std::vector<std::string> expected{
+        "+ " + direct.to_string() + " auth0|alice", "+ " + direct.to_string() + " auth0|bob",
+        "+ " + room.to_string() + " auth0|alice",   "+ " + room.to_string() + " auth0|bob",
+        "+ " + room.to_string() + " auth0|carol",   "- " + room.to_string() + " auth0|carol",
+        "- " + room.to_string() + " auth0|alice",   "* " + room.to_string() + " admin auth0|bob"};
+    ASSERT_TRUE(ulw::test::pump_until(backend_->reactor(),
+                                      [&] { return heard.changes.size() >= expected.size(); }));
+    ulw::test::pump_pending(backend_->reactor());
+    // Within one change the order of its users is the store's; across changes, commit order.
+    auto sorted = [](std::vector<std::string> v, std::size_t from, std::size_t to) {
+        std::sort(v.begin() + static_cast<std::ptrdiff_t>(from),
+                  v.begin() + static_cast<std::ptrdiff_t>(to));
+        return v;
+    };
+    EXPECT_EQ(sorted(sorted(heard.changes, 0, 2), 2, 4), expected);
+    store().watch_members(nullptr);
+}
+
 // The in-memory store's own writer, which the Postgres store does
 // not have.
 class MemoryMessageStoreAppend : public ::testing::Test {
@@ -778,6 +1290,8 @@ std::vector<BackendFactory> backends() {
 }
 
 INSTANTIATE_TEST_SUITE_P(Backends, MessageStoreConformance, ::testing::ValuesIn(backends()),
+                         [](const auto& param) { return param.param.name; });
+INSTANTIATE_TEST_SUITE_P(Backends, MembershipConformance, ::testing::ValuesIn(backends()),
                          [](const auto& param) { return param.param.name; });
 
 } // namespace

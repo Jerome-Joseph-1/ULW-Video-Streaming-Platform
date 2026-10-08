@@ -37,6 +37,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/storage_key_test.cpp
     unit/core/upload_test.cpp
     unit/core/uuid_test.cpp
+    unit/core/video_access_test.cpp
     unit/core/video_test.cpp)
 target_link_libraries(core_unit_tests PRIVATE ulw::core_domain)
 target_include_directories(core_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
@@ -285,6 +286,7 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
+    gateway/gateway_access_test.cpp
     gateway/gateway_claim_test.cpp
     gateway/gateway_harness.cpp
     gateway/gateway_limits_test.cpp
@@ -299,13 +301,19 @@ ulw_add_test_suite(gateway_tests unit
     gateway/key_fetcher_test.cpp
     gateway/live_manifest_cache_test.cpp
     gateway/live_streams_test.cpp
+    gateway/livekit_webhook_test.cpp
+    gateway/publisher_watch_test.cpp
     gateway/rate_limit_test.cpp
     gateway/send_window.cpp
-    gateway/upload_claim_test.cpp)
+    gateway/upload_claim_test.cpp
+    gateway/video_access_test.cpp
+    gateway/webhook_server_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
     ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# config_test.cpp loads the settings the shipped manifests and config.env files give.
+target_compile_definitions(gateway_tests PRIVATE ULW_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
 # The gateway over the S3 store and the MinIO of deploy/local/compose.yaml.
 ulw_add_test_suite(gateway_store_integration_tests integration
@@ -393,6 +401,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
     integration/postgres_upload_reaper_test.cpp
+    integration/postgres_video_access_test.cpp
     SERIAL "*PoolTest.PausedDatabaseNeverStallsTheLoop*")
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests
@@ -401,10 +410,11 @@ target_compile_definitions(postgres_integration_tests
     PRIVATE ULW_MIGRATE_BIN="$<TARGET_FILE:ulw_migrate>")
 add_dependencies(postgres_integration_tests ulw_migrate)
 
-# The stream service over the Postgres and LiveKit of deploy/local/compose.yaml; it skips when
-# LiveKit is not running.
+# The stream service over the Postgres and LiveKit of deploy/local/compose.yaml, and LiveKit's
+# webhooks to it; it skips when LiveKit is not running.
 ulw_add_test_suite(live_service_integration_tests integration
     integration/live_service_test.cpp
+    integration/live_webhook_test.cpp
     integration/postgres_harness.cpp)
 target_link_libraries(live_service_integration_tests PRIVATE ulw::gateway_lib ulw::pg_store
     ulw::sfu_livekit ulw::auth PkgConfig::LIBPQ OpenSSL::Crypto)
@@ -470,9 +480,12 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/envelope_test.cpp
     unit/chat/key_fetcher_test.cpp
     unit/chat/live_chat_test.cpp
+    unit/chat/membership_test.cpp
     unit/chat/memory_store_access_test.cpp
+    unit/chat/named_rooms_test.cpp
     unit/chat/presence_test.cpp
     unit/chat/ring_test.cpp
+    unit/chat/service_api_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
 target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os
@@ -485,9 +498,10 @@ ulw_add_test_suite(chat_cluster_tests integration
     integration/postgres_harness.cpp
     support/child_process.cpp)
 target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::auth ulw::codec_ws
-    ulw::net_lib ulw::os PkgConfig::LIBPQ)
+    ulw::net_lib ulw::os ulw::sfu_livekit ulw::test_tls PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
-    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src
+    ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src)
 target_compile_definitions(chat_cluster_tests PRIVATE ULW_CHAT_BIN="$<TARGET_FILE:chat_server>"
     ULW_EXPECT_JEMALLOC=$<BOOL:${ULW_LINKS_JEMALLOC}>)
 add_dependencies(chat_cluster_tests chat_server)
@@ -586,6 +600,7 @@ ulw_add_test_suite(auth_unit_tests unit
     unit/auth/jws_test.cpp
     unit/auth/local_verifier_test.cpp
     unit/auth/result_cache_test.cpp
+    unit/auth/service_claim_test.cpp
     unit/auth/signature_test.cpp
     unit/auth/test_claims.cpp
     unit/auth/test_keys.cpp

@@ -9,9 +9,12 @@
 #include "envelope.hpp"
 #include "token_bucket.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <expected>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <span>
@@ -121,6 +124,19 @@ struct ServiceLimits {
     // viewer is owed (64 x (2000 + 256) is 141 KiB of the 256) and a live room's stored
     // messages stay small.
     std::size_t live_body = 2'000;
+    // Member-list changes per user, across all their connections on this node (ADR-0096): each
+    // is a transaction holding the room's row, may list up to 51 users, and is a notification
+    // to every chat node for each user it lists or takes off. A person creates a group or opens
+    // a conversation a few times a day and edits a group's members a handful at a time: 20 at
+    // once covers setting up a group and its first edits, and one each 3 s after that, 1,200 an
+    // hour, keeps a script from filling chat_members faster than anyone would notice.
+    std::uint32_t membership_burst = 20;
+    core::Millis membership_interval{3'000};
+    // ULW_CHAT_SELF_SERVICE: whether users open direct chats, create groups and add members
+    // themselves. Off by default: an embedding product decides who may talk to whom (its own
+    // request and accept), and lists them through the service API (ADR-0096). Leaving, an
+    // admin's removal of others and the listings stay with users either way.
+    bool self_service = false;
     // How long a room stays joined, and its messages kept, after its last client here left:
     // a page reload, a network switch, or a slow reader's reconnect take seconds; a client's
     // backoff reaches half a minute after a few failures.
@@ -145,6 +161,28 @@ struct ServiceCounters {
     // Joins of a room with no kind recorded that recorded nothing, the user having used up
     // ServiceLimits::record_burst.
     std::uint64_t unrecorded_joins = 0;
+    // Member lists their users changed (ADR-0096): direct chats that listed their pair, group
+    // chats created, users listed by add_members, taken off by remove_member, and leaves.
+    std::uint64_t directs_opened = 0;
+    std::uint64_t groups_created = 0;
+    std::uint64_t members_added = 0;
+    std::uint64_t members_removed = 0;
+    std::uint64_t members_left = 0;
+    // Member-list commands refused, by reason.
+    std::uint64_t membership_not_member = 0;
+    std::uint64_t membership_not_admin = 0;
+    std::uint64_t membership_not_group = 0;
+    std::uint64_t membership_full = 0;
+    std::uint64_t membership_room_limit = 0;
+    std::uint64_t membership_gone = 0;
+    std::uint64_t membership_rate_limited = 0;
+    // open_direct, create_group and add_members refused because self-service is off.
+    std::uint64_t membership_not_allowed = 0;
+    // Answered unavailable: the store could not be reached, or answered with what it cannot
+    // have written.
+    std::uint64_t membership_unavailable = 0;
+    // `member` frames sent to clients when a member list changed.
+    std::uint64_t member_events = 0;
 };
 
 // Identifies an attached client; never reused while the service lives.
@@ -188,6 +226,19 @@ public:
     // Declines, cancels or ends the room's call, on its owner (ADR-0091), for a client in the
     // room. Charged as a join, as a ticket is: each costs the owner a store read.
     void call_move(ClientId id, const CallMove& move);
+    // Member lists as their users change them (ADR-0096, membership.cpp). None needs the room
+    // joined: the store decides from the list itself, under the room's lock. Changes are charged
+    // to the user's membership allowance, listings to the join allowance (each is a read of the
+    // store, as a history page is). Each is answered on the asking connection; what changed
+    // reaches the users concerned through the store's notifications (on_member_added and
+    // on_member_removed), on every node.
+    void open_direct(ClientId id, const OpenDirect& open);
+    void create_group(ClientId id, CreateGroup create);
+    void add_members(ClientId id, AddMembers add);
+    void remove_member(ClientId id, const RemoveMember& remove);
+    void leave_room(ClientId id, const LeaveRoom& leave);
+    void list_rooms(ClientId id, const ListRooms& list);
+    void list_members(ClientId id, const ListMembers& list);
     // The client's connection has sent everything it had queued: a lossy client that fell
     // behind is sent what it is still owed.
     void drained(ClientId id) noexcept;
@@ -201,11 +252,33 @@ public:
     // waiting for the member list is refused when the answer comes (ADR-0073). A stream's live
     // chat admits anyone, list or not, and is left alone.
     void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
+    // The user's clients here, and the clients here in the room, are told `member` `added`.
+    void on_member_added(const core::RoomId& room, const core::UserId& user) noexcept override;
+    // The same, told `promoted` (made admin) or `demoted`.
+    void on_member_role(const core::RoomId& room, const core::UserId& user,
+                        core::ports::MemberRole role) noexcept override;
     // Every client's closed rooms are checked against the member lists again: each room and user
     // once, a few at a time, and a check that fails is asked again a second later, so that a
     // store that is still down loses no removal. A join still waiting for its member list is
     // checked again once it is let in, since the list it was let in by may predate the removal.
     void on_members_resync() noexcept override;
+    // Who else hears the changes the store tells this service of, and its resyncs: the call
+    // handler, which puts a removed member out of the call (ADR-0095), and presence, which checks
+    // again who may still see whom (ADR-0096). Each call adds one, at most kMaxAlsoTold; nullptr
+    // stops telling all of them.
+    static constexpr std::size_t kMaxAlsoTold = 4;
+    void also_tell(core::ports::IMemberListener* listener) noexcept {
+        if (listener == nullptr) {
+            also_.fill(nullptr);
+            return;
+        }
+        for (auto& slot : also_) {
+            if (slot == nullptr) {
+                slot = listener;
+                return;
+            }
+        }
+    }
 
     [[nodiscard]] const ServiceCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
@@ -253,7 +326,7 @@ private:
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
-    void called(ClientId id, const core::RoomId& room,
+    void called(ClientId id, const core::RoomId& room, const std::optional<CallId>& answering,
                 std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
     void moved(ClientId id, const CallMove& move,
                std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
@@ -285,6 +358,23 @@ private:
                    core::ports::MessageResult<core::ports::Admission> result) noexcept;
     void answer(IClient& client, std::string_view reason, const core::RoomId& room,
                 const std::optional<rt::MessageKey>& id = std::nullopt) noexcept;
+    // Whether users may list others themselves (ServiceLimits::self_service); refuses the
+    // client with not_allowed when not.
+    [[nodiscard]] bool self_service(IClient& client, const ErrorContext& context) noexcept;
+    // Takes one of the user's membership allowance, or says how long until there is one.
+    [[nodiscard]] std::expected<void, core::Millis> admit_membership(const core::UserId& user);
+    // A member-list change's answer, or its refusal, to the client that asked; `answered` writes
+    // the answer for a change that went through.
+    using ChangeAnswer = std::move_only_function<void(std::string& out,
+                                                      const core::ports::MembershipChange& change)>;
+    void changed(ClientId id, const ErrorContext& context,
+                 core::ports::MessageResult<core::ports::MembershipChange> result,
+                 ChangeAnswer answered) noexcept;
+    void refuse(IClient& client, std::string_view reason, const ErrorContext& context) noexcept;
+    // A `member` frame to the user's clients here and to every client here in the room; a client
+    // still waiting for the room's member list is not in it yet, and hears only of its own user.
+    void tell_members(const core::RoomId& room, const core::UserId& user,
+                      std::string_view change) noexcept;
 
     IRooms& rooms_plane_;
     core::ports::IMessageStore& messages_;
@@ -302,6 +392,8 @@ private:
     std::unordered_map<core::UserId, TokenBucket> sends_;
     // Refused joins, which may each have recorded a room.
     std::unordered_map<core::UserId, PacedBucket> refusals_;
+    // Member-list changes (ServiceLimits::membership_burst).
+    std::unordered_map<core::UserId, PacedBucket> memberships_;
     // Every kept message, in the order kept, to drop the oldest of all rooms first.
     std::deque<std::pair<core::RoomId, std::uint64_t>> kept_order_;
     std::size_t buffered_bytes_ = 0;
@@ -321,6 +413,7 @@ private:
     bool asking_rechecks_ = false;
     // stop(): the store is never called again.
     bool stopped_ = false;
+    std::array<core::ports::IMemberListener*, kMaxAlsoTold> also_{};
     bool resync_owed_ = false;
 };
 
