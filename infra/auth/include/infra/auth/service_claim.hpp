@@ -24,6 +24,17 @@ struct ServiceClaim {
     std::string client_id{};
 };
 
+// Which users may create uploads (ADR-0100): those whose claim ULW_UPLOADER_CLAIM names (`scope`
+// by default) holds the value ULW_UPLOADER_SCOPE gives, matched as the service's claim is
+// (claim_holds). What the operator's backend has the identity provider put in a user's token
+// decides it.
+struct UploaderClaim {
+    std::string claim = "scope";
+    // Empty: the check is off, and every signed-in user may upload.
+    // NOLINTNEXTLINE(readability-redundant-member-init)
+    std::string value{};
+};
+
 struct ServiceClaimRefusal {
     std::string variable;
     std::string reason;
@@ -40,6 +51,13 @@ struct ServiceClaimRefusal {
 [[nodiscard]] std::expected<ServiceClaim, ServiceClaimRefusal>
 read_service_claim(std::optional<std::string_view> claim, std::optional<std::string_view> scope,
                    std::optional<std::string_view> client_id = std::nullopt);
+
+// Reads ULW_UPLOADER_CLAIM and ULW_UPLOADER_SCOPE, each nullopt when unset or empty, under the
+// rules read_service_claim applies to ULW_SERVICE_CLAIM and ULW_SERVICE_SCOPE: the same claim
+// names and values are allowed and refused, no scope is off whatever the default claim says, and
+// a claim other than the default without a scope is refused.
+[[nodiscard]] std::expected<UploaderClaim, ServiceClaimRefusal>
+read_uploader_claim(std::optional<std::string_view> claim, std::optional<std::string_view> scope);
 
 // Whether a token's claims name `client_id` as the client it was issued to, in `azp` (OpenID
 // Connect, Keycloak) or `client_id` (RFC 9068, Okta). An empty `client_id` asks nothing.

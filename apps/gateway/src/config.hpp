@@ -99,6 +99,10 @@ struct Config {
     std::string service_value;
     // ULW_SERVICE_CLIENT_ID: with it, only tokens issued to that client (azp, or client_id).
     std::string service_client_id;
+    // ULW_UPLOADER_CLAIM and ULW_UPLOADER_SCOPE (ADR-0100): only tokens whose claim holds the
+    // value may create an upload. No value: every signed-in user may, as before.
+    std::string uploader_claim = "scope";
+    std::string uploader_value;
     // The size every chunk but an upload's last has, and the object store's part size.
     std::uint64_t chunk_size = std::uint64_t{8} << 20U;
     ops::Level log_level = ops::Level::Info;

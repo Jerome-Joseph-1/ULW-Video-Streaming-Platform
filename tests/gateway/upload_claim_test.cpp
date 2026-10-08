@@ -62,9 +62,18 @@ public:
                         CatalogCallback<core::ports::VideoView> done) override {
         done(std::unexpected(CatalogError::Unavailable));
     }
-    void set_visibility(const core::VideoId& /*id*/, const core::UserId& /*owner*/,
+    void set_visibility(const core::VideoId& /*id*/, const std::optional<core::UserId>& /*owner*/,
                         const core::Visibility& /*visibility*/,
                         CatalogCallback<core::VideoRecord> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void delete_video(const core::VideoId& /*id*/, const std::optional<core::UserId>& /*owner*/,
+                      CatalogCallback<void> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void list_videos(const core::UserId& /*owner*/,
+                     std::optional<core::ports::VideoCursor> /*after*/, std::size_t /*limit*/,
+                     CatalogCallback<core::ports::VideoPage> done) override {
         done(std::unexpected(CatalogError::Unavailable));
     }
     void grant_access(const core::VideoId& /*id*/, const core::UserId& /*user*/,

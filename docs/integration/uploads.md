@@ -6,8 +6,9 @@ worker transcodes the video, and it becomes playable
 ([videos-and-playback.md](videos-and-playback.md)).
 
 Every endpoint here needs a token ([auth.md](auth.md)). Every response carries `X-Request-Id`;
-quote it when reporting a problem. Every error body is empty: the status code and the
-`Upload-Offset`, `Retry-After` and `WWW-Authenticate` headers are the whole answer.
+quote it when reporting a problem. Every error body is empty, but for the one refusal of
+[Who may upload](#who-may-upload): the status code and the `Upload-Offset`, `Retry-After` and
+`WWW-Authenticate` headers are the whole answer.
 
 ## Endpoints
 
@@ -58,6 +59,29 @@ Response `201`, `application/json`:
 | `upload_id` | The upload, for the other endpoints on this page |
 | `chunk_size` | 8388608 (8 MiB). Send chunks of exactly this size, except the last. |
 | `durable_offset` | Always 0 |
+
+### Who may upload
+
+<!-- apps/gateway/src/connection.cpp (start_create), infra/auth/src/service_claim.cpp (read_uploader_claim), infra/auth/src/claims.cpp (may_upload), apps/gateway/src/config.cpp, docs/adr/0100-the-operators-backend-controls-vod.md -->
+
+By default any signed-in user may create an upload. An operator may keep it to the users its
+product allows: with `ULW_UPLOADER_SCOPE` set ([operator-contract.md](operator-contract.md#environment-by-name)),
+a create is admitted only for a token whose claim `ULW_UPLOADER_CLAIM` (default `scope`) holds
+that value, matched as a [service token's](auth.md#service-tokens) claim is: a string equal to
+it or listing it among space-separated values, an array with such a string, or `true` for
+`true`. The product's backend decides who may upload by having the identity provider put the
+value in those users' tokens (a scope, a role, a group), and takes it away the same way: the
+next token without it can no longer create one.
+
+Any other token gets `403` with a JSON body, whatever its body says:
+
+```json
+{"error":"upload_not_allowed"}
+```
+
+Only the create is checked. An upload already created can still be appended to, committed or
+cancelled, and the token serves everything else as before: playback, the user's own videos,
+their deletion. Hide the upload button from a user who would get this answer; do not retry.
 
 ### Append: `PATCH /api/v1/uploads/{id}`
 
@@ -114,7 +138,9 @@ Discards the bytes stored so far and marks the upload aborted. `204`, and `204` 
 A committed upload cannot be cancelled (`409`). Afterwards `HEAD` answers `404` and `PATCH` and
 commit answer `409`, until the upload's expiry, when all three answer `410`
 ([Resuming](#resuming)). The video stays in the state it had (`init` or `uploading`) and is never
-playable.
+playable. A committed video is deleted instead, with `DELETE /api/v1/videos/{id}`
+([videos-and-playback.md](videos-and-playback.md#deleting-a-video)), which refuses a video whose
+upload is still in progress.
 
 ## Resuming
 
@@ -202,7 +228,7 @@ the request and byte allowances in all.
 |---|---|---|---|
 | `400` | | Create: missing or invalid field, empty body, not JSON. `PATCH`: missing or malformed `Upload-Offset`, or a body longer than what remains. A body on `HEAD`, commit or `DELETE`. Malformed HTTP. | Fix the request; do not retry as is |
 | `401` | `WWW-Authenticate` | No token (`Bearer`), or it fails verification (`Bearer error="invalid_token"`) | Refresh the token, retry once |
-| `403` | | With the cookie and no `Authorization`: a page not trusted (`Origin` not in `ULW_ALLOWED_ORIGINS`, none on a `POST`, `PATCH` or `DELETE`, or `Sec-Fetch-Site` from another site), or a create without `Content-Type: application/json`. Checked before the token, so a bad token here is `403`, not `401` ([auth.md](auth.md#cookies-and-other-sites)). | Fix the client or the gateway's `ULW_ALLOWED_ORIGINS`; do not retry as is |
+| `403` | | With the cookie and no `Authorization`: a page not trusted (`Origin` not in `ULW_ALLOWED_ORIGINS`, none on a `POST`, `PATCH` or `DELETE`, or `Sec-Fetch-Site` from another site), or a create without `Content-Type: application/json`. Checked before the token, so a bad token here is `403`, not `401` ([auth.md](auth.md#cookies-and-other-sites)). Create, with the body `{"error":"upload_not_allowed"}`: the deployment keeps uploading to users whose token carries a claim this one lacks ([Who may upload](#who-may-upload)). | Fix the client or the gateway's `ULW_ALLOWED_ORIGINS`; do not retry as is. For `upload_not_allowed`, do not offer uploads to this user |
 | `404` | | Unknown or malformed id, another user's upload, unknown path. `HEAD` on a cancelled upload. | Stop; start a new upload if needed |
 | `405` | `Allow` | Wrong method for the path | Fix the client |
 | `408` | | Body idle for 30 s, or slower than 8 KiB/s | Resume from `HEAD` |

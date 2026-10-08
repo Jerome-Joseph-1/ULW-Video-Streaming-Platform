@@ -3,6 +3,35 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-08: the operator's backend controls VOD; owners delete videos
+
+<!-- apps/gateway/src/connection.cpp (start_create, start_delete, start_service_route), apps/gateway/src/video_access.cpp (video_query, videos_json), infra/auth/src/service_claim.cpp (read_uploader_claim), infra/postgres/src/upload_catalog.cpp (kDeleteVideo, kListVideos), apps/reaper/src/reaper.cpp (purge_videos), migrations/0017_video_purges.sql, docs/adr/0100-the-operators-backend-controls-vod.md -->
+
+Additive: with the new setting unset, every request a client sends today answers as before, but
+a `DELETE` on a video, which was `405` and now deletes it. The platform gains the mechanisms;
+when to use them is the product's policy.
+
+| Before | Now |
+|---|---|
+| Any signed-in user could create an upload | Still, unless the operator sets `ULW_UPLOADER_SCOPE`: then only a token whose `ULW_UPLOADER_CLAIM` (default `scope`) holds it may, and any other gets `403` `{"error":"upload_not_allowed"}` on `POST /api/v1/uploads` ([uploads.md](uploads.md#who-may-upload)) |
+| A video could not be deleted | Its owner deletes it with `DELETE /api/v1/videos/{id}` (`204`, again `204` on a repeat; `409` `not_committed` while the upload is in progress): from then on it is `404` to everyone, its grants are gone, and the reaper removes its source and renditions ([Deleting a video](videos-and-playback.md#deleting-a-video)) |
+| The operator's backend could only grant and revoke | It also sets a video's visibility (`PATCH /api/v1/service/videos/{id}`, the owner's body and checks), takes a video down (`DELETE /api/v1/service/videos/{id}`, the owner's delete for any video) and lists a user's videos with their state and visibility (`GET /api/v1/service/videos?owner=<user>`, newest first, `limit` up to 200, a `next` cursor) ([Service API](videos-and-playback.md#service-api-visibility-takedown-and-listing)) |
+| The reaper expired uploads and forgot unused rooms | It also purges deleted videos: every object under `videos/<id>/`, then the row; two new gauges, `reaper_videos_purged_last_run` and `reaper_videos_purge_failed_last_run` |
+
+What to do:
+
+- **Clients:** to let users delete their videos, call `DELETE /api/v1/videos/{id}` and treat
+  `204` and a later `404` alike as deleted; a `409` `not_committed` is an upload to cancel instead.
+  If the operator restricts uploads, handle `403` `upload_not_allowed` on create by not offering
+  uploads to that user.
+- **Backends:** use the service token you use for grants on the new routes; send the listing's
+  `next` back as `after` unchanged.
+- **Operators:** migration 0017 must run after 0016 (RUNBOOK); it only creates an empty table.
+  Deploy the reaper with the gateway (same image), since only the new reaper purges deleted
+  videos. To restrict uploads, set `UPLOADER_SCOPE` (and `UPLOADER_CLAIM` if your provider puts
+  it elsewhere than `scope`) in config.env, and have your backend get that value into the tokens
+  of the users who may upload.
+
 ## 2026-10-04: videos shared by visibility and by grants
 
 <!-- core/src/video_access.cpp, apps/gateway/src/connection.cpp (on_video, start_update, start_service_route), apps/gateway/src/video_access.cpp, infra/auth/src/service_claim.cpp, migrations/0016_video_access.sql, docs/adr/0097-videos-shared-by-visibility-and-service-grants.md -->

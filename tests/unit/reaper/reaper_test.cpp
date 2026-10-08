@@ -4,8 +4,10 @@
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
 
+#include <algorithm>
 #include <deque>
 #include <gtest/gtest.h>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -55,6 +57,39 @@ public:
     std::deque<std::expected<core::ports::UnusedRoomsScan, CatalogError>> replies;
 };
 
+// video_purges as the reaper sees it: what due() answers, and what forget() was asked.
+class FakePurges final : public core::ports::IVideoPurges {
+public:
+    [[nodiscard]] std::expected<std::vector<core::VideoId>, CatalogError>
+    due(std::size_t limit) override {
+        limits.push_back(limit);
+        if (due_error) {
+            return std::unexpected(*due_error);
+        }
+        std::vector<core::VideoId> out;
+        for (const core::VideoId& v : queue) {
+            if (out.size() == limit) {
+                break;
+            }
+            out.push_back(v);
+        }
+        return out;
+    }
+    [[nodiscard]] std::expected<bool, CatalogError> forget(const core::VideoId& video) override {
+        forgotten.push_back(video);
+        if (forget_answer && *forget_answer) {
+            std::erase(queue, video);
+        }
+        return forget_answer;
+    }
+
+    std::vector<core::VideoId> queue;
+    std::optional<CatalogError> due_error;
+    std::expected<bool, CatalogError> forget_answer = true;
+    std::vector<std::size_t> limits;
+    std::vector<core::VideoId> forgotten;
+};
+
 class FakeStore final : public core::ports::IIngestStore, public core::ports::IObjectAdmin {
 public:
     [[nodiscard]] std::expected<core::ports::IngestId, StorageError>
@@ -87,11 +122,24 @@ public:
     }
     [[nodiscard]] std::expected<void, StorageError> remove(const core::StorageKey& key) override {
         removed.emplace_back(key.view());
+        if (removal) {
+            std::erase(objects, std::string(key.view()));
+        }
         return removal;
     }
     [[nodiscard]] std::expected<std::vector<core::StorageKey>, StorageError>
-    list(std::string_view /*prefix*/) override {
-        return std::unexpected(StorageError::Permanent);
+    list(std::string_view prefix) override {
+        listed.emplace_back(prefix);
+        if (list_error) {
+            return std::unexpected(*list_error);
+        }
+        std::vector<core::StorageKey> keys;
+        for (const std::string& object : objects) {
+            if (object.starts_with(prefix)) {
+                keys.push_back(*core::StorageKey::parse(object));
+            }
+        }
+        return keys;
     }
     [[nodiscard]] std::expected<std::size_t, StorageError>
     reap_abandoned(core::WallTime older_than) override {
@@ -101,6 +149,10 @@ public:
 
     std::vector<std::string> discarded;
     std::vector<std::string> removed;
+    // What list() finds, and the prefixes it was asked for.
+    std::vector<std::string> objects;
+    std::vector<std::string> listed;
+    std::optional<StorageError> list_error;
     std::expected<void, StorageError> removal;
     bool still_held = false;
     StorageError released_answer = StorageError::NotFound;
@@ -123,12 +175,26 @@ protected:
         return out;
     }
 
-    [[nodiscard]] reaper::Report run(std::size_t batch = 3, std::size_t rooms_per_pass = 10'000) {
-        return reaper::run_once(catalog, store, store, rooms, clock,
+    [[nodiscard]] reaper::Report run(std::size_t batch = 3, std::size_t rooms_per_pass = 10'000,
+                                     std::size_t videos_per_pass = 1'000) {
+        return reaper::run_once(catalog, store, store, rooms, purges, clock,
                                 {.batch = batch,
                                  .orphan_after = std::chrono::hours(7 * 24),
                                  .unused_room_after = std::chrono::hours(24),
-                                 .rooms_per_pass = rooms_per_pass});
+                                 .rooms_per_pass = rooms_per_pass,
+                                 .videos_per_pass = videos_per_pass});
+    }
+
+    // A deleted video, queued for its purge, and its source and renditions in the store.
+    core::VideoId deleted_video() {
+        const core::VideoId video = core::VideoId::generate(clock, random);
+        purges.queue.push_back(video);
+        const std::string prefix = "videos/" + video.to_string() + "/";
+        for (const char* key : {"raw", "hls/master.m3u8", "hls/720p/index.m3u8",
+                                "hls/720p/init_0.mp4", "hls/720p/seg_00000.m4s"}) {
+            store.objects.push_back(prefix + key);
+        }
+        return video;
     }
 
     ulw::test::FakeClock clock;
@@ -136,6 +202,7 @@ protected:
     FakeCatalog catalog;
     FakeStore store;
     FakeRooms rooms;
+    FakePurges purges;
 
 private:
     int next_ = 0;
@@ -223,7 +290,10 @@ TEST_F(ReaperTest, CountsTheSessionsTheSweepAborted) {
               "reaper_uploads_release_failed_last_run 0\n"
               "# TYPE reaper_parts_orphaned_last_run gauge\nreaper_parts_orphaned_last_run 4\n"
               "# TYPE reaper_chat_rooms_forgotten_last_run gauge\n"
-              "reaper_chat_rooms_forgotten_last_run 0\n");
+              "reaper_chat_rooms_forgotten_last_run 0\n"
+              "# TYPE reaper_videos_purged_last_run gauge\nreaper_videos_purged_last_run 0\n"
+              "# TYPE reaper_videos_purge_failed_last_run gauge\n"
+              "reaper_videos_purge_failed_last_run 0\n");
 }
 
 TEST_F(ReaperTest, ACatalogFailureIsReportedAndTheSweepStillRuns) {
@@ -292,6 +362,96 @@ TEST_F(ReaperTest, APassLooksAtNoMoreRoomsThanItsShare) {
     EXPECT_EQ(rooms.limits.size(), 3U);
     EXPECT_EQ(report.rooms_forgotten, 3U);
     EXPECT_TRUE(report.problems.empty());
+}
+
+// Deleted videos (ADR-0100): their objects, then their rows.
+TEST_F(ReaperTest, PurgesEveryObjectOfADeletedVideoThenForgetsIt) {
+    const core::VideoId first = deleted_video();
+    const core::VideoId second = deleted_video();
+    store.objects.emplace_back("videos/01890a5d-ac96-774b-bcce-b302099a8057/raw");
+    const auto report = run();
+    EXPECT_EQ(report.videos_purged, 2U);
+    EXPECT_EQ(report.videos_purge_failed, 0U);
+    EXPECT_TRUE(report.problems.empty());
+    EXPECT_EQ(store.listed, (std::vector<std::string>{"videos/" + first.to_string() + "/",
+                                                      "videos/" + second.to_string() + "/"}));
+    EXPECT_EQ(store.removed.size(), 10U);
+    // Only another video's object is left.
+    EXPECT_EQ(store.objects,
+              std::vector<std::string>{"videos/01890a5d-ac96-774b-bcce-b302099a8057/raw"});
+    EXPECT_EQ(purges.forgotten, (std::vector<core::VideoId>{first, second}));
+    EXPECT_TRUE(purges.queue.empty());
+}
+
+TEST_F(ReaperTest, AVideoWhoseObjectsStayIsKeptForTheNextPass) {
+    deleted_video();
+    store.removal = std::unexpected(StorageError::Transient);
+    const auto failed = run();
+    EXPECT_EQ(failed.videos_purged, 0U);
+    EXPECT_EQ(failed.videos_purge_failed, 1U);
+    ASSERT_EQ(failed.problems.size(), 1U);
+    EXPECT_NE(failed.problems.front().find("remove videos/"), std::string::npos);
+    // The row stays, so the video comes due again.
+    EXPECT_TRUE(purges.forgotten.empty());
+    EXPECT_EQ(purges.queue.size(), 1U);
+
+    store.removal = {};
+    const auto retried = run();
+    EXPECT_EQ(retried.videos_purged, 1U);
+    EXPECT_TRUE(store.objects.empty());
+    EXPECT_TRUE(purges.queue.empty());
+}
+
+TEST_F(ReaperTest, AnObjectGoneAlreadyIsNoFailure) {
+    deleted_video();
+    store.removal = std::unexpected(StorageError::NotFound);
+    const auto report = run();
+    EXPECT_EQ(report.videos_purged, 1U);
+    EXPECT_TRUE(report.problems.empty());
+}
+
+TEST_F(ReaperTest, AStoreThatCannotListLeavesTheVideoQueued) {
+    deleted_video();
+    store.list_error = StorageError::Unauthorized;
+    const auto report = run();
+    EXPECT_EQ(report.videos_purge_failed, 1U);
+    ASSERT_EQ(report.problems.size(), 1U);
+    EXPECT_NE(report.problems.front().find("list videos/"), std::string::npos);
+    EXPECT_TRUE(store.removed.empty());
+    EXPECT_TRUE(purges.forgotten.empty());
+}
+
+TEST_F(ReaperTest, AVideoAJobWasPutBackForIsLeftForALaterPass) {
+    deleted_video();
+    purges.forget_answer = false;
+    const auto report = run();
+    // Its objects went; its row stays until the job is cancelled, and then they go again.
+    EXPECT_TRUE(store.objects.empty());
+    EXPECT_EQ(report.videos_purged, 0U);
+    EXPECT_EQ(report.videos_purge_failed, 0U);
+    EXPECT_TRUE(report.problems.empty());
+    EXPECT_EQ(purges.limits.size(), 1U) << "a batch left behind is not asked for again";
+}
+
+TEST_F(ReaperTest, ACatalogFailureToListDeletedVideosIsReported) {
+    deleted_video();
+    purges.due_error = CatalogError::Unavailable;
+    store.sweep = 1;
+    const auto report = run();
+    EXPECT_EQ(report.parts_orphaned, 1U);
+    ASSERT_EQ(report.problems.size(), 1U);
+    EXPECT_NE(report.problems.front().find("purge deleted videos"), std::string::npos);
+    EXPECT_EQ(store.objects.size(), 5U);
+}
+
+TEST_F(ReaperTest, APassPurgesNoMoreVideosThanItsShare) {
+    for (int i = 0; i < 10; ++i) {
+        static_cast<void>(deleted_video());
+    }
+    const auto report = run(3, 10'000, 6);
+    EXPECT_EQ(report.videos_purged, 6U);
+    EXPECT_EQ(purges.limits, (std::vector<std::size_t>{3, 3}));
+    EXPECT_EQ(purges.queue.size(), 4U);
 }
 
 } // namespace

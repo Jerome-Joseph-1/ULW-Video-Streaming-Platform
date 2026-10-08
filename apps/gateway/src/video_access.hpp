@@ -31,6 +31,26 @@ struct GrantQuery {
 // given twice, is nullopt.
 [[nodiscard]] std::optional<GrantQuery> grant_query(std::string_view target) noexcept;
 
+// The page sizes GET /api/v1/service/videos answers (ADR-0100).
+inline constexpr std::size_t kDefaultVideoPage = 50;
+inline constexpr std::size_t kMaxVideoPage = 200;
+
+struct VideoQuery {
+    core::UserId owner;
+    std::optional<core::ports::VideoCursor> after;
+    std::size_t limit = kDefaultVideoPage;
+};
+
+// `owner` (a user id, percent-encoded or not; required), `after` (a cursor a previous page's
+// `next` gave) and `limit` (1 to kMaxVideoPage) from a request target's query. An unknown
+// parameter is ignored; a missing owner, a malformed value, or one given twice is nullopt.
+[[nodiscard]] std::optional<VideoQuery> video_query(std::string_view target) noexcept;
+
+// The cursor `next` carries: "<created_at in Unix microseconds>.<video id>". Opaque to clients.
+[[nodiscard]] std::string cursor_text(const core::ports::VideoCursor& cursor);
+[[nodiscard]] std::optional<core::ports::VideoCursor>
+cursor_from_text(std::string_view text) noexcept;
+
 // PATCH /api/v1/videos/{id}'s body: {"visibility": "<private|unlisted|room:<room id>>"}.
 [[nodiscard]] std::optional<core::Visibility> visibility_from_body(std::string_view body);
 
@@ -44,6 +64,11 @@ struct GrantQuery {
 // {"video_id":..., "grants":[{"user_id":..., "granted_at":<unix seconds>}], "next":<cursor|null>}
 [[nodiscard]] std::string grants_json(const core::VideoId& video,
                                       const core::ports::GrantPage& page);
+
+// {"owner":..., "videos":[<the video object as its owner sees it, with "created_at":<unix
+// seconds>>], "next":<cursor|null>}
+[[nodiscard]] std::string videos_json(const core::UserId& owner,
+                                      const core::ports::VideoPage& page);
 
 // {"error":"<code>"}: the bodies of the access API's refusals.
 [[nodiscard]] std::string error_json(std::string_view code);

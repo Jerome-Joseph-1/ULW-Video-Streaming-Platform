@@ -6,6 +6,7 @@
 #include "net/reactor.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <functional>
 #include <map>
 #include <optional>
@@ -52,9 +53,14 @@ public:
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
     void find_video_for(const core::VideoId& id, const core::UserId& viewer,
                         core::ports::CatalogCallback<core::ports::VideoView> done) override;
-    void set_visibility(const core::VideoId& id, const core::UserId& owner,
+    void set_visibility(const core::VideoId& id, const std::optional<core::UserId>& owner,
                         const core::Visibility& visibility,
                         core::ports::CatalogCallback<core::VideoRecord> done) override;
+    void delete_video(const core::VideoId& id, const std::optional<core::UserId>& owner,
+                      core::ports::CatalogCallback<void> done) override;
+    void list_videos(const core::UserId& owner, std::optional<core::ports::VideoCursor> after,
+                     std::size_t limit,
+                     core::ports::CatalogCallback<core::ports::VideoPage> done) override;
     void grant_access(const core::VideoId& id, const core::UserId& user,
                       core::ports::CatalogCallback<void> done) override;
     void revoke_access(const core::VideoId& id, const core::UserId& user,
@@ -92,6 +98,8 @@ public:
     [[nodiscard]] std::size_t held_claims() const noexcept { return held_claims_.size(); }
 
     [[nodiscard]] const std::vector<Job>& jobs() const noexcept { return jobs_; }
+    // The videos deleted, in the order they were, as the reaper finds them in video_purges.
+    [[nodiscard]] const std::vector<core::VideoId>& purges() const noexcept { return purges_; }
     [[nodiscard]] std::size_t claims() const noexcept { return claimed_.size(); }
     [[nodiscard]] const std::vector<core::ports::ViewEvent>& views() const noexcept {
         return views_;
@@ -101,6 +109,9 @@ private:
     void defer(std::move_only_function<void() noexcept> fn);
     // True, and `done` answered with calls_error_ on a later iteration, when calls fail.
     template <class T> [[nodiscard]] bool refused(core::ports::CatalogCallback<T>& done);
+    // The video by that id, unless it does not exist or has been deleted.
+    [[nodiscard]] core::VideoRecord* live_video(const core::VideoId& id);
+    void stamp_created(const core::VideoId& id);
 
     net::IReactor& reactor_;
     const core::ports::IClock& clock_;
@@ -110,6 +121,11 @@ private:
     std::vector<std::move_only_function<void() noexcept>> held_claims_;
     std::unordered_map<core::UploadId, core::ports::StoredUpload> uploads_;
     std::unordered_map<core::VideoId, core::VideoRecord> videos_;
+    // When each video was created, in microseconds as the database keeps it.
+    std::unordered_map<core::VideoId, std::int64_t> created_;
+    // Deleted videos keep their rows until the reaper's purge, but no read finds them.
+    std::set<core::VideoId> deleted_;
+    std::vector<core::VideoId> purges_;
     std::set<std::pair<core::RoomId, std::string>> members_;
     // Each video's grants by user id, which a std::string orders bytewise as the database does.
     std::unordered_map<core::VideoId, std::map<std::string, core::ports::VideoGrant>> grants_;
