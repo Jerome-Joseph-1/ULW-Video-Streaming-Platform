@@ -86,6 +86,8 @@ spec:
               value: scope
             - name: ULW_SERVICE_SCOPE
               value: ""
+            - name: ULW_SERVICE_CLIENT_ID
+              value: ""
             # The pages whose cookie may open a socket (ALLOWED_ORIGINS in config.env). Native
             # apps send the bearer header instead.
             - name: ULW_ALLOWED_ORIGINS

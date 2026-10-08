@@ -3,6 +3,35 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-04: videos shared by visibility and by grants
+
+<!-- core/src/video_access.cpp, apps/gateway/src/connection.cpp (on_video, start_update, start_service_route), apps/gateway/src/video_access.cpp, infra/auth/src/service_claim.cpp, migrations/0016_video_access.sql, docs/adr/0097-videos-shared-by-visibility-and-service-grants.md -->
+
+A video can now be seen by others than its owner
+([Who can see a video](videos-and-playback.md#who-can-see-a-video)). Additive: every existing
+video is `private`, which answers exactly as before, and a client that never shares one sees no
+change but one new field in its own video object.
+
+| Before | Now |
+|---|---|
+| Only the owner could see or play a video | The owner sets its visibility: `private` (the default), `unlisted` (any signed-in user with the id) or `room:<room id>` (the room's current members), with `PATCH /api/v1/videos/{id}` |
+| Nobody could give a single user a video | The operator's backend grants and revokes it, with `POST`/`DELETE /api/v1/service/videos/{id}/grants/{user}`, and lists grants with `GET /api/v1/service/videos/{id}/grants`, under a token whose `ULW_SERVICE_CLAIM` holds `ULW_SERVICE_SCOPE` |
+| Nothing about a chat room reached videos | A video shared with a room is seen by its members while the room also lists the owner: leaving the room stops the share |
+| The owner's video object had no `visibility` | It has one; anyone else who may see the video gets the object without `visibility` and without `error_reason` |
+| Every master fetch was the owner's view | Every master fetch is still a view, now also by viewers other than the owner |
+
+What to do:
+
+- **Clients:** to share a video, PATCH its visibility (a room must be one the user is in; a
+  `403` `not_member` otherwise) and pass its id to whoever should watch it. Anyone else's `404`
+  still means "not yours to see". Ignore `visibility` if you do not use it.
+- **Operators:** migration 0016 must run after 0015 (RUNBOOK); it is quick and scans nothing. To
+  let your backend grant videos, set `SERVICE_SCOPE` (and `SERVICE_CLAIM` if your provider
+  puts scopes elsewhere than `scope`) to a value only your backend's client-credentials client
+  is granted, and `SERVICE_CLIENT_ID` to that client's id. The backend sends its token as
+  `Authorization: Bearer`. The HTTPRoute now also sends `/api/v1/service/videos` to the gateway
+  for a backend outside the cluster; the RUNBOOK shows how to restrict it.
+
 ## 2026-10-04: who may start a chat is the operator's; presence only between shared chats
 
 <!-- apps/chat/src/membership.cpp (self_service), apps/chat/src/service_api.cpp, apps/chat/src/presence.cpp (watch, recheck), apps/chat/src/config.cpp, infra/postgres/src/message_sql.hpp (kSharedWith), docs/adr/0096-member-lists-changed-by-their-users.md -->

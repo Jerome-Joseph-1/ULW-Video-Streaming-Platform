@@ -116,6 +116,37 @@ replacements:
           name: chat
         fieldPaths:
           - spec.template.spec.containers.[name=chat].env.[name=ULW_JWT_SUBJECT_CLAIM].value
+  # ULW_SERVICE_CLAIM, ULW_SERVICE_SCOPE and ULW_SERVICE_CLIENT_ID of the gateway (ADR-0097).
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SERVICE_CLAIM
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_SERVICE_CLAIM].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SERVICE_SCOPE
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_SERVICE_SCOPE].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SERVICE_CLIENT_ID
+    targets:
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_SERVICE_CLIENT_ID].value
   # ULW_AUTH_COOKIE of the gateway and chat.
   - source:
       kind: ConfigMap
@@ -521,3 +552,13 @@ replacements:
           name: chat
         fieldPaths:
           - spec.template.spec.containers.[name=chat].env.[name=ULW_SERVICE_SCOPE].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SERVICE_CLIENT_ID
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_SERVICE_CLIENT_ID].value

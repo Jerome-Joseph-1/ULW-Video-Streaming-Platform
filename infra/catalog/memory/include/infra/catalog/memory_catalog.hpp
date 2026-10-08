@@ -1,12 +1,18 @@
 #pragma once
 
 #include "core/ports/catalog.hpp"
+#include "core/ports/clock.hpp"
 #include "core/ports/views.hpp"
 #include "net/reactor.hpp"
 
+#include <cstddef>
 #include <functional>
+#include <map>
 #include <optional>
+#include <set>
+#include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace infra::catalog {
@@ -24,7 +30,8 @@ public:
         std::string request_id;
     };
 
-    explicit MemoryCatalog(net::IReactor& reactor);
+    // `clock` stamps grants, as the database's now() does.
+    MemoryCatalog(net::IReactor& reactor, const core::ports::IClock& clock);
     ~MemoryCatalog() override;
     MemoryCatalog(const MemoryCatalog&) = delete;
     MemoryCatalog& operator=(const MemoryCatalog&) = delete;
@@ -43,12 +50,25 @@ public:
                        const std::string& request_id,
                        core::ports::CatalogCallback<core::VideoState> done) override;
     void abort_upload(const core::UploadId& id, core::ports::CatalogCallback<void> done) override;
-    void find_video(const core::VideoId& id,
-                    core::ports::CatalogCallback<core::VideoRecord> done) override;
+    void find_video_for(const core::VideoId& id, const core::UserId& viewer,
+                        core::ports::CatalogCallback<core::ports::VideoView> done) override;
+    void set_visibility(const core::VideoId& id, const core::UserId& owner,
+                        const core::Visibility& visibility,
+                        core::ports::CatalogCallback<core::VideoRecord> done) override;
+    void grant_access(const core::VideoId& id, const core::UserId& user,
+                      core::ports::CatalogCallback<void> done) override;
+    void revoke_access(const core::VideoId& id, const core::UserId& user,
+                       core::ports::CatalogCallback<void> done) override;
+    void list_grants(const core::VideoId& id, std::optional<core::UserId> after, std::size_t limit,
+                     core::ports::CatalogCallback<core::ports::GrantPage> done) override;
     void record_views(std::vector<core::ports::ViewEvent> batch,
                       core::ports::CatalogCallback<void> done) override;
 
     void on_timeout() noexcept override;
+
+    // The room member list chat keeps in chat_members, as find_video_for reads it.
+    void add_member(const core::RoomId& room, const core::UserId& user);
+    void remove_member(const core::RoomId& room, const core::UserId& user);
 
     // A video as the worker leaves it, for tests that begin after the upload.
     void put_video(core::VideoRecord video);
@@ -61,7 +81,7 @@ public:
     void fail_calls(std::optional<core::ports::CatalogError> error) noexcept {
         calls_error_ = error;
     }
-    // Fails every find_video from now on with `error`, or none with nullopt.
+    // Fails every find_video_for from now on with `error`, or none with nullopt.
     void fail_find_video(std::optional<core::ports::CatalogError> error) noexcept {
         find_video_error_ = error;
     }
@@ -83,12 +103,16 @@ private:
     template <class T> [[nodiscard]] bool refused(core::ports::CatalogCallback<T>& done);
 
     net::IReactor& reactor_;
+    const core::ports::IClock& clock_;
     net::TimerId timer_;
     std::vector<std::move_only_function<void() noexcept>> pending_;
     bool hold_claims_ = false;
     std::vector<std::move_only_function<void() noexcept>> held_claims_;
     std::unordered_map<core::UploadId, core::ports::StoredUpload> uploads_;
     std::unordered_map<core::VideoId, core::VideoRecord> videos_;
+    std::set<std::pair<core::RoomId, std::string>> members_;
+    // Each video's grants by user id, which a std::string orders bytewise as the database does.
+    std::unordered_map<core::VideoId, std::map<std::string, core::ports::VideoGrant>> grants_;
     // Each claim held, by the token of its grant.
     std::unordered_map<core::UploadId, core::ports::ClaimToken> claimed_;
     std::uint64_t last_token_ = 0;

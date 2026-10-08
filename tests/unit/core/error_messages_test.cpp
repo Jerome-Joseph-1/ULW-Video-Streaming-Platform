@@ -29,7 +29,7 @@ template <typename Enum> void expect_distinct_messages(Enum last, std::string_vi
 }
 
 TEST(DomainError, EveryEnumeratorHasItsOwnMessage) {
-    expect_distinct_messages(DomainError::InvalidFailureReason, "unknown domain error");
+    expect_distinct_messages(DomainError::InvalidVisibility, "unknown domain error");
 }
 
 TEST(StorageError, EveryEnumeratorHasItsOwnMessage) {

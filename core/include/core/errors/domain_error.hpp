@@ -23,6 +23,7 @@ enum class DomainError : std::uint8_t {
     UploadNotActive,
     UploadIncomplete,
     InvalidFailureReason,
+    InvalidVisibility,
 };
 
 [[nodiscard]] std::string_view to_string(DomainError e) noexcept;

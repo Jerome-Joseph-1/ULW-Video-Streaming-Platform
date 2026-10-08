@@ -37,6 +37,7 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/storage_key_test.cpp
     unit/core/upload_test.cpp
     unit/core/uuid_test.cpp
+    unit/core/video_access_test.cpp
     unit/core/video_test.cpp)
 target_link_libraries(core_unit_tests PRIVATE ulw::core_domain)
 target_include_directories(core_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
@@ -285,6 +286,7 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
+    gateway/gateway_access_test.cpp
     gateway/gateway_claim_test.cpp
     gateway/gateway_harness.cpp
     gateway/gateway_limits_test.cpp
@@ -304,11 +306,14 @@ ulw_add_test_suite(gateway_tests unit
     gateway/rate_limit_test.cpp
     gateway/send_window.cpp
     gateway/upload_claim_test.cpp
+    gateway/video_access_test.cpp
     gateway/webhook_server_test.cpp)
 target_link_libraries(gateway_tests PRIVATE
     ulw::gateway_lib ulw::catalog_memory ulw::test_storage_harness ulw::test_http_server
     ulw::test_tls OpenSSL::Crypto ulw::storage_s3 ulw::test_live_s3)
 target_include_directories(gateway_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+# config_test.cpp loads the settings the shipped manifests and config.env files give.
+target_compile_definitions(gateway_tests PRIVATE ULW_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
 # The gateway over the S3 store and the MinIO of deploy/local/compose.yaml.
 ulw_add_test_suite(gateway_store_integration_tests integration
@@ -396,6 +401,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_migrate_test.cpp
     integration/postgres_pool_test.cpp
     integration/postgres_upload_reaper_test.cpp
+    integration/postgres_video_access_test.cpp
     SERIAL "*PoolTest.PausedDatabaseNeverStallsTheLoop*")
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests

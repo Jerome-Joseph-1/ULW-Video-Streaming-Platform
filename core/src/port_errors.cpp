@@ -16,6 +16,8 @@ std::string_view to_string(CatalogError e) noexcept {
         return "catalog unavailable";
     case CatalogError::Corrupt:
         return "corrupt record";
+    case CatalogError::Forbidden:
+        return "forbidden";
     }
     return "unknown catalog error";
 }

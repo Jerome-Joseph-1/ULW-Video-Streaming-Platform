@@ -93,6 +93,12 @@ struct Config {
     std::string jwt_audience;
     // ULW_JWT_SUBJECT_CLAIM: the claim that names the user, `sub` by default.
     std::string jwt_subject_claim = "sub";
+    // ULW_SERVICE_CLAIM and ULW_SERVICE_SCOPE: which tokens are the operator's backend, for the
+    // service API (ADR-0097). No value: no token is, and that API answers 403 to all.
+    std::string service_claim = "scope";
+    std::string service_value;
+    // ULW_SERVICE_CLIENT_ID: with it, only tokens issued to that client (azp, or client_id).
+    std::string service_client_id;
     // The size every chunk but an upload's last has, and the object store's part size.
     std::uint64_t chunk_size = std::uint64_t{8} << 20U;
     ops::Level log_level = ops::Level::Info;

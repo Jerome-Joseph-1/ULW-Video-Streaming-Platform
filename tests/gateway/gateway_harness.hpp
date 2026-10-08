@@ -140,6 +140,9 @@ public:
 
     // Playback starts where the worker leaves off: a video row and its published objects.
     void put_video(const core::VideoRecord& video);
+    // chat_members as the catalog's access check reads it (ADR-0097).
+    void add_member(std::string_view room, std::string_view user);
+    void remove_member(std::string_view room, std::string_view user);
     // Thread-safe, as the stores' administrative calls are.
     void put_object(std::string_view key, std::string_view bytes);
     [[nodiscard]] std::vector<core::ports::ViewEvent> views();
