@@ -3,11 +3,13 @@
 
 #include "envelope.hpp"
 #include "live_chat.hpp"
+#include "named_rooms.hpp"
 #include "presence_room.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
 
 #include <algorithm>
+#include <format>
 #include <gtest/gtest.h>
 #include <initializer_list>
 #include <span>
@@ -145,7 +147,7 @@ TEST(Envelope, WhatIsNotACommandIsRefusedWithAReason) {
     const std::string room = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
     EXPECT_EQ(chat::parse_command("{"), std::unexpected(EnvelopeError::NotJson));
     EXPECT_EQ(chat::parse_command("[]"), std::unexpected(EnvelopeError::Malformed));
-    EXPECT_EQ(chat::parse_command(R"({"type":"leave",)" + room + "}"),
+    EXPECT_EQ(chat::parse_command(R"({"type":"part",)" + room + "}"),
               std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(chat::parse_command("{" + room + "}"), std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(chat::parse_command(R"({"type":"join"})"), std::unexpected(EnvelopeError::Malformed));
@@ -550,6 +552,206 @@ TEST(Envelope, RepliesAreTheDocumentedShapes) {
     EXPECT_EQ(
         out,
         R"({"type":"error","reason":"no_call","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","call":"01a0f3c2-55d1-7e2a-9b3c-4d5e6f708192"})");
+}
+
+// Member lists (ADR-0096).
+
+core::UserId uid(std::string_view id) {
+    return *core::UserId::parse(id);
+}
+
+TEST(Envelope, MemberListCommandsCarryWhatTheyName) {
+    const auto open = chat::parse_command(R"({"type":"open_direct","user":"auth0|bob"})");
+    ASSERT_TRUE(open);
+    EXPECT_EQ(std::get<chat::OpenDirect>(*open).user, uid("auth0|bob"));
+
+    const auto create =
+        chat::parse_command(R"({"type":"create_group","id":"g-1","users":["bob","carol","bob"]})");
+    ASSERT_TRUE(create);
+    const auto& group = std::get<chat::CreateGroup>(*create);
+    EXPECT_EQ(group.id.view(), "g-1");
+    // As given: the service takes out repeats and the asker.
+    EXPECT_EQ(group.users, (std::vector<core::UserId>{uid("bob"), uid("carol"), uid("bob")}));
+    const auto alone = chat::parse_command(R"({"type":"create_group","id":"g-2"})");
+    ASSERT_TRUE(alone);
+    EXPECT_TRUE(std::get<chat::CreateGroup>(*alone).users.empty());
+    ASSERT_TRUE(chat::parse_command(R"({"type":"create_group","id":"g-3","users":[]})"));
+
+    const std::string room = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
+    const auto add = chat::parse_command(R"({"type":"add_members",)" + room + R"(,"users":["d"]})");
+    ASSERT_TRUE(add);
+    EXPECT_EQ(std::get<chat::AddMembers>(*add).room, ::room());
+    EXPECT_EQ(std::get<chat::AddMembers>(*add).users, std::vector<core::UserId>{uid("d")});
+
+    const auto remove =
+        chat::parse_command(R"({"type":"remove_member",)" + room + R"(,"user":"d"})");
+    ASSERT_TRUE(remove);
+    EXPECT_EQ(std::get<chat::RemoveMember>(*remove).user, uid("d"));
+
+    const auto leave = chat::parse_command(R"({"type":"leave",)" + room + "}");
+    ASSERT_TRUE(leave);
+    EXPECT_EQ(std::get<chat::LeaveRoom>(*leave).room, ::room());
+
+    const auto rooms = chat::parse_command(R"({"type":"rooms"})");
+    ASSERT_TRUE(rooms);
+    EXPECT_EQ(std::get<chat::ListRooms>(*rooms).after, std::nullopt);
+    EXPECT_EQ(std::get<chat::ListRooms>(*rooms).limit, chat::kDefaultListLimit);
+    const auto paged = chat::parse_command(
+        R"({"type":"rooms","after":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","limit":100})");
+    ASSERT_TRUE(paged);
+    EXPECT_EQ(std::get<chat::ListRooms>(*paged).after, ::room());
+    EXPECT_EQ(std::get<chat::ListRooms>(*paged).limit, 100U);
+
+    const auto members =
+        chat::parse_command(R"({"type":"members",)" + room + R"(,"after":"bob","limit":1})");
+    ASSERT_TRUE(members);
+    EXPECT_EQ(std::get<chat::ListMembers>(*members).after, uid("bob"));
+    EXPECT_EQ(std::get<chat::ListMembers>(*members).limit, 1U);
+    const auto first = chat::parse_command(R"({"type":"members",)" + room + "}");
+    ASSERT_TRUE(first);
+    EXPECT_EQ(std::get<chat::ListMembers>(*first).after, std::nullopt);
+}
+
+TEST(Envelope, MemberListCommandsRefuseWhatTheyDoNotDefine) {
+    const std::string room = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
+    const auto refused = [](const std::string& text) {
+        const auto c = chat::parse_command(text);
+        return c ? std::optional<EnvelopeError>{} : std::optional(c.error());
+    };
+    EXPECT_EQ(refused(R"({"type":"open_direct"})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"open_direct","user":"a b"})"), EnvelopeError::BadUser);
+    EXPECT_EQ(refused(R"({"type":"open_direct","user":"bob","room":"x"})"),
+              EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"create_group","users":["bob"]})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"create_group","id":"a b"})"), EnvelopeError::BadId);
+    EXPECT_EQ(refused(R"({"type":"create_group","id":"g","users":"bob"})"),
+              EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"create_group","id":"g","users":[1]})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"create_group","id":"g","users":["a b"]})"),
+              EnvelopeError::BadUser);
+    std::string fifty_one = R"({"type":"create_group","id":"g","users":[)";
+    for (int i = 0; i < 51; ++i) {
+        fifty_one += std::format(R"({}"u{}")", i == 0 ? "" : ",", i);
+    }
+    EXPECT_EQ(refused(fifty_one + "]}"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"add_members",)" + room + R"(,"users":[]})"),
+              EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"add_members",)" + room + "}"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"add_members","users":["d"]})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"remove_member",)" + room + "}"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"remove_member","room":"x","user":"d"})"), EnvelopeError::BadRoom);
+    EXPECT_EQ(refused(R"({"type":"leave",)" + room + R"(,"user":"d"})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"rooms","limit":0})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"rooms","limit":101})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"rooms","after":"x"})"), EnvelopeError::BadRoom);
+    EXPECT_EQ(refused(R"({"type":"rooms","after":1})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"rooms","room":"x"})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"members",)" + room + R"(,"after":"a b"})"),
+              EnvelopeError::BadUser);
+    EXPECT_EQ(refused(R"({"type":"members",)" + room + R"(,"after":7})"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"({"type":"members",)" + room + R"(,"limit":"5"})"),
+              EnvelopeError::Malformed);
+    // A presence room is never one of these either.
+    const std::string presence = chat::presence_room(uid("bob")).to_string();
+    EXPECT_EQ(refused(R"({"type":"leave","room":")" + presence + R"("})"), EnvelopeError::BadRoom);
+}
+
+// A room named by a pair or a creator is the kind its id names: a join asks for it whatever it
+// says, and one that names the other kind names the wrong room.
+TEST(Envelope, AJoinOfANamedRoomAsksForTheKindItsIdNames) {
+    const std::string direct = chat::direct_room(uid("alice"), uid("bob")).to_string();
+    const std::string group =
+        chat::group_room(uid("alice"), *rt::MessageKey::parse("g")).to_string();
+    const auto join = [](const std::string& text) { return chat::parse_command(text); };
+    const auto plain = join(R"({"type":"join","room":")" + direct + R"("})");
+    ASSERT_TRUE(plain);
+    EXPECT_EQ(std::get<chat::Join>(*plain).kind, core::ports::RoomKind::DirectChat);
+    const auto said = join(R"({"type":"join","room":")" + direct + R"(","kind":"direct"})");
+    ASSERT_TRUE(said);
+    EXPECT_EQ(std::get<chat::Join>(*said).kind, core::ports::RoomKind::DirectChat);
+    EXPECT_EQ(join(R"({"type":"join","room":")" + direct + R"(","kind":"group"})"),
+              std::unexpected(EnvelopeError::BadRoom));
+    const auto grouped = join(R"({"type":"join","room":")" + group + R"(","kind":"group"})");
+    ASSERT_TRUE(grouped);
+    EXPECT_EQ(std::get<chat::Join>(*grouped).kind, core::ports::RoomKind::GroupChat);
+    EXPECT_EQ(join(R"({"type":"join","room":")" + group + R"(","kind":"direct"})"),
+              std::unexpected(EnvelopeError::BadRoom));
+}
+
+TEST(Envelope, MemberListRepliesAreTheDocumentedShapes) {
+    const std::string r = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
+    std::string out;
+    chat::write_direct(out, room(), uid("bob"));
+    EXPECT_EQ(out, R"({"type":"direct","room":")" + r + R"(","user":"bob"})");
+    out.clear();
+    chat::write_group(out, room(), *rt::MessageKey::parse("g-1"));
+    EXPECT_EQ(out, R"({"type":"group","room":")" + r + R"(","id":"g-1"})");
+    out.clear();
+    const std::vector<core::UserId> users{uid("bob"), uid("carol")};
+    chat::write_added(out, room(), users);
+    EXPECT_EQ(out, R"({"type":"added","room":")" + r + R"(","users":["bob","carol"]})");
+    out.clear();
+    chat::write_added(out, room(), {});
+    EXPECT_EQ(out, R"({"type":"added","room":")" + r + R"(","users":[]})");
+    out.clear();
+    chat::write_removed(out, room(), uid("bob"));
+    EXPECT_EQ(out, R"({"type":"removed","room":")" + r + R"(","user":"bob"})");
+    out.clear();
+    chat::write_left(out, room(), std::nullopt);
+    EXPECT_EQ(out, R"({"type":"left","room":")" + r + R"("})");
+    out.clear();
+    chat::write_left(out, room(), uid("carol"));
+    EXPECT_EQ(out, R"({"type":"left","room":")" + r + R"(","promoted":"carol"})");
+    out.clear();
+    const std::vector<core::ports::RoomEntry> rooms{{.room = room(),
+                                                     .kind = core::ports::RoomKind::DirectChat,
+                                                     .role = core::ports::MemberRole::Member,
+                                                     .peer = uid("bob")},
+                                                    {.room = room(),
+                                                     .kind = core::ports::RoomKind::GroupChat,
+                                                     .role = core::ports::MemberRole::Admin,
+                                                     .peer = std::nullopt},
+                                                    {.room = room(),
+                                                     .kind = core::ports::RoomKind::StreamLiveChat,
+                                                     .role = core::ports::MemberRole::Member,
+                                                     .peer = std::nullopt}};
+    chat::write_rooms(out, rooms, true);
+    EXPECT_EQ(out, R"({"type":"rooms","rooms":[{"room":")" + r +
+                       R"(","kind":"direct","role":"member","peer":"bob"},{"room":")" + r +
+                       R"(","kind":"group","role":"admin"},{"room":")" + r +
+                       R"(","kind":"live","role":"member"}],"more":true})");
+    out.clear();
+    chat::write_rooms(out, {}, false);
+    EXPECT_EQ(out, R"({"type":"rooms","rooms":[],"more":false})");
+    out.clear();
+    const std::vector<core::ports::MemberEntry> members{
+        {.user = uid("alice"), .role = core::ports::MemberRole::Admin},
+        {.user = uid("bob"), .role = core::ports::MemberRole::Member}};
+    chat::write_members(out, room(), members, false);
+    EXPECT_EQ(
+        out,
+        R"({"type":"members","room":")" + r +
+            R"(","members":[{"user":"alice","role":"admin"},{"user":"bob","role":"member"}],"more":false})");
+    out.clear();
+    chat::write_member_change(out, room(), uid("bob"), "added");
+    EXPECT_EQ(out, R"({"type":"member","room":")" + r + R"(","user":"bob","change":"added"})");
+    out.clear();
+    chat::write_member_change(out, room(), uid("bob"), "removed");
+    EXPECT_EQ(out, R"({"type":"member","room":")" + r + R"(","user":"bob","change":"removed"})");
+    out.clear();
+    chat::write_error_with(out, "rate_limited",
+                           {.room = std::nullopt,
+                            .id = rt::MessageKey::parse("g-1"),
+                            .user = uid("bob"),
+                            .retry_after = core::Millis{2500}});
+    EXPECT_EQ(
+        out,
+        R"({"type":"error","reason":"rate_limited","id":"g-1","user":"bob","retry_after_ms":2500})");
+    out.clear();
+    chat::write_error_with(
+        out, "not_admin",
+        {.room = room(), .id = std::nullopt, .user = std::nullopt, .retry_after = std::nullopt});
+    EXPECT_EQ(out, R"({"type":"error","reason":"not_admin","room":")" + r + R"("})");
 }
 
 } // namespace

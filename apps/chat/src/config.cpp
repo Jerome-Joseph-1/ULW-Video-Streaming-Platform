@@ -3,6 +3,7 @@
 #include "core/util/parse.hpp"
 #include "http/client_limits.hpp"
 #include "http/origin.hpp"
+#include "infra/auth/service_claim.hpp"
 #include "net/socket.hpp"
 #include "rt/room_router.hpp"
 
@@ -212,6 +213,73 @@ std::expected<std::optional<CallsConfig>, ConfigError> calls_config(const EnvLoo
     return out;
 }
 
+std::expected<bool, ConfigError> self_service(const EnvLookup& env) {
+    const auto text = lookup(env, "ULW_CHAT_SELF_SERVICE");
+    if (!text || *text == "off") {
+        return false;
+    }
+    if (*text == "on") {
+        return true;
+    }
+    return error("ULW_CHAT_SELF_SERVICE", "expected on or off");
+}
+
+// The operator's backend's tokens (ULW_SERVICE_CLAIM, ULW_SERVICE_SCOPE: the settings and the
+// reading the gateway shares, infra/auth/service_claim.hpp), and chat's service API on a port of
+// its own. The port needs a scope: with none, no token could use it.
+std::expected<void, ConfigError> load_service(const EnvLookup& env, Config& config) {
+    auto service = infra::auth::read_service_claim(lookup(env, "ULW_SERVICE_CLAIM"),
+                                                   lookup(env, "ULW_SERVICE_SCOPE"),
+                                                   lookup(env, "ULW_SERVICE_CLIENT_ID"));
+    if (!service) {
+        return error(service.error().variable, service.error().reason);
+    }
+    config.service_claim = std::move(service->claim);
+    config.service_value = std::move(service->value);
+    config.service_client_id = std::move(service->client_id);
+    const auto port_text = lookup(env, "ULW_SERVICE_PORT");
+    if (!port_text) {
+        return {};
+    }
+    const auto port = core::parse_integer<std::uint16_t>(*port_text);
+    if (!port || *port == 0) {
+        return error("ULW_SERVICE_PORT", "not an integer in range");
+    }
+    const std::string_view node_address = config.node_address;
+    const std::uint16_t node_port =
+        core::parse_integer<std::uint16_t>(node_address.substr(node_address.rfind(':') + 1))
+            .value_or(0);
+    if (*port == config.port || *port == node_port) {
+        return error("ULW_SERVICE_PORT", "uses the client or the node port");
+    }
+    if (config.service_value.empty()) {
+        return error("ULW_SERVICE_SCOPE", "not set, but ULW_SERVICE_PORT is");
+    }
+    // A scope alone admits whichever client the provider grants it to; the port admits the
+    // backend's own client only.
+    if (config.service_client_id.empty()) {
+        return error("ULW_SERVICE_CLIENT_ID", "not set, but ULW_SERVICE_PORT is");
+    }
+    config.service_api = ServiceApiConfig{.port = *port};
+    return {};
+}
+
+// What the process may do as root, and who may change member lists: users themselves
+// (ULW_CHAT_SELF_SERVICE), the operator's backend (the service API), or both.
+std::expected<void, ConfigError> load_privileges(const EnvLookup& env, Config& config) {
+    const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
+    if (!allow_root) {
+        return error("ULW_ALLOW_ROOT", "expected 0 or 1");
+    }
+    const auto self = self_service(env);
+    if (!self) {
+        return std::unexpected(self.error());
+    }
+    config.allow_root = *allow_root;
+    config.self_service = *self;
+    return load_service(env, config);
+}
+
 } // namespace
 
 std::vector<unsigned> wide_trusted_proxies(const ClientLimits& limits) {
@@ -321,12 +389,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!calls) {
         return std::unexpected(std::move(calls.error()));
     }
-    const auto allow_root = ops::parse_allow_root(lookup(env, "ULW_ALLOW_ROOT"));
-    if (!allow_root) {
-        return error("ULW_ALLOW_ROOT", "expected 0 or 1");
-    }
-
-    return Config{.node = *node,
+    Config config{.node = *node,
                   .port = port,
                   .node_address = std::move(*node_address),
                   .node_secret = std::move(*node_secret),
@@ -338,6 +401,9 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .jwt_issuer = std::move(*issuer),
                   .jwt_audience = std::move(rules->audience),
                   .jwt_subject_claim = std::move(rules->subject_claim),
+                  .service_claim = "scope",
+                  .service_value = {},
+                  .service_client_id = {},
                   .auth_cookie = lookup(env, "ULW_AUTH_COOKIE").value_or("auth_token"),
                   .allowed_origins = std::move(*allowed),
                   .presence_grace = *grace,
@@ -345,8 +411,14 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .group_participants = *group,
                   .client_limits = std::move(*limits),
                   .calls = std::move(*calls),
+                  .service_api = std::nullopt,
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
-                  .allow_root = *allow_root};
+                  .allow_root = false,
+                  .self_service = false};
+    if (auto rest = load_privileges(env, config); !rest) {
+        return std::unexpected(std::move(rest.error()));
+    }
+    return config;
 }
 
 } // namespace chat

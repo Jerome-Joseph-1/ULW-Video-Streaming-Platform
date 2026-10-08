@@ -1,6 +1,6 @@
 # 0056. Presence over the room plane, with a grace and a lease
 
-Status: Accepted
+Status: Accepted, amended by ADR-0096
 Date: 2026-09-29
 
 ## Context

@@ -19,9 +19,17 @@ from there. TURN credentials come from LiveKit itself, in its answer to the SDK'
 <!-- apps/chat/src/call.cpp (CallHandler::checked, CallHandler::callable), apps/chat/src/call.hpp (kCallParticipants, CallLimits::group_participants), docs/adr/0087-call-tickets-from-the-rooms-owner.md, docs/adr/0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md -->
 
 - A **direct chat** (`"kind":"direct"`, [chat.md](chat.md#member-lists)) has one call, for its
-  members only. A **group chat** (`"kind":"group"`) has one call too, of up to 8 devices
-  ([Group calls](#group-calls)). A stream's live chat, or a room with no kind recorded, has none
+  members only. Open one with `open_direct` ([chat.md](chat.md#changing-member-lists)) and
+  join the room it answers. A **group chat** (`"kind":"group"`, made with `create_group`) has one
+  call too, of up to 8 devices ([Group calls](#group-calls)). A stream's live chat, or a room
+  with no kind recorded, has none
   (`not_callable`).
+- **Who can call whom** is who is listed together. With self-service off
+  (`ULW_CHAT_SELF_SERVICE`, the default), users cannot list anyone themselves: the product's
+  backend opens the direct chat or makes the group through
+  [the service API](chat.md#the-service-api), and only then can its members call each other. The
+  rooms are the same ones `open_direct` and `create_group` would name, and a call still needs
+  its asker on the list at the moment of asking.
 - A direct chat's call holds **two participants**. A participant is a device: each member on one device. A
   second device of the same member takes the other member's place, and LiveKit refuses a third.
 - The first ticket of a call **rings** the other member on every socket they have open, on
