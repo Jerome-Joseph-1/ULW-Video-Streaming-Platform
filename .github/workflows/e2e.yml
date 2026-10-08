@@ -285,6 +285,7 @@ jobs:
   # and LiveKit's recorder relays to it; a second user watches in hls.js; the broadcaster ends
   # it, and its recording becomes a video the worker makes ready.
   live-publish:
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.demo && !inputs.sandbox) }}
     runs-on: ubuntu-24.04
     timeout-minutes: 50
     services:
