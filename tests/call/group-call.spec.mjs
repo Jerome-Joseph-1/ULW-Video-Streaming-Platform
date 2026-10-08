@@ -222,13 +222,16 @@ test('a group call of four on two chat nodes outlives its owner and puts one out
       });
 
       await test.step('the members leave, and the last one out ends the call', async () => {
+        // Each hangs up the media first and then tells chat: the last call_leave makes the owner
+        // ask LiveKit whether anyone is still in the room, and the call ends only when nobody is.
         for (const c of [alice, bob]) {
+          await c.page.evaluate(() => window.leaveCall());
           expect(await ask(c, { type: 'call_leave', room, call: first }))
             .toMatchObject({ type: 'call_left', by: c.user });
-          await c.page.evaluate(() => window.leaveCall());
         }
         await expect.poll(() => frames(carol.page, 'call_left', first), { timeout: 10_000 })
           .toHaveLength(2);
+        await carol.page.evaluate(() => window.leaveCall());
         expect(await ask(carol, { type: 'call_leave', room, call: first }))
           .toMatchObject({ type: 'call_left', by: 'carol' });
         // Everyone in the call; Dave, put out, is not told of it any more.
