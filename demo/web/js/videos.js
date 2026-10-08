@@ -148,7 +148,7 @@ async function resume() {
     u.controller = new AbortController();
     let r;
     try {
-      r = await fetch(`/api/v1/uploads/${u.uploadId}`, {
+      r = await fetch(new URL(`/api/v1/uploads/${encodeURIComponent(u.uploadId)}`, location.href), {
         method: 'PATCH',
         signal: u.controller.signal,
         headers: { authorization: `Bearer ${await token()}`, 'upload-offset': String(u.offset),

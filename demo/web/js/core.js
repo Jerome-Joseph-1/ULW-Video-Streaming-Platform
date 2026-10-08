@@ -46,7 +46,9 @@ export const store = {
 export const session = { user: null, token: null, expiresAt: 0 };
 
 export async function signIn(user) {
-  const r = await fetch(`/auth/token?sub=${encodeURIComponent(user)}`, { method: 'POST' });
+  const url = new URL('/auth/token', location.href);
+  url.searchParams.set('sub', user);
+  const r = await fetch(url, { method: 'POST' });
   if (!r.ok) throw new Error(`token for ${user}: ${r.status}`);
   const body = await r.json();
   // A compact JWS (three base64url parts) and nothing else goes into a header or the socket's URL.
@@ -125,8 +127,11 @@ class ChatSocket extends EventTarget {
   }
 
   async connect() {
-    // A path: the browser resolves it on this page's origin, as ws: or wss: to match it.
-    const ws = new WebSocket(`/rt?token=${encodeURIComponent(await token())}`);
+    // This page's origin, as ws: or wss: to match it; the web proxy turns ?token= into the header.
+    const url = new URL('/rt', location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    url.searchParams.set('token', await token());
+    const ws = new WebSocket(url);
     this.ws = ws;
     ws.onopen = () => {
       this.open = true;
