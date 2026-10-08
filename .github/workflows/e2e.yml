@@ -195,7 +195,17 @@ jobs:
       # stack.mjs creates and drops its scratch database with psql.
       - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - name: Start MinIO
-        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+        # Docker Hub refuses an anonymous pull now and then: on 2026-10-07 it answered one job
+        # "unauthorized: authentication required" for the pinned MinIO digest, which the other
+        # jobs pulled the same minute and which still resolves. The pull is tried again, a few
+        # times, before it fails the job.
+        run: |
+          for attempt in 1 2 3 4; do
+            docker compose -f deploy/local/compose.yaml pull --quiet --include-deps minio && break
+            (( attempt < 4 )) || exit 1
+            sleep $((attempt * 15))
+          done
+          docker compose -f deploy/local/compose.yaml up -d --wait minio
       - run: cmake --preset ci
       - run: >-
           cmake --build --preset ci
@@ -248,7 +258,17 @@ jobs:
       # stack.mjs creates and drops its scratch database with psql.
       - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - name: Start MinIO
-        run: docker compose -f deploy/local/compose.yaml up -d --wait minio
+        # Docker Hub refuses an anonymous pull now and then: on 2026-10-07 it answered one job
+        # "unauthorized: authentication required" for the pinned MinIO digest, which the other
+        # jobs pulled the same minute and which still resolves. The pull is tried again, a few
+        # times, before it fails the job.
+        run: |
+          for attempt in 1 2 3 4; do
+            docker compose -f deploy/local/compose.yaml pull --quiet --include-deps minio && break
+            (( attempt < 4 )) || exit 1
+            sleep $((attempt * 15))
+          done
+          docker compose -f deploy/local/compose.yaml up -d --wait minio
       - run: cmake --preset ci
       - run: cmake --build --preset ci --target gateway_server live_packager ulw_devtoken ulw_migrate
       - run: mkdir -p live-report
@@ -315,7 +335,17 @@ jobs:
           package-manager-cache: false
       - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
       - name: Start MinIO, LiveKit and its recorder
-        run: docker compose -f deploy/local/compose.yaml --profile calls up -d --wait minio livekit egress
+        # Docker Hub refuses an anonymous pull now and then: on 2026-10-07 it answered one job
+        # "unauthorized: authentication required" for the pinned MinIO digest, which the other
+        # jobs pulled the same minute and which still resolves. The pull is tried again, a few
+        # times, before it fails the job.
+        run: |
+          for attempt in 1 2 3 4; do
+            docker compose -f deploy/local/compose.yaml --profile calls pull --quiet --include-deps minio livekit egress && break
+            (( attempt < 4 )) || exit 1
+            sleep $((attempt * 15))
+          done
+          docker compose -f deploy/local/compose.yaml --profile calls up -d --wait minio livekit egress
       - run: cmake --preset ci
       - run: >-
           cmake --build --preset ci --target gateway_server transcode_worker live_packager
