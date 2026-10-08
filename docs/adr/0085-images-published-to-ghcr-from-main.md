@@ -1,6 +1,6 @@
 # 0085. Images are published to GHCR from main; stage follows `main`, prod is pinned
 
-Status: Accepted, amended by 0088 (the pin rule checks the rendered production overlay; the operator pulls and configures)
+Status: Accepted, amended by 0088 (the pin rule checks the rendered production overlay; the operator pulls and configures) and 0099 (version tags beside the SHA tag)
 Date: 2026-10-03
 Amends: ADR-0031 and ADR-0083 (Woodpecker no longer builds or pushes the images Askedin runs);
 ADR-0072's registry exemption (this repository's own builds are now

@@ -1,0 +1,262 @@
+name: release
+
+# Cuts a versioned release, vX.Y.Z, of a commit on main whose images are already published
+# (docs/adr/0099). Nothing is built: the version is a second name for what publish-images.yml
+# pushed and attested for that commit (docs/adr/0085). The run checks that the commit is on main,
+# that its ci run for its push to main succeeded and that all four images exist under its SHA;
+# then it tags each image's digest as :vX.Y.Z (an alias of that exact manifest), and creates the
+# annotated git tag vX.Y.Z on the commit and a GitHub Release listing every image by
+# <sha>@sha256:<digest>, which is what production pins (deploy/kubernetes/RUNBOOK.md, 4a).
+#
+# Manual only ("Run workflow" from main), so only the repository's writers can cut one.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, vMAJOR.MINOR.PATCH (for example v1.0.0)
+        type: string
+        required: true
+      commit:
+        description: Commit, branch or tag to release; it must resolve to a commit on main (empty for main's tip)
+        type: string
+        required: false
+        default: ""
+
+permissions: {}
+
+# One release at a time; a second waits rather than racing the first for a tag.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  NAMESPACE: ghcr.io/jerome-joseph-1
+
+jobs:
+  # Everything a release needs, checked before anything is written.
+  check:
+    # Only main's own definition of this workflow, and only in this repository.
+    if: github.repository == 'Jerome-Joseph-1/ULW-Video-Streaming-Platform' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read # the commit, the compare against main and the tags
+      actions: read # ci's runs for the commit
+    outputs:
+      sha: ${{ steps.commit.outputs.sha }}
+      version: ${{ steps.commit.outputs.version }}
+      video_gateway: ${{ steps.images.outputs.video_gateway }}
+      video_worker: ${{ steps.images.outputs.video_worker }}
+      chat: ${{ steps.images.outputs.chat }}
+      live_packager: ${{ steps.images.outputs.live_packager }}
+    steps:
+      - name: Resolve the version and the commit, and check the commit is on main
+        id: commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ inputs.commit }}
+        run: |
+          if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "version '$VERSION' is not vMAJOR.MINOR.PATCH" >&2
+            exit 1
+          fi
+          ref=${COMMIT:-main}
+          if [[ ! $ref =~ ^[A-Za-z0-9._/-]{1,200}$ || $ref == *..* ]]; then
+            echo "commit '$ref' is not a commit, branch or tag name" >&2
+            exit 1
+          fi
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq .sha)
+          if [[ ! $sha =~ ^[0-9a-f]{40}$ ]]; then
+            echo "could not resolve a commit: '$sha'" >&2
+            exit 1
+          fi
+          # Commits of $sha that main lacks: none when $sha is main or one of its ancestors.
+          behind=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...main" --jq .behind_by)
+          if [[ $behind != 0 ]]; then
+            echo "$sha is not on main" >&2
+            exit 1
+          fi
+          # A version is cut once: its tag must not exist yet, on any commit.
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" --silent 2>/dev/null; then
+            echo "tag $VERSION already exists" >&2
+            exit 1
+          fi
+          {
+            echo "sha=$sha"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+          echo "releasing $sha as $VERSION"
+      # The commit's ci run for its push to main must have succeeded (as publish-images.yml
+      # requires before it pushes). The API reports a re-run's latest attempt.
+      - name: Check ci succeeded on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&per_page=50" \
+            --jq '[.workflow_runs[] | {status, conclusion}]')
+          if ! jq -e 'any(.conclusion == "success")' <<<"$runs" >/dev/null; then
+            echo "no successful ci run for the push of $SHA to main: $runs" >&2
+            exit 1
+          fi
+          echo "ci succeeded on $SHA"
+      # The packages are public, so this needs no login. The digest is the manifest :$SHA names,
+      # the one publish-images pushed and attested.
+      - name: Read the published images' digests
+        id: images
+        env:
+          SHA: ${{ steps.commit.outputs.sha }}
+        run: |
+          set -o pipefail
+          for service in video-gateway video-worker chat live-packager; do
+            image=$NAMESPACE/ulw-$service:$SHA
+            if ! digest=$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' | jq -r .); then
+              echo "$image is not published; publish the commit first (publish-images, Run workflow)" >&2
+              exit 1
+            fi
+            if [[ ! $digest =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "$image: no digest: '$digest'" >&2
+              exit 1
+            fi
+            echo "${service//-/_}=$digest" >> "$GITHUB_OUTPUT"
+            echo "$image@$digest"
+          done
+
+  # :vX.Y.Z on each image, naming the exact manifest :<sha> does.
+  tag-images:
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      packages: write # the alias tags on ghcr.io
+    steps:
+      - name: Log in to ghcr.io
+        env:
+          TOKEN: ${{ github.token }}
+        run: printf '%s' "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+      # A version tag already on an image is left alone if it names the same digest (a re-run
+      # after a failure further on) and refused if it names another: a version always means one
+      # build. --prefer-index=false tags the manifest itself, as :main is, so :vX.Y.Z has the
+      # attested digest.
+      - name: Tag the images with the version
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          VIDEO_GATEWAY: ${{ needs.check.outputs.video_gateway }}
+          VIDEO_WORKER: ${{ needs.check.outputs.video_worker }}
+          CHAT: ${{ needs.check.outputs.chat }}
+          LIVE_PACKAGER: ${{ needs.check.outputs.live_packager }}
+        run: |
+          set -o pipefail
+          for pair in "video-gateway:$VIDEO_GATEWAY" "video-worker:$VIDEO_WORKER" "chat:$CHAT" \
+              "live-packager:$LIVE_PACKAGER"; do
+            repo=$NAMESPACE/ulw-${pair%%:*}
+            digest=${pair#*:}
+            if existing=$(docker buildx imagetools inspect "$repo:$VERSION" --format '{{json .Manifest.Digest}}' 2>/dev/null); then
+              existing=$(jq -r . <<<"$existing")
+              if [[ $existing != "$digest" ]]; then
+                echo "$repo:$VERSION already names $existing, not $digest" >&2
+                exit 1
+              fi
+              echo "$repo:$VERSION already names $digest"
+              continue
+            fi
+            for try in 1 2 3; do
+              docker buildx imagetools create --prefer-index=false --tag "$repo:$VERSION" \
+                "$repo@$digest" && break
+              if (( try == 3 )); then
+                echo "could not tag $repo:$VERSION; re-run the workflow, which is safe" >&2
+                exit 1
+              fi
+              sleep 15
+            done
+            tagged=$(docker buildx imagetools inspect "$repo:$VERSION" --format '{{json .Manifest.Digest}}' | jq -r .)
+            if [[ $tagged != "$digest" ]]; then
+              echo "$repo:$VERSION names $tagged, not $digest" >&2
+              exit 1
+            fi
+            echo "$repo:$VERSION -> $digest"
+          done
+      - name: Log out of ghcr.io
+        if: always()
+        run: docker logout ghcr.io
+
+  # The annotated git tag on the commit, and the GitHub Release.
+  release:
+    needs: [check, tag-images]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write # the tag and the release
+    steps:
+      - name: Create the tag and the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ needs.check.outputs.sha }}
+          VERSION: ${{ needs.check.outputs.version }}
+          VIDEO_GATEWAY: ${{ needs.check.outputs.video_gateway }}
+          VIDEO_WORKER: ${{ needs.check.outputs.video_worker }}
+          CHAT: ${{ needs.check.outputs.chat }}
+          LIVE_PACKAGER: ${{ needs.check.outputs.live_packager }}
+        run: |
+          set -o pipefail
+          repo_url=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY
+          # The annotated tag object, then the ref naming it. A re-run of this job finds the tag
+          # it made before and goes on; a tag on another commit stops it.
+          if tagged=$(gh api "repos/$GITHUB_REPOSITORY/commits/refs/tags/$VERSION" --jq .sha 2>/dev/null); then
+            if [[ $tagged != "$SHA" ]]; then
+              echo "tag $VERSION is on $tagged, not $SHA" >&2
+              exit 1
+            fi
+            echo "tag $VERSION is already on $SHA"
+          else
+            tag=$(jq -n --arg tag "$VERSION" --arg sha "$SHA" \
+                '{tag: $tag, message: ("Release " + $tag), object: $sha, type: "commit"}' |
+              gh api "repos/$GITHUB_REPOSITORY/git/tags" --input - --jq .sha)
+            jq -n --arg ref "refs/tags/$VERSION" --arg sha "$tag" '{ref: $ref, sha: $sha}' |
+              gh api "repos/$GITHUB_REPOSITORY/git/refs" --input - --silent
+          fi
+          if gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $VERSION already exists" >&2
+            exit 1
+          fi
+          notes=$RUNNER_TEMP/notes.md
+          {
+            echo "Commit \`$SHA\`."
+            echo
+            echo "### Images"
+            echo
+            echo "| Image | Pin in production (deploy/kubernetes/RUNBOOK.md, 4a) |"
+            echo "|---|---|"
+            for pair in "video-gateway:$VIDEO_GATEWAY" "video-worker:$VIDEO_WORKER" "chat:$CHAT" \
+                "live-packager:$LIVE_PACKAGER"; do
+              echo "| \`$NAMESPACE/ulw-${pair%%:*}:$VERSION\` | \`$SHA@${pair#*:}\` |"
+            done
+            echo
+            echo "Each \`<SERVICE>_IMAGE_TAG\` in a production config.env is the second column."
+            echo "The version tag names the same manifests; the digest is what cannot move."
+            echo
+            echo "### Verify"
+            echo
+            echo "Each digest carries the build provenance publish-images attested when it pushed it:"
+            echo
+            echo '```'
+            for pair in "video-gateway:$VIDEO_GATEWAY" "video-worker:$VIDEO_WORKER" "chat:$CHAT" \
+                "live-packager:$LIVE_PACKAGER"; do
+              echo "gh attestation verify oci://$NAMESPACE/ulw-${pair%%:*}@${pair#*:} --repo $GITHUB_REPOSITORY"
+            done
+            echo '```'
+            echo
+            echo "### Integration docs at this release"
+            echo
+            echo "- [docs/integration/README.md]($repo_url/blob/$VERSION/docs/integration/README.md)"
+            echo "- [docs/integration/changelog.md]($repo_url/blob/$VERSION/docs/integration/changelog.md)"
+            echo
+          } > "$notes"
+          gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "$VERSION" --notes-file "$notes" --generate-notes
+          {
+            echo "### Released $VERSION"
+            echo
+            cat "$notes"
+          } >> "$GITHUB_STEP_SUMMARY"
