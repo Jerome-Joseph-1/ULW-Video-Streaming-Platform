@@ -122,7 +122,8 @@ std::string_view method_name(http::Method m) noexcept {
     }
     // A second layer for the routes that read a body as JSON: even from an allowed page, a
     // body is believed only under the type no other page can send without a preflight.
-    const bool json_body = route == RouteId::CreateUpload || route == RouteId::UpdateVideo;
+    const bool json_body = route == RouteId::CreateUpload || route == RouteId::UpdateVideo ||
+                           route == RouteId::UpdateServiceVideo;
     return !json_body || declares_json(head.headers);
 }
 
@@ -327,6 +328,7 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     switch (match->id) {
     case RouteId::CreateUpload:
     case RouteId::UpdateVideo:
+    case RouteId::UpdateServiceVideo:
         if (head.content_length == 0) {
             return http::HeadVerdict::reject(Status::BadRequest);
         }
@@ -344,6 +346,12 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     }
     case RouteId::ListGrants:
         req_.grant_query = grant_query(head.target);
+        if (head.content_length != 0) {
+            return http::HeadVerdict::reject(Status::BadRequest);
+        }
+        break;
+    case RouteId::ListServiceVideos:
+        req_.video_query = video_query(head.target);
         if (head.content_length != 0) {
             return http::HeadVerdict::reject(Status::BadRequest);
         }
@@ -367,6 +375,9 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     // The operator's backend names the video and the user in the path.
     case RouteId::GrantAccess:
     case RouteId::RevokeAccess:
+    // A deletion names its video in the path and carries nothing else.
+    case RouteId::DeleteVideo:
+    case RouteId::DeleteServiceVideo:
     case RouteId::Healthz:
     case RouteId::Readyz:
     case RouteId::Metrics:
@@ -475,7 +486,8 @@ void Connection::on_keys_refreshed() noexcept {
 http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept {
     last_activity_ = now();
     last_progress_ = last_activity_;
-    if (req_.route == RouteId::CreateUpload || req_.route == RouteId::UpdateVideo) {
+    if (req_.route == RouteId::CreateUpload || req_.route == RouteId::UpdateVideo ||
+        req_.route == RouteId::UpdateServiceVideo) {
         std::ranges::transform(bytes, std::back_inserter(req_.body),
                                [](std::byte b) { return static_cast<char>(b); });
         return http::BodyVerdict::Continue;
@@ -536,10 +548,12 @@ void Connection::advance() noexcept {
             start_create();
         }
         return;
+    // A visibility, the owner's or the operator's backend's (ADR-0097, ADR-0100).
     case RouteId::UpdateVideo:
+    case RouteId::UpdateServiceVideo:
         if (req_.message_complete && !req_.started) {
             req_.started = true;
-            start_update();
+            start_patch();
         }
         return;
     case RouteId::AppendChunk:
@@ -566,11 +580,23 @@ void Connection::advance() noexcept {
     case RouteId::ListGrants:
     case RouteId::GrantAccess:
     case RouteId::RevokeAccess:
+    case RouteId::DeleteVideo:
+    case RouteId::ListServiceVideos:
+    case RouteId::DeleteServiceVideo:
         if (req_.message_complete && !req_.started) {
             req_.started = true;
             start_bodiless();
         }
         return;
+    }
+}
+
+// The PATCHes that carry a visibility start once their body is in.
+void Connection::start_patch() noexcept {
+    if (req_.route == RouteId::UpdateServiceVideo) {
+        start_service_route();
+    } else {
+        start_update();
     }
 }
 
@@ -583,8 +609,11 @@ void Connection::start_bodiless() noexcept {
                req_.route == RouteId::EndStream) {
         start_stream_route();
     } else if (req_.route == RouteId::ListGrants || req_.route == RouteId::GrantAccess ||
-               req_.route == RouteId::RevokeAccess) {
+               req_.route == RouteId::RevokeAccess || req_.route == RouteId::ListServiceVideos ||
+               req_.route == RouteId::DeleteServiceVideo) {
         start_service_route();
+    } else if (req_.route == RouteId::DeleteVideo) {
+        start_delete();
     } else {
         start_lookup();
     }
@@ -612,6 +641,13 @@ std::string_view Connection::readiness_body() const noexcept {
 }
 
 void Connection::start_create() noexcept {
+    // A deployment may keep uploading to the users a claim names (ULW_UPLOADER_CLAIM,
+    // ULW_UPLOADER_SCOPE; ADR-0100), asked before the body is looked at. An upload already
+    // created goes on whatever the token says now.
+    if (const core::ports::Claims* who = get(req_.claims); who != nullptr && !who->may_upload) {
+        fail_with(Status::Forbidden, "upload_not_allowed");
+        return;
+    }
     const auto doc = core::json::parse(req_.body);
     const core::json::Value* filename = doc ? doc->find("filename") : nullptr;
     const core::json::Value* size = doc ? doc->find("size_bytes") : nullptr;
@@ -951,9 +987,13 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     case RouteId::CreateUpload:
     case RouteId::GetVideo:
     case RouteId::UpdateVideo:
+    case RouteId::DeleteVideo:
     case RouteId::ListGrants:
     case RouteId::GrantAccess:
     case RouteId::RevokeAccess:
+    case RouteId::ListServiceVideos:
+    case RouteId::UpdateServiceVideo:
+    case RouteId::DeleteServiceVideo:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
     case RouteId::LivePlaylist:
@@ -1154,12 +1194,51 @@ void Connection::start_service_route() noexcept {
         fail_with(Status::Forbidden, "forbidden");
         return;
     }
+    const std::uint64_t request = request_seq_;
+    if (req_.route == RouteId::ListServiceVideos) {
+        const VideoQuery* query = get(req_.video_query);
+        if (query == nullptr) {
+            fail_with(Status::BadRequest, "bad_query");
+            return;
+        }
+        ++pending_;
+        deps().catalog.list_videos(query->owner, query->after, query->limit,
+                                   [this, request, owner = query->owner](auto result) noexcept {
+                                       --pending_;
+                                       on_videos(request, owner, std::move(result));
+                                   });
+        return;
+    }
     const auto id = core::VideoId::parse(req_.params[0]);
     if (!id) {
         fail_with(Status::NotFound, "not_found");
         return;
     }
-    const std::uint64_t request = request_seq_;
+    if (req_.route == RouteId::UpdateServiceVideo) {
+        // The owner's PATCH's values and checks, for any video; the room must list its owner.
+        const auto visibility = visibility_from_body(req_.body);
+        if (!visibility) {
+            fail_with(Status::BadRequest, "bad_visibility");
+            return;
+        }
+        ++pending_;
+        deps().catalog.set_visibility(*id, std::nullopt, *visibility,
+                                      [this, request](auto changed) noexcept {
+                                          --pending_;
+                                          on_visibility_set(request, std::move(changed));
+                                      });
+        return;
+    }
+    if (req_.route == RouteId::DeleteServiceVideo) {
+        // A takedown: the owner's deletion, of any video.
+        ++pending_;
+        deps().catalog.delete_video(*id, std::nullopt,
+                                    [this, request](core::ports::CatalogResult<void> r) noexcept {
+                                        --pending_;
+                                        on_service_deleted(request, std::move(r));
+                                    });
+        return;
+    }
     if (req_.route == RouteId::ListGrants) {
         const GrantQuery* query = get(req_.grant_query);
         if (query == nullptr) {
@@ -1215,6 +1294,106 @@ void Connection::on_grant_changed(std::uint64_t request,
         return;
     }
     respond({.status = Status::NoContent}, {});
+}
+
+void Connection::on_videos(std::uint64_t request, const core::UserId& owner,
+                           core::ports::CatalogResult<core::ports::VideoPage> result) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    if (!result) {
+        fail_access(result.error(), "forbidden");
+        return;
+    }
+    // A user's videos are the operator's business, not a cache's.
+    respond({.status = Status::Ok, .content_type = "application/json", .cache_control = "no-store"},
+            videos_json(owner, *result));
+}
+
+void Connection::on_service_deleted(std::uint64_t request,
+                                    core::ports::CatalogResult<void> result) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    if (!result && result.error() == CatalogError::Conflict) {
+        fail_with(Status::Conflict, "not_committed");
+        return;
+    }
+    on_grant_changed(request, result);
+}
+
+// DELETE /api/v1/videos/{id} (ADR-0100): the owner deletes a committed video. The catalog tries
+// the owner's deletion first, so a repeat succeeds as the first did; when it finds no video of
+// theirs, a read tells a viewer, who knows the video exists and gets 403 as on the PATCH, from
+// anyone else, who gets the 404 a missing video gets.
+void Connection::start_delete() noexcept {
+    const auto id = core::VideoId::parse(req_.params[0]);
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (!id) {
+        fail_with(Status::NotFound, "not_found");
+        return;
+    }
+    ++pending_;
+    deps().catalog.delete_video(
+        *id, claims->subject,
+        [this, request = request_seq_, video = *id](core::ports::CatalogResult<void> r) noexcept {
+            --pending_;
+            on_deleted(request, video, std::move(r));
+        });
+}
+
+void Connection::on_deleted(std::uint64_t request, const core::VideoId& video,
+                            core::ports::CatalogResult<void> result) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (result) {
+        respond({.status = Status::NoContent}, {});
+        return;
+    }
+    if (result.error() == CatalogError::Conflict) {
+        // The owner's upload is still in progress: cancel it instead (uploads.md).
+        fail_with(Status::Conflict, "not_committed");
+        return;
+    }
+    if (result.error() != CatalogError::NotFound) {
+        fail_access(result.error(), "forbidden");
+        return;
+    }
+    ++pending_;
+    deps().catalog.find_video_for(
+        video, claims->subject,
+        [this, request](core::ports::CatalogResult<core::ports::VideoView> view) noexcept {
+            --pending_;
+            if (!serving(request)) {
+                return;
+            }
+            const core::ports::Claims* who = get(req_.claims);
+            if (who == nullptr) {
+                fail(Status::InternalServerError);
+                return;
+            }
+            if (!view) {
+                fail_access(view.error(), "forbidden");
+                return;
+            }
+            // Not the owner's (the deletion found none of theirs): a viewer, or nobody.
+            if (core::access_of(view->video, who->subject, view->viewer) ==
+                core::VideoAccess::None) {
+                fail_with(Status::NotFound, "not_found");
+                return;
+            }
+            fail_with(Status::Forbidden, "forbidden");
+        });
 }
 
 // Any signed-in viewer may watch any stream: a live stream is a broadcast, and nothing on the

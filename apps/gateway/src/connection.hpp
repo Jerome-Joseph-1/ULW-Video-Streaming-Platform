@@ -114,6 +114,9 @@ private:
         // GET .../grants: its query, nullopt when malformed (answered once the caller is known
         // to be the service, so that nobody else learns how it parses).
         std::optional<GrantQuery> grant_query;
+        // GET /api/v1/service/videos: its query, nullopt when malformed or without an owner
+        // (answered, as the grants' is, once the caller is known to be the service).
+        std::optional<VideoQuery> video_query;
         std::optional<PendingCreate> create;
         std::optional<core::ports::Claims> claims;
         // A live stream's status, held while the playlist says whether it has ended.
@@ -205,11 +208,22 @@ private:
     void on_grants(std::uint64_t request, const core::VideoId& video,
                    core::ports::CatalogResult<core::ports::GrantPage> result) noexcept;
     void on_grant_changed(std::uint64_t request, core::ports::CatalogResult<void> result) noexcept;
+    // The operator's backend's listing and takedown (ADR-0100).
+    void on_videos(std::uint64_t request, const core::UserId& owner,
+                   core::ports::CatalogResult<core::ports::VideoPage> result) noexcept;
+    void on_service_deleted(std::uint64_t request,
+                            core::ports::CatalogResult<void> result) noexcept;
+    // DELETE /api/v1/videos/{id} (ADR-0100): the owner's deletion, and when it finds no video
+    // of theirs, a read that tells a viewer from someone who may not see the video at all.
+    void start_delete() noexcept;
+    void on_deleted(std::uint64_t request, const core::VideoId& video,
+                    core::ports::CatalogResult<void> result) noexcept;
     void start_playlist(const core::VideoRecord& video) noexcept;
     void on_playlist(ControlJob job) noexcept;
     void fail_playlist(PlaylistFailure failure) noexcept;
     void start_live() noexcept;
     void start_bodiless() noexcept;
+    void start_patch() noexcept;
     // The stream service's routes (ADR-0092).
     void start_stream_route() noexcept;
     void create_stream(LiveStreams& live, const core::UserId& user) noexcept;

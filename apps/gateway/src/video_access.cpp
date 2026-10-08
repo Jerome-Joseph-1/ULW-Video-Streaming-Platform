@@ -117,6 +117,67 @@ std::optional<GrantQuery> grant_query(std::string_view target) noexcept {
     return query;
 }
 
+std::optional<VideoQuery> video_query(std::string_view target) noexcept {
+    const std::size_t mark = target.find('?');
+    if (mark == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::string_view rest = target.substr(mark + 1);
+    rest = rest.substr(0, rest.find('#'));
+    std::optional<core::UserId> owner;
+    std::optional<core::ports::VideoCursor> after;
+    std::optional<std::size_t> limit;
+    while (!rest.empty()) {
+        const std::size_t amp = rest.find('&');
+        const std::string_view pair = rest.substr(0, amp);
+        rest = amp == std::string_view::npos ? std::string_view{} : rest.substr(amp + 1);
+        const std::size_t eq = pair.find('=');
+        const std::string_view name = pair.substr(0, eq);
+        const std::string_view value =
+            eq == std::string_view::npos ? std::string_view{} : pair.substr(eq + 1);
+        if (name == "owner") {
+            auto user = user_from_segment(value);
+            if (owner || !user) {
+                return std::nullopt;
+            }
+            owner = *user;
+        } else if (name == "after") {
+            auto cursor = cursor_from_text(value);
+            if (after || !cursor) {
+                return std::nullopt;
+            }
+            after = *cursor;
+        } else if (name == "limit") {
+            const auto n = core::parse_integer<std::size_t>(value);
+            if (limit || !n || *n == 0 || *n > kMaxVideoPage) {
+                return std::nullopt;
+            }
+            limit = n;
+        }
+    }
+    if (!owner) {
+        return std::nullopt;
+    }
+    return VideoQuery{.owner = *owner, .after = after, .limit = limit.value_or(kDefaultVideoPage)};
+}
+
+std::string cursor_text(const core::ports::VideoCursor& cursor) {
+    return std::format("{}.{}", cursor.created_at_us, cursor.id.to_string());
+}
+
+std::optional<core::ports::VideoCursor> cursor_from_text(std::string_view text) noexcept {
+    const std::size_t dot = text.find('.');
+    if (dot == std::string_view::npos) {
+        return std::nullopt;
+    }
+    const auto created = core::parse_integer<std::int64_t>(text.substr(0, dot));
+    const auto id = core::VideoId::parse(text.substr(dot + 1));
+    if (!created || *created < 0 || !id) {
+        return std::nullopt;
+    }
+    return core::ports::VideoCursor{.created_at_us = *created, .id = *id};
+}
+
 std::optional<core::Visibility> visibility_from_body(std::string_view body) {
     const auto doc = core::json::parse(body);
     if (!doc || doc->as_object() == nullptr) {
@@ -183,6 +244,32 @@ std::string grants_json(const core::VideoId& video, const core::ports::GrantPage
     json += R"(],"next":)";
     if (page.more && !page.grants.empty()) {
         core::json::append_string(json, page.grants.back().user.view());
+    } else {
+        json += "null";
+    }
+    json += '}';
+    return json;
+}
+
+std::string videos_json(const core::UserId& owner, const core::ports::VideoPage& page) {
+    std::string json = R"({"owner":)";
+    core::json::append_string(json, owner.view());
+    json += R"(,"videos":[)";
+    bool first = true;
+    for (const core::ports::ListedVideo& listed : page.videos) {
+        json += first ? "" : ",";
+        first = false;
+        // The object GET /api/v1/videos/{id} answers its owner, and when it was created.
+        std::string video = video_json(listed.video, core::VideoAccess::Owner);
+        video.pop_back();
+        json += video;
+        json += std::format(R"(,"created_at":{}}})", listed.created_at_us / 1'000'000);
+    }
+    json += R"(],"next":)";
+    if (page.more && !page.videos.empty()) {
+        const core::ports::ListedVideo& last = page.videos.back();
+        core::json::append_string(
+            json, cursor_text({.created_at_us = last.created_at_us, .id = last.video.id}));
     } else {
         json += "null";
     }

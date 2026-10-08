@@ -101,6 +101,8 @@ public:
     // Runs `fn` on the loop thread and waits for it.
     void on_loop(std::function<void()> fn);
     [[nodiscard]] std::vector<infra::catalog::MemoryCatalog::Job> jobs();
+    // The videos deleted, as the reaper would find them queued (ADR-0100).
+    [[nodiscard]] std::vector<core::VideoId> purges();
     [[nodiscard]] gateway::Counters counters();
     [[nodiscard]] std::size_t connections();
     // Connections the gateway has read part of a request from; accepted alone is not enough.

@@ -1,6 +1,7 @@
 // ulw_reaper: one pass of the upload reaper, meant for a CronJob. Aborts uploads past their
 // expires_at that are still active, releases their storage sessions, and sweeps sessions with
-// no upload behind them. Prints the pass's counters in Prometheus text format on stdout and
+// no upload behind them, then removes the stored objects and rows of deleted videos (ADR-0100).
+// Prints the pass's counters in Prometheus text format on stdout and
 // exits non-zero if any part of it failed.
 #include "core/version.hpp"
 #include "infra/postgres/upload_reaper.hpp"
@@ -141,13 +142,14 @@ int run() {
     }
     infra::postgres::PgUploadReaper uploads(config->database_url);
     const reaper::Report report =
-        reaper::run_once(uploads, *services.ingest, *services.admin, uploads, services.clock,
-                         {.batch = 100, .orphan_after = config->orphan_after});
+        reaper::run_once(uploads, *services.ingest, *services.admin, uploads, uploads,
+                         services.clock, {.batch = 100, .orphan_after = config->orphan_after});
     std::println(stderr,
                  "ulw_reaper: {} ({}) expired {} uploads, {} not released, aborted {} orphaned "
-                 "sessions, forgot {} unused chat rooms",
+                 "sessions, forgot {} unused chat rooms, purged {} deleted videos, {} not purged",
                  info.version, info.git_sha, report.uploads_expired, report.uploads_release_failed,
-                 report.parts_orphaned, report.rooms_forgotten);
+                 report.parts_orphaned, report.rooms_forgotten, report.videos_purged,
+                 report.videos_purge_failed);
     for (const std::string& problem : report.problems) {
         std::println(stderr, "ulw_reaper: {}", problem);
     }

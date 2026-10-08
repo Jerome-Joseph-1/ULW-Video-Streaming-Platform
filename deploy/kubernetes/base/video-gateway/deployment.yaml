@@ -121,6 +121,12 @@ spec:
               value: ""
             - name: ULW_SERVICE_CLIENT_ID
               value: ""
+            # Who may create uploads (UPLOADER_CLAIM, UPLOADER_SCOPE in config.env; ADR-0100).
+            # No scope: every signed-in user may. Empty claim: `scope`.
+            - name: ULW_UPLOADER_CLAIM
+              value: ""
+            - name: ULW_UPLOADER_SCOPE
+              value: ""
             - name: ULW_AUTH_COOKIE
               value: auth_token
             # The web app's pages. A browser sends Origin on every cookie POST, PATCH and DELETE;

@@ -184,4 +184,65 @@ TEST_F(ServiceTokens, ATokenWhoseClaimHoldsTheValueIsTheService) {
     EXPECT_FALSE(is_service(rules, {{"scope", R"("ulw:admin")"}}));
 }
 
+// ADR-0100: who may create uploads, read and matched as the service's claim is.
+TEST(UploaderClaim, UnsetIsOffWithScopeAsTheClaimItWouldRead) {
+    const auto off = infra::auth::read_uploader_claim(std::nullopt, std::nullopt);
+    ASSERT_TRUE(off);
+    EXPECT_EQ(off->claim, "scope");
+    EXPECT_TRUE(off->value.empty());
+    const auto named = infra::auth::read_uploader_claim("scope", std::nullopt);
+    ASSERT_TRUE(named);
+    EXPECT_TRUE(named->value.empty());
+    const auto on = infra::auth::read_uploader_claim("roles", "uploader");
+    ASSERT_TRUE(on);
+    EXPECT_EQ(on->claim, "roles");
+    EXPECT_EQ(on->value, "uploader");
+}
+
+TEST(UploaderClaim, RefusesWhatTheServiceClaimRefusesUnderItsOwnNames) {
+    const auto alone = infra::auth::read_uploader_claim("roles", std::nullopt);
+    ASSERT_FALSE(alone);
+    EXPECT_EQ(alone.error().variable, "ULW_UPLOADER_CLAIM");
+    EXPECT_NE(alone.error().reason.find("ULW_UPLOADER_SCOPE"), std::string::npos);
+    for (const std::string_view bad : {"exp", "has space", "a=b"}) {
+        const auto r = infra::auth::read_uploader_claim(bad, "uploader");
+        ASSERT_FALSE(r) << bad;
+        EXPECT_EQ(r.error().variable, "ULW_UPLOADER_CLAIM");
+    }
+    const auto value = infra::auth::read_uploader_claim(std::nullopt, "two words");
+    ASSERT_FALSE(value);
+    EXPECT_EQ(value.error().variable, "ULW_UPLOADER_SCOPE");
+    EXPECT_FALSE(infra::auth::read_uploader_claim(std::nullopt, std::string(129, 'a')));
+}
+
+class UploaderTokens : public ServiceTokens {
+protected:
+    [[nodiscard]] bool may_upload(const ClaimRules& rules,
+                                  std::initializer_list<ulw::test::ClaimChange> changes) const {
+        const auto claims = check_claims(test_payload(changes), rules, clock_.wall_now());
+        EXPECT_TRUE(claims.has_value());
+        return claims && claims->may_upload;
+    }
+};
+
+TEST_F(UploaderTokens, EveryTokenMayUploadWhereNothingIsAsked) {
+    EXPECT_TRUE(may_upload(ulw::test::kTestRules, {}));
+}
+
+TEST_F(UploaderTokens, OnlyATokenWhoseClaimHoldsTheValueMayUpload) {
+    ClaimRules rules = ulw::test::kTestRules;
+    rules.uploader_claim = "scope";
+    rules.uploader_value = "video:upload";
+    EXPECT_TRUE(may_upload(rules, {{"scope", R"("openid video:upload")"}}));
+    EXPECT_TRUE(may_upload(rules, {{"scope", R"(["video:upload"])"}}));
+    // Anything else still verifies, and serves its user everywhere but a new upload.
+    EXPECT_FALSE(may_upload(rules, {}));
+    EXPECT_FALSE(may_upload(rules, {{"scope", R"("openid")"}}));
+    EXPECT_FALSE(may_upload(rules, {{"scope", R"(42)"}}));
+    rules.uploader_claim = "roles";
+    rules.uploader_value = "true";
+    EXPECT_TRUE(may_upload(rules, {{"roles", "true"}}));
+    EXPECT_FALSE(may_upload(rules, {{"roles", "false"}}));
+}
+
 } // namespace

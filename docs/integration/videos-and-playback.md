@@ -9,7 +9,9 @@ pass through the gateway (ADR-0002, ADR-0024).
 A video's owner (the user whose token created the upload, or the broadcaster of the stream it
 recorded) decides who else may see and play it ([Who can see a video](#who-can-see-a-video)).
 For anyone who may not, every endpoint below answers `404`, exactly as for a video that does not
-exist.
+exist. The owner may delete the video ([Deleting a video](#deleting-a-video)), and the operator's
+backend may set its visibility, take it down and list a user's videos
+([Service API](#service-api-visibility-takedown-and-listing)).
 
 ## Lifecycle
 
@@ -24,7 +26,9 @@ exist.
 | `failed` | Transcoding failed for good (the worker retries a job before giving up) | never |
 
 `ready` and `failed` are final. A cancelled upload leaves its video in `init` or `uploading`
-for good.
+for good. A video in `processing`, `ready` or `failed` may be deleted, by its owner or by the
+operator's backend; from then on it is gone, a `404` on every endpoint to everyone, its owner
+included ([Deleting a video](#deleting-a-video)).
 
 There is no push notification in this version. **Poll `GET /api/v1/videos/{id}`** after the
 commit until `state` is `ready` or `failed`. A 5 s interval is reasonable; how long it takes
@@ -165,8 +169,9 @@ playlist, and so every presigned segment URL, is only built for someone who may 
 Nothing is cached, on any gateway. A segment URL already handed out stays valid until it expires
 (see [Playlists](#playlists)); revoking access stops new playlists, not URLs already issued.
 
-There is no listing of videos in this version: a client keeps the ids it was given (by the
-upload, by a chat message, by the operator's product).
+There is no listing of videos for users in this version: a client keeps the ids it was given (by
+the upload, by a chat message, by the operator's product). The operator's backend lists a user's
+videos ([Listing a user's videos](#listing-a-users-videos)) and may hand them to its own client.
 
 ### Setting the visibility
 
@@ -196,6 +201,40 @@ Refusals carry a JSON body, `{"error":"<code>"}`:
 | `404` | `not_found` | No such video, a bad id, or a video you may not see: the three are indistinguishable |
 
 `401`, `413` and `503` (`Retry-After: 5`) come with an empty body, as elsewhere.
+
+### Deleting a video
+
+<!-- apps/gateway/src/connection.cpp (start_delete, on_deleted), infra/postgres/src/upload_catalog.cpp (kDeleteVideo), infra/postgres/src/upload_reaper.cpp (kDuePurges, kForgetPurged), apps/reaper/src/reaper.cpp (purge_videos), migrations/0017_video_purges.sql, docs/adr/0100-the-operators-backend-controls-vod.md -->
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `DELETE /api/v1/videos/{id}` | `204`: the video is gone | `400`, `401`, `403`, `404`, `409`, `503`, `500` |
+
+The owner only, and no body. A video in `processing`, `ready` or `failed` may be deleted; a
+transcode still waiting for it is cancelled, and one already running is left to finish unseen.
+From the `204` on, the video is gone for everyone, its owner included, on every gateway: its
+metadata and both playlists answer `404`, exactly as for a video that never existed, and so do
+the PATCH, a repeat of the owner's delete aside, and the service API's routes for it. Its grants
+are removed, and a room's members and the holders of grants lose it with everyone else. Its
+stored objects (the source file and every HLS rendition) are removed by the upload reaper at its
+next pass, within about 15 minutes (operator-contract.md); until then nothing can reach them but
+a segment URL a playlist handed out before the delete, which stays valid until it expires
+([Playlists](#playlists)), as after a revocation.
+
+Deleting is idempotent: a repeat answers `204` again until the reaper has removed the video for
+good, and `404` after, like any id that does not exist. Treat both as "deleted". There is no
+undo through the API.
+
+A cookie request needs an allowed `Origin`, as for the PATCH ([auth.md](auth.md#cookies-and-other-sites)).
+Refusals carry a JSON body, `{"error":"<code>"}`:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| `403` | `forbidden` | You may see the video but are not its owner |
+| `404` | `not_found` | No such video, a bad id, or a video you may not see: the three are indistinguishable |
+| `409` | `not_committed` | The upload is still in progress (`init` or `uploading`): cancel it instead, with `DELETE /api/v1/uploads/{id}` ([uploads.md](uploads.md#cancel-delete-apiv1uploadsid)) |
+
+A body is `400`; `401` and `503` (`Retry-After: 5`) come with an empty body, as elsewhere.
 
 ### Service API: grants
 
@@ -231,6 +270,62 @@ page's `next`, percent-encoded) in its query, and returns grants in bytewise ord
 | `400` | `bad_query` | `limit` or `after` malformed, or given twice |
 | `403` | `forbidden` | Not a service token |
 | `404` | `not_found` | No such video, or a bad id. The service may learn this; nobody else does. |
+
+### Service API: visibility, takedown and listing
+
+<!-- apps/gateway/src/connection.cpp (start_service_route, on_videos, on_service_deleted), apps/gateway/src/video_access.cpp (video_query, videos_json), infra/postgres/src/upload_catalog.cpp (kSetVisibility, kDeleteVideo, kListVideos), docs/adr/0100-the-operators-backend-controls-vod.md -->
+
+The operator's backend controls any user's videos: what the policy is (who may see what, what
+is taken down) is the product's; these routes are how it applies it. The same token as for
+grants, in the `Authorization` header only; anything else is `403` `forbidden` before the video
+or the query is looked at.
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `PATCH /api/v1/service/videos/{id}` | `200`, `application/json`, the video object as its owner sees it | `400`, `401`, `403`, `404`, `413`, `503`, `500` |
+| `DELETE /api/v1/service/videos/{id}` | `204`: the video is taken down | `400`, `401`, `403`, `404`, `409`, `503`, `500` |
+| `GET /api/v1/service/videos` | `200`, `application/json`, `Cache-Control: no-store`, a page of the videos of the user `?owner=` names | `400`, `401`, `403`, `503`, `500` |
+
+**Visibility.** The `PATCH` takes the owner's body, `{"visibility":"private" | "unlisted" |
+"room:<room id>"}` with `Content-Type: application/json`, at most 4 KiB, and sets it on any video
+whatever its state, as its owner may. A room must list the video's owner at that moment (`403`
+`not_member` otherwise): a room shares a video only while it lists the owner, so any other room
+would share it with nobody.
+
+**Takedown.** The `DELETE` has exactly the effect of the owner's
+[delete](#deleting-a-video), for any user's video: gone for everyone at once, grants removed,
+objects removed at the reaper's next pass, `204` again on a repeat. A video whose upload is in
+progress is `409` `not_committed`; nobody but its uploader can see it anyway.
+
+**Listing.** The `GET` lists one user's videos, every state included and deleted ones left out,
+newest first (by creation, then by id, so the order is stable across pages). Its query:
+
+| Parameter | Meaning |
+|---|---|
+| `owner` | Required: the user id, as the user's token names it, percent-encoded or not |
+| `limit` | 1 to 200, default 50 |
+| `after` | The `next` of the previous page, as given. Opaque: do not build one |
+
+```json
+{"owner":"auth0|123","videos":[{"id":"0199950c-...","title":"clip.mp4","state":"ready","version":2,"duration_ms":6000,"visibility":"unlisted","created_at":1759600000}],"next":"1759600000123456.0199950c-..."}
+```
+
+Each video is the [video object](#endpoints) as its owner sees it (`visibility`, and
+`error_reason` when failed), with `created_at` in Unix seconds. `next` is `null` on the last page.
+A user with no videos, or one who never signed in, has an empty list. Each page is read on its
+own: a video created after the first page is not on the later ones, one deleted meanwhile is
+left out, and none is listed twice.
+
+Refusals carry a JSON body, `{"error":"<code>"}`:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| `400` | `bad_visibility` | `PATCH`: the body is not an object with one of the three forms; an empty body is `400` with no body |
+| `400` | `bad_query` | `GET`: no `owner`, or `owner`, `limit` or `after` malformed, or one given twice |
+| `403` | `forbidden` | Not a service token |
+| `403` | `not_member` | `PATCH`: the room does not list the video's owner |
+| `404` | `not_found` | No such video (deleted ones included), or a bad id |
+| `409` | `not_committed` | `DELETE`: the upload is still in progress |
 
 ## CORS
 

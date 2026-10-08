@@ -150,4 +150,65 @@ TEST(ErrorJson, CarriesTheCode) {
     EXPECT_EQ(gateway::error_json("not_found"), R"({"error":"not_found"})");
 }
 
+// GET /api/v1/service/videos (ADR-0100).
+TEST(VideoQuery, NeedsAnOwnerAndDefaultsTheRest) {
+    EXPECT_FALSE(gateway::video_query("/api/v1/service/videos"));
+    EXPECT_FALSE(gateway::video_query("/api/v1/service/videos?limit=5"));
+    const auto q = gateway::video_query("/api/v1/service/videos?owner=auth0%7C123");
+    ASSERT_TRUE(q);
+    EXPECT_EQ(q->owner.view(), "auth0|123");
+    EXPECT_FALSE(q->after);
+    EXPECT_EQ(q->limit, gateway::kDefaultVideoPage);
+}
+
+TEST(VideoQuery, ReadsTheCursorAndTheLimitAndIgnoresTheRest) {
+    const auto q = gateway::video_query("/x?limit=200&after=1759600000123456." +
+                                        std::string(kVideo) + "&owner=alice&other=1#frag");
+    ASSERT_TRUE(q);
+    EXPECT_EQ(q->owner.view(), "alice");
+    EXPECT_EQ(q->limit, 200U);
+    ASSERT_TRUE(q->after);
+    EXPECT_EQ(q->after->created_at_us, 1759600000123456);
+    EXPECT_EQ(q->after->id.to_string(), kVideo);
+}
+
+TEST(VideoQuery, RefusesAMalformedOrRepeatedParameter) {
+    for (const std::string_view target :
+         {"/x?owner=", "/x?owner=a%2", "/x?owner=a&owner=b", "/x?owner=a&limit=0",
+          "/x?owner=a&limit=201", "/x?owner=a&limit=-1", "/x?owner=a&limit=1&limit=2",
+          "/x?owner=a&after=", "/x?owner=a&after=123", "/x?owner=a&after=-1.x",
+          "/x?owner=a&after=12.not-a-uuid"}) {
+        EXPECT_FALSE(gateway::video_query(target)) << target;
+    }
+}
+
+TEST(VideoCursor, RoundTripsThroughItsText) {
+    const core::ports::VideoCursor cursor{.created_at_us = 42, .id = *core::VideoId::parse(kVideo)};
+    const std::string text = gateway::cursor_text(cursor);
+    EXPECT_EQ(text, "42." + std::string(kVideo));
+    const auto back = gateway::cursor_from_text(text);
+    ASSERT_TRUE(back);
+    EXPECT_EQ(back->created_at_us, 42);
+    EXPECT_EQ(back->id, cursor.id);
+    EXPECT_FALSE(gateway::cursor_from_text("-42." + std::string(kVideo)));
+}
+
+TEST(VideosJson, ListsEachVideoAsItsOwnerSeesItAndTheCursorWhenMoreFollow) {
+    core::ports::VideoPage page;
+    page.videos.push_back(
+        {.video = record(core::VideoState::Failed), .created_at_us = 1'759'600'000'999'999});
+    page.more = true;
+    EXPECT_EQ(gateway::videos_json(*core::UserId::parse("alice"), page),
+              R"({"owner":"alice","videos":[{"id":")" + std::string(kVideo) +
+                  R"(","title":"trip \"one\"","state":"failed","version":4,"duration_ms":null,)"
+                  R"("error_reason":"too long","visibility":"room:)" +
+                  std::string(kRoom) + R"(","created_at":1759600000}],"next":"1759600000999999.)" +
+                  std::string(kVideo) + R"("})");
+    page.more = false;
+    EXPECT_TRUE(
+        gateway::videos_json(*core::UserId::parse("alice"), page).ends_with(R"(],"next":null})"));
+    EXPECT_EQ(gateway::videos_json(*core::UserId::parse("alice"), {}),
+              R"({"owner":"alice","videos":[],"next":null})");
+}
+
 } // namespace

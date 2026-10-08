@@ -97,4 +97,21 @@ TEST(BundledMigrations, TheVideoAccessMigrationAltersVideosLastAndScansNothing) 
     FAIL() << "no video_access migration";
 }
 
+// 0017 (ADR-0100) only adds the purge queue: nothing that locks or scans videos, which every
+// playback read goes through, not even a foreign key's SHARE ROW EXCLUSIVE lock.
+TEST(BundledMigrations, ThePurgeQueueMigrationTouchesNoExistingTable) {
+    for (const auto& m : bundled_migrations()) {
+        if (m.name != "video_purges") {
+            continue;
+        }
+        const std::string_view sql{m.sql};
+        EXPECT_NE(sql.find("\nCREATE TABLE video_purges"), std::string_view::npos);
+        EXPECT_EQ(sql.find("\nALTER"), std::string_view::npos);
+        EXPECT_EQ(sql.find("REFERENCES"), std::string_view::npos);
+        EXPECT_EQ(sql.find(" ON videos"), std::string_view::npos);
+        return;
+    }
+    FAIL() << "no video_purges migration";
+}
+
 } // namespace

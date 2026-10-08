@@ -103,3 +103,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0097](0097-videos-shared-by-visibility-and-service-grants.md) | Videos are shared by a visibility their owner sets and by grants the operator's backend makes, checked against the catalog on every read | Accepted |
 | [0098](0098-the-browser-runs-openmls-as-webassembly.md) | The browser runs the bridge's OpenMLS as WebAssembly, built in a pinned image | Accepted |
 | [0099](0099-releases-are-version-tags-on-published-images.md) | A release is a version tag on a commit and images already published from main | Accepted |
+| [0100](0100-the-operators-backend-controls-vod.md) | The operator's backend controls VOD: who uploads by a claim of the user's token, a video deleted at once in the catalog and purged by the reaper, and a service API to share, take down and list | Accepted |

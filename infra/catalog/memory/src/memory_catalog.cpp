@@ -1,7 +1,9 @@
 #include "infra/catalog/memory_catalog.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <string>
+#include <tuple>
 #include <utility>
 
 namespace infra::catalog {
@@ -34,6 +36,20 @@ void MemoryCatalog::on_timeout() noexcept {
     }
 }
 
+core::VideoRecord* MemoryCatalog::live_video(const core::VideoId& id) {
+    if (deleted_.contains(id)) {
+        return nullptr;
+    }
+    const auto it = videos_.find(id);
+    return it == videos_.end() ? nullptr : &it->second;
+}
+
+void MemoryCatalog::stamp_created(const core::VideoId& id) {
+    created_.try_emplace(
+        id, std::chrono::floor<std::chrono::microseconds>(clock_.wall_now().time_since_epoch())
+                .count());
+}
+
 template <class T> bool MemoryCatalog::refused(CatalogCallback<T>& done) {
     if (!calls_error_) {
         return false;
@@ -57,6 +73,7 @@ void MemoryCatalog::create_upload(core::ports::NewUpload upload, CatalogCallback
         return;
     }
     videos_.emplace(video, std::move(upload.video));
+    stamp_created(video);
     uploads_.emplace(id, StoredUpload{.upload = upload.upload,
                                       .backend_ref = std::move(upload.backend_ref),
                                       .object_key = std::move(upload.object_key)});
@@ -196,8 +213,8 @@ void MemoryCatalog::find_video_for(const core::VideoId& id, const core::UserId& 
     }
     core::ports::CatalogResult<core::ports::VideoView> result =
         std::unexpected(CatalogError::NotFound);
-    if (const auto it = videos_.find(id); it != videos_.end()) {
-        const core::VideoRecord& video = it->second;
+    if (const core::VideoRecord* found = live_video(id); found != nullptr) {
+        const core::VideoRecord& video = *found;
         const std::optional<core::RoomId>& room = video.visibility.room_id();
         const auto granted = grants_.find(id);
         result = core::ports::VideoView{
@@ -216,20 +233,22 @@ void MemoryCatalog::find_video_for(const core::VideoId& id, const core::UserId& 
     });
 }
 
-void MemoryCatalog::set_visibility(const core::VideoId& id, const core::UserId& owner,
+void MemoryCatalog::set_visibility(const core::VideoId& id,
+                                   const std::optional<core::UserId>& owner,
                                    const core::Visibility& visibility,
                                    CatalogCallback<core::VideoRecord> done) {
     if (refused(done)) {
         return;
     }
     core::ports::CatalogResult<core::VideoRecord> result = std::unexpected(CatalogError::NotFound);
-    if (const auto it = videos_.find(id); it != videos_.end() && it->second.owner == owner) {
+    if (core::VideoRecord* video = live_video(id);
+        video != nullptr && (!owner || video->owner == *owner)) {
         const std::optional<core::RoomId>& room = visibility.room_id();
-        if (room && !members_.contains({*room, std::string(owner.view())})) {
+        if (room && !members_.contains({*room, std::string(video->owner.view())})) {
             result = std::unexpected(CatalogError::Forbidden);
         } else {
-            it->second.visibility = visibility;
-            result = it->second;
+            video->visibility = visibility;
+            result = *video;
         }
     }
     defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
@@ -243,7 +262,7 @@ void MemoryCatalog::grant_access(const core::VideoId& id, const core::UserId& us
         return;
     }
     core::ports::CatalogResult<void> result{};
-    if (!videos_.contains(id)) {
+    if (live_video(id) == nullptr) {
         result = std::unexpected(CatalogError::NotFound);
     } else {
         grants_[id].try_emplace(
@@ -259,7 +278,7 @@ void MemoryCatalog::revoke_access(const core::VideoId& id, const core::UserId& u
         return;
     }
     core::ports::CatalogResult<void> result{};
-    if (!videos_.contains(id)) {
+    if (live_video(id) == nullptr) {
         result = std::unexpected(CatalogError::NotFound);
     } else if (const auto it = grants_.find(id); it != grants_.end()) {
         it->second.erase(std::string(user.view()));
@@ -274,7 +293,7 @@ void MemoryCatalog::list_grants(const core::VideoId& id, std::optional<core::Use
     }
     core::ports::CatalogResult<core::ports::GrantPage> result =
         std::unexpected(CatalogError::NotFound);
-    if (videos_.contains(id)) {
+    if (live_video(id) != nullptr) {
         core::ports::GrantPage page;
         if (const auto it = grants_.find(id); it != grants_.end()) {
             auto from =
@@ -291,6 +310,66 @@ void MemoryCatalog::list_grants(const core::VideoId& id, std::optional<core::Use
     }
     defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
         done(std::move(result));
+    });
+}
+
+void MemoryCatalog::delete_video(const core::VideoId& id, const std::optional<core::UserId>& owner,
+                                 CatalogCallback<void> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<void> result{};
+    const auto it = videos_.find(id);
+    if (it == videos_.end() || (owner && !(it->second.owner == *owner))) {
+        result = std::unexpected(CatalogError::NotFound);
+    } else if (deleted_.contains(id)) {
+        // A repeat: done already.
+    } else if (it->second.state == core::VideoState::Init ||
+               it->second.state == core::VideoState::Uploading) {
+        result = std::unexpected(CatalogError::Conflict);
+    } else {
+        deleted_.insert(id);
+        grants_.erase(id);
+        // A job still queued is cancelled, as the database's statement fails it.
+        std::erase_if(jobs_, [&](const Job& j) { return j.video == id; });
+        purges_.push_back(id);
+    }
+    defer([done = std::move(done), result]() mutable noexcept { done(result); });
+}
+
+void MemoryCatalog::list_videos(const core::UserId& owner,
+                                std::optional<core::ports::VideoCursor> after, std::size_t limit,
+                                CatalogCallback<core::ports::VideoPage> done) {
+    if (refused(done)) {
+        return;
+    }
+    std::vector<core::ports::ListedVideo> listed;
+    for (const auto& [id, video] : videos_) {
+        if (!(video.owner == owner) || deleted_.contains(id)) {
+            continue;
+        }
+        const auto created = created_.find(id);
+        listed.push_back(core::ports::ListedVideo{
+            .video = video, .created_at_us = created == created_.end() ? 0 : created->second});
+    }
+    // Newest first, the id breaking ties, as the database orders them.
+    const auto key = [](const core::ports::ListedVideo& v) {
+        return std::tie(v.created_at_us, v.video.id);
+    };
+    std::ranges::sort(listed, [&](const auto& a, const auto& b) { return key(b) < key(a); });
+    core::ports::VideoPage page;
+    for (core::ports::ListedVideo& v : listed) {
+        if (after && !(key(v) < std::tie(after->created_at_us, after->id))) {
+            continue;
+        }
+        if (page.videos.size() == limit) {
+            page.more = true;
+            break;
+        }
+        page.videos.push_back(std::move(v));
+    }
+    defer([done = std::move(done), page = std::move(page)]() mutable noexcept {
+        done(std::move(page));
     });
 }
 
@@ -316,6 +395,7 @@ void MemoryCatalog::record_views(std::vector<core::ports::ViewEvent> batch,
 void MemoryCatalog::put_video(core::VideoRecord video) {
     const core::VideoId id = video.id;
     videos_.insert_or_assign(id, std::move(video));
+    stamp_created(id);
 }
 
 } // namespace infra::catalog

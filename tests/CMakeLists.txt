@@ -297,6 +297,7 @@ ulw_add_test_suite(gateway_tests unit
     gateway/gateway_streams_test.cpp
     gateway/gateway_tls_test.cpp
     gateway/gateway_upload_test.cpp
+    gateway/gateway_vod_control_test.cpp
     gateway/health_test.cpp
     gateway/key_fetcher_test.cpp
     gateway/live_manifest_cache_test.cpp
@@ -402,6 +403,7 @@ ulw_add_test_suite(postgres_integration_tests integration
     integration/postgres_pool_test.cpp
     integration/postgres_upload_reaper_test.cpp
     integration/postgres_video_access_test.cpp
+    integration/postgres_vod_control_test.cpp
     SERIAL "*PoolTest.PausedDatabaseNeverStallsTheLoop*")
 target_link_libraries(postgres_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(postgres_integration_tests

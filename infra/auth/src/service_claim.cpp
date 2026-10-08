@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace infra::auth {
@@ -48,6 +49,48 @@ bool lists(std::string_view text, std::string_view value) noexcept {
     return false;
 }
 
+// A claim and the value it must hold, read under the same rules for the service and for
+// uploaders; only the variables a refusal names differ.
+struct ClaimAndValue {
+    std::string claim;
+    std::string value;
+};
+
+std::expected<ClaimAndValue, ServiceClaimRefusal>
+read_claim_and_value(std::optional<std::string_view> claim, std::optional<std::string_view> scope,
+                     std::string_view claim_variable, std::string_view scope_variable) {
+    // The default claim, as ServiceClaim and UploaderClaim name it.
+    constexpr std::string_view kDefaultClaim = "scope";
+    ClaimAndValue out{.claim = std::string(kDefaultClaim), .value = {}};
+    if (claim) {
+        if (claim->size() > kMaxClaimName || !std::ranges::all_of(*claim, claim_name_char)) {
+            return refuse(claim_variable,
+                          "expected a claim name: 1 to 64 of A-Z a-z 0-9 _ . : / -");
+        }
+        // Every token carries these, and with another meaning.
+        constexpr std::array<std::string_view, 6> kReserved{"iss", "aud", "exp",
+                                                            "nbf", "iat", "jti"};
+        if (std::ranges::find(kReserved, *claim) != kReserved.end()) {
+            return refuse(claim_variable,
+                          "a registered claim every token carries (iss, aud, exp, nbf, iat, "
+                          "jti); expected the claim the identity provider puts scopes or roles in");
+        }
+        out.claim = std::string(*claim);
+    }
+    if (!scope) {
+        if (claim && *claim != kDefaultClaim) {
+            return refuse(claim_variable, "set, but " + std::string(scope_variable) + " is not");
+        }
+        return out;
+    }
+    if (scope->size() > kMaxValue || !std::ranges::all_of(*scope, value_char)) {
+        return refuse(scope_variable,
+                      "expected 1 to 128 printable ASCII characters without spaces");
+    }
+    out.value = std::string(*scope);
+    return out;
+}
+
 } // namespace
 
 std::expected<ServiceClaim, ServiceClaimRefusal>
@@ -61,33 +104,22 @@ read_service_claim(std::optional<std::string_view> claim, std::optional<std::str
         }
         out.client_id = std::string(*client_id);
     }
-    if (claim) {
-        if (claim->size() > kMaxClaimName || !std::ranges::all_of(*claim, claim_name_char)) {
-            return refuse("ULW_SERVICE_CLAIM",
-                          "expected a claim name: 1 to 64 of A-Z a-z 0-9 _ . : / -");
-        }
-        // Every token carries these, and with another meaning.
-        constexpr std::array<std::string_view, 6> kReserved{"iss", "aud", "exp",
-                                                            "nbf", "iat", "jti"};
-        if (std::ranges::find(kReserved, *claim) != kReserved.end()) {
-            return refuse("ULW_SERVICE_CLAIM",
-                          "a registered claim every token carries (iss, aud, exp, nbf, iat, "
-                          "jti); expected the claim the identity provider puts scopes or roles in");
-        }
-        out.claim = std::string(*claim);
+    auto rule = read_claim_and_value(claim, scope, "ULW_SERVICE_CLAIM", "ULW_SERVICE_SCOPE");
+    if (!rule) {
+        return std::unexpected(std::move(rule.error()));
     }
-    if (!scope) {
-        if (claim && *claim != ServiceClaim{}.claim) {
-            return refuse("ULW_SERVICE_CLAIM", "set, but ULW_SERVICE_SCOPE is not");
-        }
-        return out;
-    }
-    if (scope->size() > kMaxValue || !std::ranges::all_of(*scope, value_char)) {
-        return refuse("ULW_SERVICE_SCOPE",
-                      "expected 1 to 128 printable ASCII characters without spaces");
-    }
-    out.value = std::string(*scope);
+    out.claim = std::move(rule->claim);
+    out.value = std::move(rule->value);
     return out;
+}
+
+std::expected<UploaderClaim, ServiceClaimRefusal>
+read_uploader_claim(std::optional<std::string_view> claim, std::optional<std::string_view> scope) {
+    auto rule = read_claim_and_value(claim, scope, "ULW_UPLOADER_CLAIM", "ULW_UPLOADER_SCOPE");
+    if (!rule) {
+        return std::unexpected(std::move(rule.error()));
+    }
+    return UploaderClaim{.claim = std::move(rule->claim), .value = std::move(rule->value)};
 }
 
 bool names_client(const core::json::Value& claims, std::string_view client_id) noexcept {
