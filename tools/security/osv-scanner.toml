@@ -19,3 +19,22 @@ vulnerability). It is a build-time proc macro reached through hax-lib-macros, li
 hpke-rs and openmls_rust_crypto in the OpenMLS bridge (infra/e2ee/mls_ffi_bridge), which the \
 test and client harnesses link and no server does (ADR-0044). Revisit when OpenMLS's crypto \
 provider moves off it."""
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0330"
+ignoreUntil = 2026-12-31T00:00:00Z
+reason = """libcrux-kem 0.0.9 panics when encapsulating with a hybrid KEM key (X-Wing, \
+X25519MlKem768) from a seed shorter than 32 bytes. The OpenMLS bridge \
+(infra/e2ee/mls_ffi_bridge) uses only MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519, so no \
+hybrid key is ever built, and the seed comes from its own RNG. 0.0.10 fixes it but needs \
+hpke-rs 0.8, which no openmls_rust_crypto release accepts yet (0.6.0 pins hpke 0.7). Bump \
+when openmls_rust_crypto takes hpke-rs 0.8."""
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0331"
+ignoreUntil = 2026-12-31T00:00:00Z
+reason = """libcrux-kem 0.0.9 panics when decoding a too-short X25519MlKem768 or XWing hybrid \
+KEM key. The OpenMLS bridge (infra/e2ee/mls_ffi_bridge) uses only \
+MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519, so it never decodes a hybrid key. 0.0.10 fixes \
+it but needs hpke-rs 0.8, which no openmls_rust_crypto release accepts yet (0.6.0 pins hpke \
+0.7). Bump when openmls_rust_crypto takes hpke-rs 0.8."""
