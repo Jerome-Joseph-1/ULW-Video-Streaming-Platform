@@ -15,6 +15,7 @@
 #include "call_bell.hpp"
 #include "chat.hpp"
 #include "chat_service.hpp"
+#include "key_directory.hpp"
 #include "presence.hpp"
 
 #include <cstdint>
@@ -159,6 +160,7 @@ private:
     std::optional<ClientId> client_;
     std::optional<PresenceClientId> presence_;
     std::optional<BellId> bell_;
+    std::optional<DirectoryClientId> directory_;
 
     codec::ws::Decoder decoder_;
     std::uint32_t control_tokens_;

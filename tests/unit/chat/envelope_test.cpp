@@ -15,6 +15,7 @@
 #include <span>
 #include <string>
 #include <variant>
+#include <vector>
 
 namespace {
 
@@ -752,6 +753,183 @@ TEST(Envelope, MemberListRepliesAreTheDocumentedShapes) {
         out, "not_admin",
         {.room = room(), .id = std::nullopt, .user = std::nullopt, .retry_after = std::nullopt});
     EXPECT_EQ(out, R"({"type":"error","reason":"not_admin","room":")" + r + R"("})");
+}
+
+// The key directory (ADR-0101) --------------------------------------------------------------
+
+constexpr std::string_view kDevice = "01a0eb86-6cca-7dce-84cc-3bb47615f9fe";
+constexpr std::string_view kOther = "01a0eb86-6cca-7dce-84cc-3bb47615f9ff";
+
+core::DeviceId device_id(std::string_view text = kDevice) {
+    return *core::DeviceId::parse(text);
+}
+
+std::string directory_command(std::string_view fields) {
+    return std::format(R"({{{}}})", fields);
+}
+
+TEST(Envelope, DeviceCommandsNameTheDeviceAndMayCarryARequestId) {
+    const auto reg = chat::parse_command(
+        directory_command(std::format(R"("type":"register_device","device":"{}")", kDevice)));
+    ASSERT_TRUE(reg);
+    const auto& r = std::get<chat::RegisterDevice>(std::get<chat::DirectoryCommand>(*reg));
+    EXPECT_EQ(r.device, device_id());
+    EXPECT_FALSE(r.id);
+
+    const auto retire = chat::parse_command(directory_command(
+        std::format(R"("type":"retire_device","device":"{}","id":"q-1")", kDevice)));
+    ASSERT_TRUE(retire);
+    const auto& t = std::get<chat::RetireDevice>(std::get<chat::DirectoryCommand>(*retire));
+    EXPECT_EQ(t.device, device_id());
+    EXPECT_EQ(t.id, rt::MessageKey::parse("q-1"));
+
+    EXPECT_EQ(chat::parse_command(R"({"type":"register_device","device":"Laptop"})").error(),
+              EnvelopeError::BadDevice);
+    EXPECT_EQ(chat::parse_command(R"({"type":"register_device"})").error(),
+              EnvelopeError::Malformed);
+    EXPECT_EQ(chat::parse_command(
+                  directory_command(std::format(
+                      R"("type":"register_device","device":"{}","id":"no spaces")", kDevice)))
+                  .error(),
+              EnvelopeError::BadId);
+    EXPECT_EQ(
+        chat::parse_command(directory_command(std::format(
+                                R"("type":"register_device","device":"{}","user":"bob")", kDevice)))
+            .error(),
+        EnvelopeError::Malformed);
+}
+
+TEST(Envelope, APublishCarriesSingleUsePackagesALastResortOrBoth) {
+    const auto both = chat::parse_command(directory_command(
+        std::format(R"("type":"publish_key_packages","device":"{}","key_packages":["AAE","Ag"],)"
+                    R"("last_resort":"_w")",
+                    kDevice)));
+    ASSERT_TRUE(both);
+    const auto& p = std::get<chat::PublishKeyPackages>(std::get<chat::DirectoryCommand>(*both));
+    ASSERT_EQ(p.packages.size(), 2U);
+    EXPECT_EQ(p.packages[0], (core::ports::KeyPackageBytes{std::byte{0}, std::byte{1}}));
+    EXPECT_EQ(p.packages[1], (core::ports::KeyPackageBytes{std::byte{2}}));
+    EXPECT_EQ(p.last_resort, (core::ports::KeyPackageBytes{std::byte{0xFF}}));
+
+    const auto only_last = chat::parse_command(directory_command(
+        std::format(R"("type":"publish_key_packages","device":"{}","last_resort":"_w")", kDevice)));
+    ASSERT_TRUE(only_last);
+    EXPECT_TRUE(std::get<chat::PublishKeyPackages>(std::get<chat::DirectoryCommand>(*only_last))
+                    .packages.empty());
+
+    const auto refused = [](std::string_view fields) {
+        return chat::parse_command(
+                   directory_command(std::format(
+                       R"("type":"publish_key_packages","device":"{}",{})", kDevice, fields)))
+            .error();
+    };
+    EXPECT_EQ(refused(R"("key_packages":[])"), EnvelopeError::Malformed) << "nothing to publish";
+    EXPECT_EQ(refused(R"("key_packages":[""])"), EnvelopeError::BadBody) << "an empty package";
+    EXPECT_EQ(refused(R"("key_packages":["a+b"])"), EnvelopeError::BadBody);
+    EXPECT_EQ(refused(R"("key_packages":[7])"), EnvelopeError::Malformed);
+    EXPECT_EQ(refused(R"("key_packages":"AAE")"), EnvelopeError::Malformed);
+    const std::string big =
+        infra::auth::encode_base64url(std::string(core::ports::kMaxKeyPackageBytes + 1, 'x'));
+    EXPECT_EQ(refused(std::format(R"("last_resort":"{}")", big)), EnvelopeError::TooLarge);
+    EXPECT_EQ(chat::reason(EnvelopeError::TooLarge), "too_large");
+    const std::string largest =
+        infra::auth::encode_base64url(std::string(core::ports::kMaxKeyPackageBytes, 'x'));
+    EXPECT_TRUE(chat::parse_command(directory_command(std::format(
+        R"("type":"publish_key_packages","device":"{}","last_resort":"{}")", kDevice, largest))));
+
+    std::string hundred_and_one;
+    for (std::size_t i = 0; i <= core::ports::kMaxKeyPackagesPerDevice; ++i) {
+        hundred_and_one += i == 0 ? "\"AA\"" : ",\"AA\"";
+    }
+    EXPECT_EQ(refused(std::format(R"("key_packages":[{}])", hundred_and_one)),
+              EnvelopeError::Malformed);
+}
+
+TEST(Envelope, ListingsAndClaimsNameAUserAndClaimsMayNameDevices) {
+    const auto list = chat::parse_command(R"({"type":"devices","user":"alice","id":"l"})");
+    ASSERT_TRUE(list);
+    const auto& l = std::get<chat::ListDevices>(std::get<chat::DirectoryCommand>(*list));
+    EXPECT_EQ(l.user, *core::UserId::parse("alice"));
+    EXPECT_EQ(l.id, rt::MessageKey::parse("l"));
+
+    const auto all = chat::parse_command(R"({"type":"claim_key_packages","user":"alice"})");
+    ASSERT_TRUE(all);
+    EXPECT_TRUE(
+        std::get<chat::ClaimKeyPackages>(std::get<chat::DirectoryCommand>(*all)).devices.empty());
+
+    const auto named = chat::parse_command(directory_command(std::format(
+        R"("type":"claim_key_packages","user":"alice","devices":["{}","{}"])", kDevice, kOther)));
+    ASSERT_TRUE(named);
+    EXPECT_EQ(std::get<chat::ClaimKeyPackages>(std::get<chat::DirectoryCommand>(*named)).devices,
+              (std::vector<core::DeviceId>{device_id(), device_id(kOther)}));
+
+    EXPECT_EQ(chat::parse_command(
+                  directory_command(std::format(
+                      R"("type":"claim_key_packages","user":"alice","devices":["{}","{}"])",
+                      kDevice, kDevice)))
+                  .error(),
+              EnvelopeError::Malformed)
+        << "a device named twice";
+    EXPECT_EQ(
+        chat::parse_command(R"({"type":"claim_key_packages","user":"alice","devices":[]})").error(),
+        EnvelopeError::Malformed);
+    EXPECT_EQ(chat::parse_command(R"({"type":"claim_key_packages","user":"alice",)"
+                                  R"("devices":["nope"]})")
+                  .error(),
+              EnvelopeError::BadDevice);
+    EXPECT_EQ(chat::parse_command(R"({"type":"devices","user":""})").error(),
+              EnvelopeError::BadUser);
+    EXPECT_EQ(chat::parse_command(R"({"type":"devices"})").error(), EnvelopeError::Malformed);
+}
+
+TEST(Envelope, TheDirectorysAnswersAreWrittenAsDocumented) {
+    const std::string d{kDevice};
+    const std::string o{kOther};
+    const auto alice = *core::UserId::parse("alice");
+    std::string out;
+    chat::write_device_supply(
+        out, "device_registered",
+        {.device = device_id(), .key_packages = 12, .last_resort = core::ports::LastResort::Fresh},
+        rt::MessageKey::parse("r1"));
+    EXPECT_EQ(out, R"({"type":"device_registered","device":")" + d +
+                       R"(","key_packages":12,"last_resort":"fresh","id":"r1"})");
+    out.clear();
+    chat::write_device_retired(out, device_id(), std::nullopt);
+    EXPECT_EQ(out, R"({"type":"device_retired","device":")" + d + R"("})");
+    out.clear();
+    const std::vector<core::ports::DeviceEntry> entries{
+        {.device = device_id(), .key_packages = 3, .last_resort = core::ports::LastResort::Used},
+        {.device = device_id(kOther),
+         .key_packages = 0,
+         .last_resort = core::ports::LastResort::None}};
+    chat::write_devices(out, alice, entries, false, std::nullopt);
+    EXPECT_EQ(out, R"({"type":"devices","user":"alice","devices":[{"device":")" + d +
+                       R"("},{"device":")" + o + R"("}]})");
+    out.clear();
+    chat::write_devices(out, alice, entries, true, rt::MessageKey::parse("l"));
+    EXPECT_EQ(out, R"({"type":"devices","user":"alice","devices":[{"device":")" + d +
+                       R"(","key_packages":3,"last_resort":"used"},{"device":")" + o +
+                       R"(","key_packages":0,"last_resort":"none"}],"id":"l"})");
+    out.clear();
+    chat::ClaimOutcome outcome;
+    outcome.claimed.push_back(
+        {.device = device_id(), .package = {std::byte{0}, std::byte{1}}, .last_resort = true});
+    outcome.exhausted.push_back(device_id(kOther));
+    chat::write_claimed(out, alice, outcome, rt::MessageKey::parse("c"));
+    EXPECT_EQ(out, R"({"type":"key_packages","user":"alice","key_packages":[{"device":")" + d +
+                       R"(","key_package":"AAE","last_resort":true}],"exhausted":[")" + o +
+                       R"("],"gone":[],"unavailable":[],"id":"c"})");
+    out.clear();
+    chat::write_replenish(out, device_id());
+    EXPECT_EQ(out, R"({"type":"replenish","device":")" + d + R"("})");
+    out.clear();
+    chat::write_directory_error(out, "rate_limited",
+                                {.id = rt::MessageKey::parse("p"),
+                                 .device = device_id(),
+                                 .user = std::nullopt,
+                                 .retry_after = core::Millis{3000}});
+    EXPECT_EQ(out, R"({"type":"error","reason":"rate_limited","id":"p","device":")" + d +
+                       R"(","retry_after_ms":3000})");
 }
 
 } // namespace

@@ -71,6 +71,32 @@ void RoomLog::on_node_taken() noexcept {
 
 namespace {
 
+std::string render_directory_metrics(const DirectoryCounters& d) {
+    return std::format("e2ee_devices_registered_total {}\n"
+                       "e2ee_devices_retired_total {}\n"
+                       "e2ee_key_packages_published_total{{kind=\"single_use\"}} {}\n"
+                       "e2ee_key_packages_published_total{{kind=\"last_resort\"}} {}\n"
+                       "e2ee_device_listings_total {}\n"
+                       "e2ee_claims_total {}\n"
+                       "e2ee_key_packages_claimed_total{{kind=\"single_use\"}} {}\n"
+                       "e2ee_key_packages_claimed_total{{kind=\"last_resort\"}} {}\n"
+                       "e2ee_claims_exhausted_total {}\n"
+                       "e2ee_replenish_sent_total {}\n"
+                       "e2ee_refusals_total{{reason=\"not_shared\"}} {}\n"
+                       "e2ee_refusals_total{{reason=\"rate_limited\"}} {}\n"
+                       "e2ee_refusals_total{{reason=\"busy\"}} {}\n"
+                       "e2ee_refusals_total{{reason=\"unknown_device\"}} {}\n"
+                       "e2ee_refusals_total{{reason=\"device_retired\"}} {}\n"
+                       "e2ee_refusals_total{{reason=\"device_limit\"}} {}\n"
+                       "e2ee_refusals_total{{reason=\"key_packages_full\"}} {}\n"
+                       "e2ee_refusals_total{{reason=\"unavailable\"}} {}\n",
+                       d.registered, d.retired, d.published, d.last_resorts_published, d.listings,
+                       d.claims, d.claimed - d.claimed_last_resort, d.claimed_last_resort,
+                       d.exhausted, d.replenish_sent, d.not_shared, d.rate_limited, d.busy,
+                       d.unknown_device, d.device_retired, d.device_limit, d.key_packages_full,
+                       d.unavailable);
+}
+
 // The service's limits, with the clients it may hold: the server's connections.
 ServiceLimits service_limits(const Limits& limits) noexcept {
     ServiceLimits service = limits.service;
@@ -86,6 +112,7 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       presence_(rooms_, shared_, deps.reactor, deps.clock, deps.node, limits_.presence),
       calls_(deps.messages, deps.sfu, rooms_, deps.clock, deps.random, limits_.calls),
       service_api_(deps.reactor, deps.clock, deps.verifier, deps.messages, limits_.service_api),
+      directory_(deps.registry, deps.key_packages, shared_, deps.clock, limits_.directory),
       // One more than the connections that can pin an entry, so a new client always finds one.
       clients_(std::max(kClientEntries, limits_.max_connections + 1),
                http::AddressHash{http::SeededHash(seed(deps_.random))}),
@@ -488,7 +515,9 @@ std::string ChatServer::render_metrics() const {
                        presence.checks, presence.not_shared, presence.revoked, api.connections,
                        api.refused_connections, service_api_.connections(), api.requests,
                        api.changes, api.reads, api.unauthorized, api.forbidden, api.limited,
-                       api.bad_requests, api.refused, api.unavailable);
+                       api.bad_requests, api.refused, api.unavailable) +
+           // The key directory (ADR-0101), on the node the asking client is on.
+           render_directory_metrics(directory_.counters());
 }
 
 } // namespace chat

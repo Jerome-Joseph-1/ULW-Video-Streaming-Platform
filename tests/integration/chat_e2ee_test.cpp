@@ -24,6 +24,7 @@
 #include <memory>
 #include <optional>
 #include <ranges>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -360,6 +361,155 @@ TEST_P(ChatE2eeTest, AThousandMlsMessagesAreStoredAsCiphertextAndReadableNowhere
                   << " logs for " << plaintext_list.size()
                   << " plaintexts in three forms: none found\n";
     }
+}
+
+// ADR-0101: each device of a user is its own member, found through the server's key directory.
+// Alice has a phone and a laptop, bob one device, each on its own node. Every device publishes
+// key packages it made itself; alice's phone lists the devices of everyone in the room, claims a
+// package of each device the group lacks, and adds them all in one commit; the welcome reaches
+// the others through the room. Then every device reads every other's messages.
+TEST_P(ChatE2eeTest, EveryDeviceOfEveryMemberJoinsThroughTheKeyDirectory) {
+    struct Member {
+        std::string user;
+        std::string device;
+        MlsClient mls;
+        std::optional<MlsGroup> group;
+        std::unique_ptr<Client> link;
+    };
+    const auto ask = [](Client& client, const std::string& command, std::string_view answer) {
+        const std::size_t from = client.seen().size();
+        EXPECT_TRUE(client.send(command));
+        const auto at = client.wait_from(
+            from, [&](const Seen& s) { return s.type == answer || s.type == "error"; });
+        return at ? std::optional<Seen>(client.seen()[*at]) : std::nullopt;
+    };
+    std::vector<Member> members;
+    const std::array<std::pair<std::size_t, std::size_t>, 3> who{
+        std::pair<std::size_t, std::size_t>{0, 0}, {0, 1}, {1, 2}};
+    for (const auto& [user, node] : who) {
+        const std::string name = std::array{"alice", "bob"}.at(user);
+        const std::string device = core::DeviceId::generate(clock_, random_).to_string();
+        // The credential names the user and the device as the directory knows it.
+        auto mls = MlsClient::create(bytes_of(std::format("{}/{}", name, device)));
+        ASSERT_TRUE(mls);
+        auto link = connect(nodes_[node], user);
+        ASSERT_TRUE(link);
+        ASSERT_NO_FATAL_FAILURE(join(*link));
+        members.push_back({.user = name,
+                           .device = device,
+                           .mls = std::move(*mls),
+                           .group = std::nullopt,
+                           .link = std::move(link)});
+    }
+    for (Member& m : members) {
+        const auto registered =
+            ask(*m.link, R"({"type":"register_device","device":")" + m.device + R"("})",
+                "device_registered");
+        ASSERT_TRUE(registered);
+        ASSERT_EQ(registered->type, "device_registered") << registered->raw;
+        std::string list;
+        for (int i = 0; i < 3; ++i) {
+            auto package = m.mls.key_package();
+            ASSERT_TRUE(package);
+            list += (list.empty() ? "\"" : ",\"") +
+                    infra::auth::encode_base64url(std::string_view(text_of(*package))) + "\"";
+        }
+        const auto published = ask(*m.link,
+                                   R"({"type":"publish_key_packages","device":")" + m.device +
+                                       R"(","key_packages":[)" + list + "]}",
+                                   "key_packages_published");
+        ASSERT_TRUE(published);
+        ASSERT_NE(published->raw.find(R"("key_packages":3)"), std::string::npos) << published->raw;
+    }
+
+    // Alice's phone starts the group, and adds every other device of the room's members.
+    Member& phone = members[0];
+    auto created = phone.mls.create_group(bytes_of(room_));
+    ASSERT_TRUE(created);
+    phone.group = std::move(*created);
+    std::vector<MlsBytes> packages;
+    std::set<std::string> claimed_devices;
+    for (const std::string user : {"alice", "bob"}) {
+        const auto listed =
+            ask(*phone.link, R"({"type":"devices","user":")" + user + R"("})", "devices");
+        ASSERT_TRUE(listed);
+        ASSERT_EQ(listed->type, "devices") << listed->raw;
+        std::string wanted;
+        for (const Member& m : members) {
+            if (m.user == user && m.device != phone.device) {
+                ASSERT_NE(listed->raw.find(m.device), std::string::npos) << listed->raw;
+                wanted += (wanted.empty() ? "\"" : ",\"") + m.device + "\"";
+            }
+        }
+        const auto claim =
+            ask(*phone.link,
+                std::format(R"({{"type":"claim_key_packages","user":"{}","devices":[{}]}})", user,
+                            wanted),
+                "key_packages");
+        ASSERT_TRUE(claim);
+        ASSERT_EQ(claim->type, "key_packages") << claim->raw;
+        const auto json = core::json::parse(claim->raw);
+        ASSERT_TRUE(json);
+        for (const core::json::Value& item : *json->find("key_packages")->as_array()) {
+            claimed_devices.insert(std::string(item.find("device")->as_string().value_or("")));
+            const auto bytes =
+                infra::auth::decode_base64url(item.find("key_package")->as_string().value_or(""));
+            ASSERT_TRUE(bytes);
+            const auto view = bytes_of(*bytes);
+            packages.emplace_back(view.begin(), view.end());
+        }
+    }
+    ASSERT_EQ(claimed_devices, (std::set<std::string>{members[1].device, members[2].device}));
+    const auto added = phone.group->add(packages);
+    ASSERT_TRUE(added) << to_string(added.error());
+    ASSERT_TRUE(phone.link->send(send_command(room_, text_of(added->commit), "commit-0")));
+    ASSERT_TRUE(phone.link->wait_for(
+        [](const Seen& s) { return s.type == "message" && s.id == "commit-0"; }));
+    ASSERT_TRUE(phone.group->merge_pending_commit());
+    ASSERT_TRUE(phone.link->send(send_command(room_, text_of(added->welcome), "welcome-0")));
+    for (std::size_t k = 1; k < members.size(); ++k) {
+        Member& m = members[k];
+        const auto welcome = m.link->wait_for(
+            [](const Seen& s) { return s.type == "message" && s.id == "welcome-0"; });
+        ASSERT_TRUE(welcome) << m.user;
+        auto joined = m.mls.join(bytes_of(welcome->body));
+        ASSERT_TRUE(joined) << m.user << ": " << to_string(joined.error());
+        m.group = std::move(*joined);
+    }
+    for (const Member& m : members) {
+        EXPECT_EQ(m.group->member_count().value_or(0), 3U) << m.user;
+    }
+
+    // Each device says something; every other one reads it, the same user's other device too.
+    for (std::size_t k = 0; k < members.size(); ++k) {
+        Member& m = members[k];
+        const std::string text = std::format("from {} device {}", m.user, k);
+        const auto sealed = m.group->encrypt(bytes_of(text));
+        ASSERT_TRUE(sealed);
+        const std::string id = std::format("app-{}", k);
+        ASSERT_TRUE(m.link->send(send_command(room_, text_of(*sealed), id)));
+        for (std::size_t j = 0; j < members.size(); ++j) {
+            if (j == k) {
+                continue;
+            }
+            Member& reader = members[j];
+            const auto heard = reader.link->wait_for(
+                [&](const Seen& s) { return s.type == "message" && s.id == id; });
+            ASSERT_TRUE(heard) << reader.user << " " << j;
+            const auto read = reader.group->process(bytes_of(heard->body));
+            ASSERT_TRUE(read) << to_string(read.error());
+            EXPECT_EQ(text_of(read->plaintext), text);
+        }
+    }
+
+    // Exactly the two packages added were spent, and none of the phone's.
+    auto conn = db_->session();
+    EXPECT_EQ(ulw::test::scalar(conn, "SELECT count(*) FROM key_packages"), "7");
+    EXPECT_EQ(ulw::test::scalar(conn,
+                                "SELECT count(*) FROM key_packages WHERE device_id = "
+                                "$1::text::uuid",
+                                Params{}.add_text(phone.device)),
+              "3");
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatE2eeTest,

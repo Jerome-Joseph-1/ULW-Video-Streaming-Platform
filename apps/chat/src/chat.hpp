@@ -13,6 +13,7 @@
 #include "call.hpp"
 #include "call_bell.hpp"
 #include "chat_service.hpp"
+#include "key_directory.hpp"
 #include "presence.hpp"
 #include "service_api.hpp"
 #include "token_bucket.hpp"
@@ -106,6 +107,8 @@ struct Limits {
     CallLimits calls = {};
     // NOLINTNEXTLINE(readability-redundant-member-init)
     ServiceApiLimits service_api = {};
+    // NOLINTNEXTLINE(readability-redundant-member-init)
+    DirectoryLimits directory = {};
 };
 
 // Who may open a socket: the cookie that carries the token, and the pages allowed to use it.
@@ -126,6 +129,11 @@ struct Deps {
     // The SFU calls are answered with (ADR-0050); null when calls are not configured, and every
     // call is then answered calls_disabled. Must outlive the server.
     core::ports::ISfu* sfu = nullptr;
+    // The key directory (ADR-0038, ADR-0101); null when none is configured, and every directory
+    // command is then answered unavailable. Must outlive the server, or be destroyed first:
+    // answers that come back after the server is gone are dropped.
+    core::ports::IDeviceRegistry* registry = nullptr;
+    core::ports::IE2eeDeliveryService* key_packages = nullptr;
 };
 
 struct Counters {
@@ -277,6 +285,7 @@ public:
     [[nodiscard]] ChatService& chat() noexcept { return chat_; }
     [[nodiscard]] Presence& presence() noexcept { return presence_; }
     [[nodiscard]] CallBell& bell() noexcept { return bell_; }
+    [[nodiscard]] KeyDirectory& directory() noexcept { return directory_; }
     // The operator's backend's API (ADR-0096), on its own listener when ULW_SERVICE_PORT is set.
     [[nodiscard]] ServiceApi& service_api() noexcept { return service_api_; }
     [[nodiscard]] Session* session(net::Slab<Session>::Handle handle) noexcept;
@@ -337,6 +346,7 @@ private:
     // before it goes.
     CallHandler calls_;
     ServiceApi service_api_;
+    KeyDirectory directory_;
     http::BoundedTable<net::IpAddress, ClientEntry, http::AddressHash> clients_;
     http::BoundedTable<core::UserId, UserEntry, http::ViewHash> users_;
     http::BoundedTable<net::IpAddress, BlockEntry, http::AddressHash> blocks_;
