@@ -5,6 +5,7 @@
 
 namespace infra::e2ee {
 
+using core::ports::DeviceEntry;
 using core::ports::E2eeCallback;
 using core::ports::E2eeError;
 using core::ports::E2eeResult;
@@ -86,8 +87,12 @@ void MemoryDirectory::register_device(const core::UserId& user, const core::Devi
     } else if (live_devices_of(user) >= core::ports::kMaxDevicesPerUser) {
         result = std::unexpected(E2eeError::Full);
     } else {
-        devices_.emplace(device,
-                         Device{.user = user, .revoked = false, .retired_seq = 0, .packages = {}});
+        devices_.emplace(device, Device{.user = user,
+                                        .revoked = false,
+                                        .retired_seq = 0,
+                                        .packages = {},
+                                        .last_resort = std::nullopt,
+                                        .last_resort_used = false});
     }
     reply(std::move(done), std::move(result));
 }
@@ -103,8 +108,45 @@ void MemoryDirectory::deregister_device(const core::UserId& user, const core::De
         it->second.revoked = true;
         it->second.retired_seq = ++retirements_;
         it->second.packages.clear();
+        it->second.last_resort.reset();
+        it->second.last_resort_used = false;
         drop_old_tombstones(user);
     }
+    reply<void>(std::move(done), {});
+}
+
+void MemoryDirectory::list_devices(const core::UserId& user,
+                                   E2eeCallback<std::vector<DeviceEntry>> done) {
+    std::vector<DeviceEntry> live;
+    for (const auto& [id, d] : devices_) {
+        if (d.user != user || d.revoked) {
+            continue;
+        }
+        core::ports::LastResort state = core::ports::LastResort::None;
+        if (d.last_resort) {
+            state =
+                d.last_resort_used ? core::ports::LastResort::Used : core::ports::LastResort::Fresh;
+        }
+        live.push_back(
+            DeviceEntry{.device = id, .key_packages = d.packages.size(), .last_resort = state});
+    }
+    std::ranges::sort(live, {}, &DeviceEntry::device);
+    reply<std::vector<DeviceEntry>>(std::move(done), std::move(live));
+}
+
+void MemoryDirectory::publish_last_resort(const core::UserId& user, const core::DeviceId& device,
+                                          KeyPackageBytes package, E2eeCallback<void> done) {
+    if (auto checked = core::ports::check_key_package(package); !checked) {
+        reply<void>(std::move(done), std::unexpected(checked.error()));
+        return;
+    }
+    auto live = live_device(user, device);
+    if (!live) {
+        reply<void>(std::move(done), std::unexpected(live.error()));
+        return;
+    }
+    (*live)->last_resort = std::move(package);
+    (*live)->last_resort_used = false;
     reply<void>(std::move(done), {});
 }
 
@@ -140,10 +182,19 @@ void MemoryDirectory::fetch_key_package(const core::UserId& user, const core::De
     }
     auto& packages = (*live)->packages;
     if (packages.empty()) {
-        reply<FetchedKeyPackage>(std::move(done), std::unexpected(E2eeError::Exhausted));
+        auto& last_resort = (*live)->last_resort;
+        if (!last_resort) {
+            reply<FetchedKeyPackage>(std::move(done), std::unexpected(E2eeError::Exhausted));
+            return;
+        }
+        (*live)->last_resort_used = true;
+        reply<FetchedKeyPackage>(
+            std::move(done),
+            FetchedKeyPackage{.package = *last_resort, .replenish = true, .last_resort = true});
         return;
     }
-    FetchedKeyPackage fetched{.package = std::move(packages.front()), .replenish = false};
+    FetchedKeyPackage fetched{
+        .package = std::move(packages.front()), .replenish = false, .last_resort = false};
     packages.pop_front();
     fetched.replenish = packages.size() <= core::ports::kKeyPackageLowWater;
     reply<FetchedKeyPackage>(std::move(done), std::move(fetched));

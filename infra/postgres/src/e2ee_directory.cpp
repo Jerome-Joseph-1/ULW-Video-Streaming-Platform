@@ -14,6 +14,7 @@ namespace infra::postgres {
 
 namespace {
 
+using core::ports::DeviceEntry;
 using core::ports::E2eeCallback;
 using core::ports::E2eeError;
 using core::ports::E2eeResult;
@@ -59,7 +60,9 @@ DELETE FROM devices
 constexpr Sql kRetireDevice = R"sql(
 UPDATE devices SET revoked_at = coalesce(revoked_at, now())
  WHERE id = $1 AND user_id = $2)sql";
-constexpr Sql kDropPackages = "DELETE FROM key_packages WHERE device_id = $1";
+constexpr Sql kDropPackages = R"sql(
+WITH last_resort AS (DELETE FROM last_resort_key_packages WHERE device_id = $1)
+DELETE FROM key_packages WHERE device_id = $1)sql";
 
 // Publishes of one device queue on this lock, so the count the next statement reads (on a fresh
 // snapshot) cannot move under it except downwards, as fetches take packages.
@@ -93,6 +96,11 @@ SELECT (SELECT n FROM held), (SELECT count(*) FROM added))sql";
 // The count reads the snapshot from before the delete, so it still includes the package taken
 // here, and counts packages that concurrent fetches are taking; it is a hint for the replenish
 // signal, not a balance.
+//
+// With no single-use package taken, the device's last-resort package (ADR-0101) is handed out
+// instead and kept, marked served. Like the delete, the update is one of this statement's own
+// sub-statements, so a fetcher that skipped the last single-use row because another was taking
+// it is given the last resort rather than nothing.
 constexpr Sql kFetchPackage = R"sql(
 WITH device AS (
     SELECT id, revoked_at IS NOT NULL AS revoked FROM devices
@@ -105,10 +113,33 @@ taken AS (
                   ORDER BY id
                     FOR UPDATE SKIP LOCKED
                   LIMIT 1)
+    RETURNING body),
+fallback AS (
+    UPDATE last_resort_key_packages SET served_at = coalesce(served_at, now())
+     WHERE device_id = (SELECT id FROM device WHERE NOT revoked)
+       AND NOT EXISTS (SELECT 1 FROM taken)
     RETURNING body)
-SELECT device.revoked, (SELECT body FROM taken),
-       (SELECT count(*) FROM key_packages WHERE device_id = device.id)
+SELECT device.revoked, coalesce((SELECT body FROM taken), (SELECT body FROM fallback)),
+       (SELECT count(*) FROM key_packages WHERE device_id = device.id),
+       EXISTS (SELECT 1 FROM fallback)
   FROM device)sql";
+
+// Replaces the device's last-resort package. The device row is held by kLockDevice first, as for
+// a publish, so a retirement cannot pass between the check and the write.
+constexpr Sql kPutLastResort = R"sql(
+INSERT INTO last_resort_key_packages (device_id, body) VALUES ($1, $2)
+ON CONFLICT (device_id) DO UPDATE
+   SET body = excluded.body, published_at = now(), served_at = NULL)sql";
+
+// A user's live devices with their supply, at most $2 (the cap on live devices). The state is 0
+// for no last-resort package, 1 for one never served and 2 for one served.
+constexpr Sql kListDevices = R"sql(
+SELECT d.id, (SELECT count(*) FROM key_packages k WHERE k.device_id = d.id),
+       CASE WHEN l.device_id IS NULL THEN 0 WHEN l.served_at IS NULL THEN 1 ELSE 2 END
+  FROM devices d LEFT JOIN last_resort_key_packages l ON l.device_id = d.id
+ WHERE d.user_id = $1 AND d.revoked_at IS NULL
+ ORDER BY d.id
+ LIMIT $2)sql";
 
 // The primary key (room_id, epoch) settles two claims for the same epoch: the second waits for
 // the first and then does nothing. The max() check refuses a claim for an epoch the room has
@@ -379,7 +410,8 @@ E2eeResult<FetchedKeyPackage> decode_fetch(const Result& row) {
     }
     const auto revoked = row.get(0, 0).and_then(parse_bool);
     const auto counted = row.get(0, 2).and_then(parse_uint64);
-    if (!revoked || !counted) {
+    const auto last_resort = row.get(0, 3).and_then(parse_bool);
+    if (!revoked || !counted || !last_resort) {
         return std::unexpected(E2eeError::Corrupt);
     }
     if (*revoked) {
@@ -390,13 +422,132 @@ E2eeResult<FetchedKeyPackage> decode_fetch(const Result& row) {
         return std::unexpected(E2eeError::Exhausted);
     }
     auto package = parse_bytea(*body);
-    if (!package || *counted == 0) {
+    if (!package) {
+        return std::unexpected(E2eeError::Corrupt);
+    }
+    if (*last_resort) {
+        return FetchedKeyPackage{
+            .package = std::move(*package), .replenish = true, .last_resort = true};
+    }
+    if (*counted == 0) {
         return std::unexpected(E2eeError::Corrupt);
     }
     const std::uint64_t remaining = *counted - 1;
     return FetchedKeyPackage{.package = std::move(*package),
-                             .replenish = remaining <= core::ports::kKeyPackageLowWater};
+                             .replenish = remaining <= core::ports::kKeyPackageLowWater,
+                             .last_resort = false};
 }
+
+class PublishLastResort final : public Operation {
+public:
+    PublishLastResort(const core::UserId& user, const core::DeviceId& device,
+                      KeyPackageBytes package, E2eeCallback<void> done) noexcept
+        : user_(user), device_(device), package_(std::move(package)), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        step_ = Step::Begin;
+        return Statement{.sql = kBegin, .params = {}};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            return finish(failure<void>(outcome.error()));
+        }
+        switch (step_) {
+        case Step::Begin:
+            step_ = Step::Lock;
+            return Statement{.sql = kLockDevice, .params = device_params(device_, user_)};
+        case Step::Lock: {
+            if (outcome->rows() == 0) {
+                return finish(std::unexpected(E2eeError::NotFound));
+            }
+            const auto revoked = outcome->get(0, 0).and_then(parse_bool);
+            if (!revoked) {
+                return finish(std::unexpected(E2eeError::Corrupt));
+            }
+            if (*revoked) {
+                return finish(std::unexpected(E2eeError::Revoked));
+            }
+            step_ = Step::Put;
+            return Statement{.sql = kPutLastResort,
+                             .params = Params{}.add_uuid(device_.uuid()).add_bytea(package_)};
+        }
+        case Step::Put:
+            step_ = Step::Commit;
+            return Statement{.sql = kCommit, .params = {}};
+        case Step::Commit:
+            return finish({});
+        }
+        return finish(std::unexpected(E2eeError::Unavailable));
+    }
+
+    void abandon(DbError error) noexcept override { done_(failure<void>(error)); }
+
+private:
+    enum class Step : std::uint8_t { Begin, Lock, Put, Commit };
+
+    std::optional<Statement> finish(E2eeResult<void> result) noexcept {
+        done_(result);
+        return std::nullopt;
+    }
+
+    core::UserId user_;
+    core::DeviceId device_;
+    KeyPackageBytes package_;
+    Step step_ = Step::Begin;
+    E2eeCallback<void> done_;
+};
+
+E2eeResult<std::vector<DeviceEntry>> decode_devices(const Result& rows) {
+    std::vector<DeviceEntry> live;
+    live.reserve(static_cast<std::size_t>(rows.rows()));
+    for (int i = 0; i < rows.rows(); ++i) {
+        const auto text = rows.get(i, 0);
+        std::optional<core::DeviceId> id;
+        if (text) {
+            if (const auto parsed = core::DeviceId::parse(*text)) {
+                id = *parsed;
+            }
+        }
+        const auto held = rows.get(i, 1).and_then(parse_uint64);
+        const auto state = rows.get(i, 2).and_then(parse_uint64);
+        if (!id || !held || !state || *state > 2) {
+            return std::unexpected(E2eeError::Corrupt);
+        }
+        live.push_back(DeviceEntry{.device = *id,
+                                   .key_packages = static_cast<std::size_t>(*held),
+                                   .last_resort = static_cast<core::ports::LastResort>(*state)});
+    }
+    return live;
+}
+
+class ListDevices final : public Operation {
+public:
+    ListDevices(const core::UserId& user, E2eeCallback<std::vector<DeviceEntry>> done) noexcept
+        : user_(user), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{
+            .sql = kListDevices,
+            .params = Params{}
+                          .add_text(user_.view())
+                          .add_int(static_cast<std::int64_t>(core::ports::kMaxDevicesPerUser))};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        done_(outcome ? decode_devices(*outcome)
+                      : failure<std::vector<DeviceEntry>>(outcome.error()));
+        return std::nullopt;
+    }
+
+    void abandon(DbError error) noexcept override {
+        done_(failure<std::vector<DeviceEntry>>(error));
+    }
+
+private:
+    core::UserId user_;
+    E2eeCallback<std::vector<DeviceEntry>> done_;
+};
 
 class FetchKeyPackage final : public Operation {
 public:
@@ -538,6 +689,21 @@ void PgE2eeDirectory::register_device(const core::UserId& user, const core::Devi
 void PgE2eeDirectory::deregister_device(const core::UserId& user, const core::DeviceId& device,
                                         E2eeCallback<void> done) {
     impl_->pool().submit(std::make_unique<DeregisterDevice>(user, device, std::move(done)));
+}
+
+void PgE2eeDirectory::list_devices(const core::UserId& user,
+                                   E2eeCallback<std::vector<DeviceEntry>> done) {
+    impl_->pool().submit(std::make_unique<ListDevices>(user, std::move(done)));
+}
+
+void PgE2eeDirectory::publish_last_resort(const core::UserId& user, const core::DeviceId& device,
+                                          KeyPackageBytes package, E2eeCallback<void> done) {
+    if (auto checked = core::ports::check_key_package(package); !checked) {
+        impl_->refuse(std::move(done), checked.error());
+        return;
+    }
+    impl_->pool().submit(
+        std::make_unique<PublishLastResort>(user, device, std::move(package), std::move(done)));
 }
 
 void PgE2eeDirectory::publish_key_packages(const core::UserId& user, const core::DeviceId& device,

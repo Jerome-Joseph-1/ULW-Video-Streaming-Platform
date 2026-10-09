@@ -118,6 +118,19 @@ protected:
                                                       std::move(done));
         });
     }
+    core::ports::E2eeResult<void> publish_last_resort(const core::UserId& user,
+                                                      const core::DeviceId& device,
+                                                      core::ports::KeyPackageBytes package) {
+        return call<void>([&](auto done) {
+            harness_->delivery().publish_last_resort(user, device, std::move(package),
+                                                     std::move(done));
+        });
+    }
+    core::ports::E2eeResult<std::vector<core::ports::DeviceEntry>>
+    devices_of(const core::UserId& user) {
+        return call<std::vector<core::ports::DeviceEntry>>(
+            [&](auto done) { harness_->registry().list_devices(user, std::move(done)); });
+    }
     core::ports::E2eeResult<core::ports::FetchedKeyPackage> fetch(const core::UserId& user,
                                                                   const core::DeviceId& device) {
         return call<core::ports::FetchedKeyPackage>([&](auto done) {
