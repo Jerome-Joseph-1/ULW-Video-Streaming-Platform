@@ -22,4 +22,7 @@ __pycache__/
 /diagnostics/
 /tests/call/.whipsink/
 /tools/security/.tools/
+# The self-hosted runners' per-job ccache and cargo home (.github/actions/setup).
+/.ccache/
+/.cargo-home/
 .venv-callcap/

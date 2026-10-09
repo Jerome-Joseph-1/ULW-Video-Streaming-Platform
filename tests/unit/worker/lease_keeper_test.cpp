@@ -103,8 +103,9 @@ TEST(LeaseKeeper, AProgressWriteMatchingNoRowAlsoAbandonsTheJob) {
     LeaseKeeper keeper(queue, logs.log, node(), kLease,
                        {.heartbeat = std::chrono::hours(1), .progress = milliseconds(1)}, abandon);
     keeper.report(10);
-    EXPECT_TRUE(
-        journal.wait_for([](const std::string& e) { return e == "lease progress 10"; }, kPatience));
+    // The keeper's first tick may come before the report and write 0: either write is refused.
+    EXPECT_TRUE(journal.wait_for(
+        [](const std::string& e) { return e.starts_with("lease progress "); }, kPatience));
     std::mutex m;
     std::condition_variable_any cv;
     std::unique_lock lock(m);
