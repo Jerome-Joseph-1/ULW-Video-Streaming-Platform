@@ -212,12 +212,30 @@ std::string_view state_name(core::VideoState state) noexcept {
     return "unknown";
 }
 
+std::string_view stage_name(core::TranscodeStage stage) noexcept {
+    switch (stage) {
+    case core::TranscodeStage::Queued:
+        return "queued";
+    case core::TranscodeStage::Transcoding:
+        return "transcoding";
+    }
+    return "unknown";
+}
+
 std::string video_json(const core::VideoRecord& video, core::VideoAccess access) {
     std::string json = R"({"id":")" + video.id.to_string() + R"(","title":)";
     core::json::append_string(json, video.title);
     json += std::format(R"(,"state":"{}","version":{},"duration_ms":)", state_name(video.state),
                         video.version);
     json += video.duration ? std::to_string(video.duration->count()) : "null";
+    // Whoever may see the video may see how far along it is (ADR-0101).
+    json += R"(,"progress":)";
+    if (video.state == core::VideoState::Processing && video.progress) {
+        json += std::format(R"({{"stage":"{}","percent":{}}})", stage_name(video.progress->stage),
+                            video.progress->percent);
+    } else {
+        json += "null";
+    }
     if (access == core::VideoAccess::Owner) {
         // Only a failed video has one, and it is written for its owner (the worker's
         // public_reason, the reaper's "upload expired"); the details stay in the logs.

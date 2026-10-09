@@ -467,12 +467,51 @@ TEST_F(JobRunnerTest, ProgressReachesTheQueueFromTheKeepersSession) {
     intervals.progress = std::chrono::milliseconds(1);
     bool seen = false;
     transcoder.during_run = [&](core::ports::ITranscodeProgress& progress, const std::stop_token&) {
+        // A quarter of the 8 s source encoded is a quarter of the encode's 90.
         progress.on_progress(core::Millis{2000});
-        seen = journal.wait_for([](const std::string& e) { return e == "lease progress 25"; },
+        seen = journal.wait_for([](const std::string& e) { return e == "lease progress 22"; },
                                 std::chrono::seconds(10));
     };
     EXPECT_EQ(run(), JobOutcome::Done);
     EXPECT_TRUE(seen);
+}
+
+// The encode reports no more than 90, however far past the probed duration ffmpeg gets.
+TEST_F(JobRunnerTest, TheEncodeStopsShortOfThePublish) {
+    intervals.progress = std::chrono::milliseconds(1);
+    bool seen = false;
+    transcoder.during_run = [&](core::ports::ITranscodeProgress& progress, const std::stop_token&) {
+        progress.on_progress(core::Millis{20'000});
+        seen = journal.wait_for([](const std::string& e) { return e == "lease progress 90"; },
+                                std::chrono::seconds(10));
+    };
+    EXPECT_EQ(run(), JobOutcome::Done);
+    EXPECT_TRUE(seen);
+}
+
+// Publishing moves it from 90 to 99 a file at a time; only the finish, which makes the video
+// ready, completes it.
+TEST_F(JobRunnerTest, PublishingTakesTheProgressFrom90To99) {
+    intervals.progress = std::chrono::milliseconds(1);
+    std::vector<bool> seen;
+    transfer.after_upload = [&](const std::string& key) {
+        // The output is nine files; the master is the last, after eight are up.
+        std::string expected;
+        if (key == kPrefix + "720p/init_0.mp4") {
+            expected = "lease progress 90";
+        } else if (key == kPrefix + "master.m3u8") {
+            expected = "lease progress 98";
+        } else {
+            return;
+        }
+        seen.push_back(journal.wait_for([&](const std::string& e) { return e == expected; },
+                                        std::chrono::seconds(10)));
+    };
+    EXPECT_EQ(run(), JobOutcome::Done);
+    EXPECT_EQ(seen, (std::vector<bool>{true, true}));
+    for (const std::string& e : journal.events()) {
+        EXPECT_NE(e, "lease progress 100");
+    }
 }
 
 TEST(Disposition, FollowsTheExitCodeRules) {

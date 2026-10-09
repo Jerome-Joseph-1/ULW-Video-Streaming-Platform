@@ -103,6 +103,7 @@ TEST_P(GatewayPlayback, AFailedVideoTellsItsOwnerWhy) {
     ASSERT_EQ(r->status, 200) << r->body;
     EXPECT_EQ(r->body, R"({"id":")" + std::string(kVideo) +
                            R"(","title":"trip","state":"failed","version":3,"duration_ms":null,)"
+                           R"("progress":null,)"
                            R"("error_reason":"the file could not be decoded as \"video\"",)"
                            R"("visibility":"private"})");
 
@@ -113,7 +114,21 @@ TEST_P(GatewayPlayback, AFailedVideoTellsItsOwnerWhy) {
     ASSERT_EQ(ready->status, 200) << ready->body;
     EXPECT_EQ(ready->body, R"({"id":")" + std::string(kVideo) +
                                R"(","title":"trip","state":"ready","version":3,"duration_ms":5000,)"
-                               R"("visibility":"private"})");
+                               R"("progress":null,"visibility":"private"})");
+}
+
+// ADR-0101: a processing video says how far along its transcode is; the memory catalog's jobs
+// wait for a worker that never comes, so it is queued.
+TEST_P(GatewayPlayback, AProcessingVideoTellsHowFarAlongItIs) {
+    GatewayUnderTest gw(options());
+    gw.put_video(video(core::VideoState::Processing));
+    HttpClient c(gw.endpoint());
+    const auto r = c.request("GET", "/api/v1/videos/" + std::string(kVideo), kAlice);
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    EXPECT_NE(r->body.find(R"("state":"processing")"), std::string::npos) << r->body;
+    EXPECT_NE(r->body.find(R"("progress":{"stage":"queued","percent":0})"), std::string::npos)
+        << r->body;
 }
 
 TEST_P(GatewayPlayback, MasterRoutesEachRenditionBackThroughTheGateway) {

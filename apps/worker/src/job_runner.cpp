@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <format>
@@ -105,6 +106,12 @@ struct RequestStop {
     void operator()() const noexcept { source->request_stop(); }
 };
 
+// The job's percent as clients see it (videos-and-playback.md#progress): the encode takes it to
+// kEncodedPercent, publishing the output to kPublishedPercent, and only the finish, which makes
+// the video ready, completes it. A client never sees 100 while the video cannot play yet.
+constexpr std::uint8_t kEncodedPercent = 90;
+constexpr std::uint8_t kPublishedPercent = 99;
+
 class KeeperProgress final : public core::ports::ITranscodeProgress {
 public:
     KeeperProgress(LeaseKeeper& keeper, core::Millis duration) noexcept
@@ -112,7 +119,8 @@ public:
 
     void on_progress(core::Millis encoded) noexcept override {
         const auto percent = std::clamp<core::Millis::rep>(
-            encoded.count() * 100 / std::max<core::Millis::rep>(duration_.count(), 1), 0, 100);
+            encoded.count() * kEncodedPercent / std::max<core::Millis::rep>(duration_.count(), 1),
+            0, kEncodedPercent);
         keeper_.report(static_cast<std::uint8_t>(percent));
     }
 
@@ -411,6 +419,11 @@ private:
         if (auto r = deps_.store.upload(file, *parsed, content_type(kind)); !r) {
             return std::unexpected(key + ": " + std::string(core::ports::to_string(r.error())));
         }
+        ++published_;
+        constexpr auto kShare = static_cast<std::size_t>(kPublishedPercent - kEncodedPercent);
+        const std::size_t share =
+            std::min(published_, to_publish_) * kShare / std::max<std::size_t>(to_publish_, 1);
+        keeper_.report(static_cast<std::uint8_t>(kEncodedPercent + share));
         return {};
     }
 
@@ -455,6 +468,16 @@ private:
     // everything it names, and the master, written last, is the commit point.
     std::expected<std::vector<core::ports::Rendition>, std::string>
     publish(const fs::path& out, std::span<const core::Rung> ladder, bool has_audio) {
+        // Every file under `out` is uploaded once, so their count is the publish's length.
+        std::error_code ec;
+        to_publish_ = 0;
+        published_ = 0;
+        for (const auto& entry : fs::recursive_directory_iterator(out, ec)) {
+            if (entry.is_regular_file(ec)) {
+                ++to_publish_;
+            }
+        }
+        keeper_.report(kEncodedPercent);
         for (const core::Rung& rung : ladder) {
             if (auto r = publish_segments(out / rung.name, rung.name); !r) {
                 return std::unexpected(r.error());
@@ -484,6 +507,9 @@ private:
     const core::ports::ClaimedJob& job_;
     Metrics metrics_;
     bool rerun_ = false;
+    // Files of the output uploaded so far, of how many, for the progress publishing reports.
+    std::size_t published_ = 0;
+    std::size_t to_publish_ = 0;
     std::stop_source abandon_;
     LeaseKeeper keeper_;
     std::stop_callback<RequestStop> on_shutdown_;
