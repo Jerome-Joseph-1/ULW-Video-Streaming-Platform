@@ -47,9 +47,9 @@ jobs:
     # package of that name to push).
     if: github.repository == 'Jerome-Joseph-1/ULW-Video-Streaming-Platform' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    # The build and gates take most of an hour; the rest is waiting on ci, whose longest job
-    # may take 150 minutes.
-    timeout-minutes: 240
+    # The build and gates take most of an hour; the rest is waiting on ci, which takes four hours
+    # or more on the self-hosted host. 355 is just under a hosted job's six-hour limit.
+    timeout-minutes: 355
     permissions:
       contents: read
       actions: read # ci's runs for the commit, the gate before pushing
@@ -151,7 +151,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.commit.outputs.sha }}
         run: |
-          deadline=$((SECONDS + 170 * 60))
+          deadline=$((SECONDS + 285 * 60))
           while :; do
             runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&per_page=50" \
               --jq '[.workflow_runs[] | {status, conclusion}]')
