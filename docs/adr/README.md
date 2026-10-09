@@ -105,3 +105,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0099](0099-releases-are-version-tags-on-published-images.md) | A release is a version tag on a commit and images already published from main | Accepted |
 | [0100](0100-the-operators-backend-controls-vod.md) | The operator's backend controls VOD: who uploads by a claim of the user's token, a video deleted at once in the catalog and purged by the reaper, and a service API to share, take down and list | Accepted |
 | [0101](0101-transcode-progress-on-the-video-object.md) | A processing video's transcode progress is a field of the video object, read from its job on every request | Accepted |
+| [0102](0102-the-worker-publishes-from-a-pool-on-kept-connections.md) | The worker publishes segments from a bounded pool of threads, each keeping one connection to the store | Accepted |

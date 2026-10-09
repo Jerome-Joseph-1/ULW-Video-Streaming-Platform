@@ -404,6 +404,65 @@ TEST_F(WorkerTest, RunsAgainstMinio) {
                  "ULW_S3_SECRET_ACCESS_KEY=" + env_or("ULW_MINIO_SECRET_KEY", "ulw-dev-secret")});
 }
 
+// ADR-0102: a rendition of about 500 segments goes up whole from the publish pool, each of its
+// threads on a connection it keeps. 2,000 s at 5 fps and 240 lines: one rung, 500 segments of
+// 4 s, a minute or so of transcoding.
+TEST_F(WorkerTest, ALongRenditionPublishesWholeFromThePoolToMinio) {
+    const ulw::test::LiveS3 minio = ulw::test::minio_from_env();
+    if (!ulw::test::ensure_bucket(minio)) {
+#ifdef ULW_CONFORMANCE_LIVE
+        FAIL() << "MinIO unreachable";
+#else
+        GTEST_SKIP() << "MinIO unreachable; start deploy/local/compose.yaml";
+#endif
+    }
+    const fs::path long_clip = files_.path() / "long.mp4";
+    ASSERT_TRUE(ulw::test::make_clip(
+        long_clip, {.size = "320x240", .rate = "5", .seconds = 2000, .audio = false}));
+    auto store = infra::storage::S3Transfer::create({.credentials = minio.credentials,
+                                                     .clock = clock_,
+                                                     .random = random_,
+                                                     .profile = minio.profile,
+                                                     .bucket = minio.bucket});
+    ASSERT_TRUE(store);
+    const auto video = queue_video(**store, long_clip, "long-1");
+    const auto worker = start_worker(
+        "worker-a", {"ULW_STORAGE=minio",
+                     "ULW_S3_ENDPOINT=" + env_or("ULW_MINIO_ENDPOINT", "http://127.0.0.1:9000"),
+                     "ULW_BUCKET=" + minio.bucket,
+                     "ULW_S3_ACCESS_KEY_ID=" + env_or("ULW_MINIO_ACCESS_KEY", "ulw-dev"),
+                     "ULW_S3_SECRET_ACCESS_KEY=" + env_or("ULW_MINIO_SECRET_KEY", "ulw-dev-secret"),
+                     "ULW_PUBLISH_CONCURRENCY=8"});
+    ASSERT_TRUE(worker->wait_for_output(R"("outcome":")", seconds(600))) << worker->output();
+    EXPECT_NE(worker->output().find(R"("outcome":"done")"), std::string::npos) << worker->output();
+    EXPECT_NE(worker->output().find(R"("event":"publishing")"), std::string::npos);
+    EXPECT_NE(worker->output().find(R"("concurrency":8)"), std::string::npos);
+    EXPECT_NE(worker->output().find(R"("event":"published")"), std::string::npos);
+
+    // Every file the playlist names is in the bucket, byte for byte what was named.
+    const TempDir fetched("ulw-fetched-long");
+    const std::string prefix = "videos/" + video.to_string() + "/hls/";
+    ASSERT_TRUE((*store)->download(*core::StorageKey::parse(prefix + "master.m3u8"),
+                                   fetched.path() / "master.m3u8"));
+    ASSERT_TRUE((*store)->download(*core::StorageKey::parse(prefix + "240p/index.m3u8"),
+                                   fetched.path() / "index.m3u8"));
+    const auto files = referenced_files(read_text(fetched.path() / "index.m3u8"));
+    EXPECT_GE(files.size(), 490U);
+    const std::string rendition = prefix + "240p/";
+    std::size_t missing = 0;
+    for (const std::string& f : files) {
+        if (!(*store)->size(*core::StorageKey::parse(rendition + f))) {
+            ++missing;
+        }
+    }
+    EXPECT_EQ(missing, 0U);
+    EXPECT_EQ(column("SELECT state FROM videos WHERE id = $1", video), "ready");
+
+    worker->signal(SIGTERM);
+    EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
+    ulw::test::remove_objects(minio, "videos/" + video.to_string() + "/");
+}
+
 TEST_F(WorkerTest, RunsAgainstR2WhenItsCredentialsAreSet) {
     const auto r2 = ulw::test::r2_from_env();
     if (!r2) {

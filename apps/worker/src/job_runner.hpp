@@ -68,6 +68,9 @@ struct JobSettings {
     std::filesystem::path scratch;
     core::NodeId node;
     LeaseKeeper::Intervals lease;
+    // Segments uploaded at once while publishing (ULW_PUBLISH_CONCURRENCY, ADR-0102); 1 is the
+    // sequential upload, in order.
+    unsigned publish_concurrency = 1;
 };
 
 // One claimed job, start to finish: workspace, download, probe, transcode, verify, publish,

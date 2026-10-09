@@ -32,6 +32,7 @@ constexpr std::array kSettings{
     ops::Setting{.env = "ULW_FFMPEG", .key = "ffmpeg.ffmpeg"},
     ops::Setting{.env = "ULW_FFPROBE", .key = "ffmpeg.ffprobe"},
     ops::Setting{.env = "ULW_FFMPEG_THREADS", .key = "ffmpeg.threads"},
+    ops::Setting{.env = "ULW_PUBLISH_CONCURRENCY", .key = "publish.concurrency"},
     ops::Setting{.env = "PATH", .key = ""},
     ops::Setting{.env = "ULW_LOG_LEVEL", .key = "log.level"},
     ops::Setting{.env = "ULW_RUN_AS_USER", .key = "process.user"},
@@ -54,6 +55,10 @@ constexpr std::string_view kDefaultPath = "/usr/local/bin:/usr/bin:/bin";
 constexpr unsigned kDefaultThreads = 4;
 // Past this, x264's frame threads stop scaling and only multiply the lookahead memory.
 constexpr unsigned kMaxThreads = 64;
+// Segments uploaded at once while publishing (ADR-0102): 8 keeps a worker far inside R2's
+// request limits while the uplink, not round trips, bounds a long video's publish.
+constexpr unsigned kDefaultPublishConcurrency = 8;
+constexpr unsigned kMaxPublishConcurrency = 32;
 // ULW_FFMPEG and ULW_FFPROBE named the programs once. The sandbox helper now runs only the ffmpeg
 // and ffprobe it was built with (docs/adr/0089), so a value given for either is refused rather
 // than ignored: the operator meant some other ffmpeg, and would not get it.
@@ -220,6 +225,14 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
         }
         threads = *value;
     }
+    unsigned publish = kDefaultPublishConcurrency;
+    if (const auto text = lookup(env, "ULW_PUBLISH_CONCURRENCY")) {
+        const auto value = core::parse_integer<unsigned>(*text);
+        if (!value || *value < 1 || *value > kMaxPublishConcurrency) {
+            return error("ULW_PUBLISH_CONCURRENCY", "not an integer in 1..32");
+        }
+        publish = *value;
+    }
     return Config{.database_url = std::move(*database),
                   .storage = storage->backend,
                   .storage_location = std::move(storage->location),
@@ -231,6 +244,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .sandbox = std::move(*sandbox),
                   .search_path = lookup(env, "PATH").value_or(std::string(kDefaultPath)),
                   .ffmpeg_threads = threads,
+                  .publish_concurrency = publish,
                   .log_level = level,
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
                   .allow_root = *allow_root};
@@ -249,7 +263,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         }
         return {"r2", "ULW_R2_ACCOUNT_ID"};
     }();
-    const std::array<std::pair<std::string_view, std::string>, 12> values{{
+    const std::array<std::pair<std::string_view, std::string>, 13> values{{
         {"ULW_DATABASE_URL", config.database_url},
         {"ULW_STORAGE", std::string(storage)},
         {location_variable, config.storage_location},
@@ -258,6 +272,7 @@ void log_effective(const Config& config, const ops::Settings& layers, ops::Logge
         {"ULW_SCRATCH_DIR", config.scratch.parent_path().string()},
         {"ULW_SANDBOX_BIN", config.sandbox.string()},
         {"ULW_FFMPEG_THREADS", std::to_string(config.ffmpeg_threads)},
+        {"ULW_PUBLISH_CONCURRENCY", std::to_string(config.publish_concurrency)},
         {"PATH", config.search_path},
         {"ULW_LOG_LEVEL", std::string(ops::to_string(config.log_level))},
         {"ULW_RUN_AS_USER", config.run_as_user},

@@ -89,6 +89,31 @@ public:
     [[nodiscard]] virtual bool write_download(std::span<const std::byte> bytes) noexcept = 0;
 };
 
+// Blocking requests from one thread on one handle kept between them, so libcurl's connection
+// cache keeps the connection to a host, TLS session included, open for the next request:
+// consecutive requests skip the TCP and TLS handshakes. Each request is configured afresh, so
+// it behaves as perform() and perform_upload() do, but for the connection it may reuse. Not
+// safe from two threads at once: a thread that wants one keeps its own (ADR-0102).
+class Session {
+public:
+    Session() noexcept = default;
+    ~Session();
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
+    Session(Session&&) = delete;
+    Session& operator=(Session&&) = delete;
+
+    [[nodiscard]] Result perform(const Request& request, std::span<const std::byte> body = {});
+    [[nodiscard]] Result perform_upload(const Request& request, std::uint64_t length,
+                                        IUploadSource& source);
+
+private:
+    // libcurl's CURL, which is void: created on first use.
+    [[nodiscard]] void* handle() noexcept;
+
+    void* easy_ = nullptr;
+};
+
 // perform(), with a 2xx body of any size handed to `sink` instead of kept in Response::body.
 // An error body is still kept there, bounded, so the caller can tell why.
 [[nodiscard]] Result perform_download(const Request& request, IDownloadSink& sink);

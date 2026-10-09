@@ -24,6 +24,12 @@ void LeaseKeeper::report(std::uint8_t percent) noexcept {
     percent_.store(percent);
 }
 
+void LeaseKeeper::raise(std::uint8_t percent) noexcept {
+    std::uint8_t current = percent_.load();
+    while (current < percent && !percent_.compare_exchange_weak(current, percent)) {
+    }
+}
+
 void LeaseKeeper::lose(std::string_view call) {
     lost_.store(true);
     abandon_.request_stop();

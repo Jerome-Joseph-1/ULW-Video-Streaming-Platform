@@ -43,6 +43,14 @@ Failed local_failure() noexcept {
     return {.error = StorageError::Permanent, .retry_after = std::nullopt};
 }
 
+// Uploads keep one connection per thread for as long as the thread lives, so a worker
+// publishing thousands of segments negotiates TLS once per thread rather than once per file
+// (ADR-0102). Each attempt is still signed afresh, so a retry behaves as before.
+curl::Session& upload_session() {
+    thread_local curl::Session session;
+    return session;
+}
+
 class FileSink final : public curl::IDownloadSink {
 public:
     explicit FileSink(int fd) noexcept : fd_(fd) {}
@@ -410,7 +418,7 @@ std::expected<void, StorageError> S3Transfer::put(const std::filesystem::path& s
     return control_->retrying<void>([&]() -> std::expected<void, Failed> {
         FileSource body(fd.get());
         const auto request = endpoint_->sign(curl::Method::Put, target, headers, *hash, 0);
-        auto response = curl::perform_upload(request, length, body);
+        auto response = upload_session().perform_upload(request, length, body);
         if (!response) {
             return std::unexpected(s3::failed(response.error()));
         }
