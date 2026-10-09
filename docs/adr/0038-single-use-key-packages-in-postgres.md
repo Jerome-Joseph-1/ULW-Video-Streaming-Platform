@@ -1,6 +1,6 @@
 # 0038. Single-use key packages in Postgres, with a replenish signal
 
-Status: Accepted
+Status: Accepted, amended by 0101 (served on the chat socket; a last-resort package per device)
 Date: 2026-09-29
 
 ## Context

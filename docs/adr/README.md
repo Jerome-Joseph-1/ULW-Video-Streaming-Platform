@@ -19,7 +19,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0013](0013-webrtc-ingress-through-stunner.md) | WebRTC media ingresses through STUNner | Accepted |
 | [0014](0014-live-viewers-get-hls-from-r2.md) | Live-stream viewers get HLS from R2, not WebRTC fan-out | Accepted |
 | [0015](0015-single-owner-rooms-with-fenced-writes.md) | One owning node per room, with generation-fenced writes | Accepted |
-| [0016](0016-end-to-end-encryption-for-private-chat-only.md) | End-to-end encryption for private chat only | Accepted |
+| [0016](0016-end-to-end-encryption-for-private-chat-only.md) | End-to-end encryption for private chat only | Accepted, amended by 0101 |
 | [0017](0017-sans-io-protocol-codecs.md) | Protocol codecs are sans-IO | Accepted |
 | [0018](0018-identity-from-askedin-jwts.md) | Identity is borrowed from Askedin | Accepted, amended by 0088 |
 | [0019](0019-chat-in-its-own-binary.md) | Chat runs in its own binary | Accepted |
@@ -41,7 +41,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0035](0035-node-channel-over-framed-tcp.md) | The node channel is framed TCP on the reactor | Accepted |
 | [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
 | [0037](0037-turn-credentials-minted-by-the-sfu.md) | STUNner runs in front of LiveKit with time-windowed credentials the SFU mints | Accepted, amended by 0088 |
-| [0038](0038-single-use-key-packages-in-postgres.md) | Single-use key packages in Postgres, with a replenish signal | Accepted |
+| [0038](0038-single-use-key-packages-in-postgres.md) | Single-use key packages in Postgres, with a replenish signal | Accepted, amended by 0101 |
 | [0039](0039-json-logs-metrics-and-readiness-off-the-loop.md) | JSON logs, metrics and readiness, none of them waiting on the loop | Accepted |
 | [0040](0040-layered-configuration-with-a-toml-subset.md) | Layered configuration from a TOML subset, the environment and flags | Accepted |
 | [0041](0041-a-job-result-the-queue-refuses-fails-the-job.md) | A job result the queue refuses fails the job | Accepted |
@@ -101,6 +101,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0095](0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md) | Group calls from the room's owner, with a media generation moved by its fenced write | Accepted |
 | [0096](0096-member-lists-changed-by-their-users.md) | Member lists are changed under the room's lock, by their users where the operator allows it and by the operator's backend; presence is seen only within shared chats | Accepted |
 | [0097](0097-videos-shared-by-visibility-and-service-grants.md) | Videos are shared by a visibility their owner sets and by grants the operator's backend makes, checked against the catalog on every read | Accepted |
-| [0098](0098-the-browser-runs-openmls-as-webassembly.md) | The browser runs the bridge's OpenMLS as WebAssembly, built in a pinned image | Accepted |
+| [0098](0098-the-browser-runs-openmls-as-webassembly.md) | The browser runs the bridge's OpenMLS as WebAssembly, built in a pinned image | Accepted, amended by 0101 |
 | [0099](0099-releases-are-version-tags-on-published-images.md) | A release is a version tag on a commit and images already published from main | Accepted |
 | [0100](0100-the-operators-backend-controls-vod.md) | The operator's backend controls VOD: who uploads by a claim of the user's token, a video deleted at once in the catalog and purged by the reaper, and a service API to share, take down and list | Accepted |
+| [0101](0101-the-key-directory-is-served-and-every-device-is-a-member.md) | The key directory is served on the chat socket, a device keeps a last-resort package, and every device is its own member | Accepted |

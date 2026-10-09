@@ -3,6 +3,30 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-09: end-to-end encryption is Stable, with a key directory and every device a member
+
+<!-- apps/chat/src/key_directory.cpp, apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, infra/postgres/src/e2ee_directory.cpp, migrations/0018_e2ee_last_resort.sql, clients/web-mls/js/mls-room.js, docs/integration/e2ee.md, docs/adr/0101-the-key-directory-is-served-and-every-device-is-a-member.md -->
+
+Additive (versioning rule 1): new message `type`s and `error` reasons on the chat socket, a new
+migration, and new metrics. Nothing a client sends today is answered differently.
+
+| Before | Now |
+|---|---|
+| [e2ee.md](e2ee.md) was a draft, and nothing served the key directory | Stable. The chat socket serves the directory: `register_device`, `publish_key_packages`, `retire_device`, `devices` and `claim_key_packages`, answered `device_registered`, `key_packages_published`, `device_retired`, `devices` and `key_packages`, and `replenish` sent unasked ([Key directory](e2ee.md#key-directory)) |
+| A device out of key packages could not be invited | Each device keeps a last-resort package, handed out (and kept) once its single-use ones are gone |
+| Each user had one device in a group, by convention; nothing found a user's other devices | Every device is its own member, `<user>/<device id>`: the group's adder lists every member's devices, claims a package of each device the group lacks and adds them in one commit, and removes devices retired or users no longer listed ([Multi-device](e2ee.md#multi-device)) |
+| The browser client posted key packages to the room | It publishes them to the directory (`MlsDirectory`) and adds devices with `reconcile(users)`; key packages posted to the room are still accepted |
+| | New `error` reasons for these commands: `unknown_device`, `device_retired`, `device_limit`, `key_packages_full`, and `not_shared`, `rate_limited`, `busy`, `too_large` as elsewhere |
+
+What to do:
+
+- **Clients:** mint a device id per device and use `<user>/<device id>` as its MLS identity;
+  register and top up on every connect; have the first member's device call `reconcile` with
+  the member list. Pages built on `mls-room.js` without a directory keep working unchanged.
+- **Operators:** migration 0018 must run after 0017 (RUNBOOK); it only creates an empty table.
+  Deploy the gateway (which runs migrations) before chat. Each chat node opens two more database
+  sessions (`application_name` `ulw-e2ee`). New `e2ee_*` metrics ([operator-contract.md](operator-contract.md)).
+
 ## 2026-10-08: the operator's backend controls VOD; owners delete videos
 
 <!-- apps/gateway/src/connection.cpp (start_create, start_delete, start_service_route), apps/gateway/src/video_access.cpp (video_query, videos_json), infra/auth/src/service_claim.cpp (read_uploader_claim), infra/postgres/src/upload_catalog.cpp (kDeleteVideo, kListVideos), apps/reaper/src/reaper.cpp (purge_videos), migrations/0017_video_purges.sql, docs/adr/0100-the-operators-backend-controls-vod.md -->
