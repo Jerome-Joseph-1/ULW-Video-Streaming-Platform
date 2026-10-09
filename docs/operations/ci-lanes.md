@@ -48,8 +48,8 @@ that pull request (sonar-project.properties, ADR-0079, ADR-0086).
   - `changes`: on a pull request, `git diff --name-only --no-renames origin/<base>...HEAD`.
     `code` is false when every changed path (both sides of a rename) is under `docs/`,
     `deploy/` or `.github/`, or ends in `.md`; `deploy` is whether any path is under `deploy/`;
-    `web-mls` is whether any is under `clients/web-mls/`. Everything else, `demo/` and
-    `clients/web-mls/` included, is code: the SonarQube scan in `coverage` analyses them.
+    `web-mls` is whether any is under `clients/web-mls/`. Everything else, `clients/web-mls/`
+    included, is code: the SonarQube scan in `coverage` analyses them.
   - `build-test (gcc/ci, unit)`: the ci preset with gcc, the unit label, then the binary
     hardening check and the privilege-drop tests as root, as the full lane's gcc job runs them.
     Only when `code`.
