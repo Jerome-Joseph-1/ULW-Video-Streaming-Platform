@@ -3,8 +3,8 @@
 > **Stable.** The WebSocket envelope (messages, acks, resume, history, member lists, the
 > [commands that change them](#changing-member-lists) and [presence](#presence)) and
 > [the service API](#the-service-api) are kept under the compatibility rules in
-> [versioning.md](versioning.md). End-to-end encrypted rooms follow [e2ee.md](e2ee.md), which is
-> still a draft.
+> [versioning.md](versioning.md). End-to-end encrypted rooms, and the key directory's commands
+> on this socket, follow [e2ee.md](e2ee.md), which is Stable too.
 
 Chat is its own service, `chat_server`, separate from the video gateway (ADR-0019). Clients hold
 one WebSocket to it and send JSON messages in text frames.
@@ -37,7 +37,7 @@ listed origin. Native apps send the bearer header.
 
 ## Messages
 
-<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/chat_service.cpp, docs/adr/0043-chat-service-policy-between-edge-and-rooms.md, docs/adr/0054-messages-stored-with-their-seq.md -->
+<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/chat_service.cpp, apps/chat/src/key_directory.cpp, docs/adr/0043-chat-service-policy-between-edge-and-rooms.md, docs/adr/0054-messages-stored-with-their-seq.md -->
 
 Every message is one JSON object in one text frame. Unknown `type`s and unknown fields are
 refused with an `error`, not ignored. Room ids are canonical lowercase UUIDs.
@@ -54,6 +54,7 @@ Client to server:
 | `call_leave` | `room`, `call` | Leave a group call, which goes on for the others. See [calls.md](calls.md#group-calls). |
 | `call_expel` | `room`, `call`, `user` | A group call's caller puts `user` out of the call. See [calls.md](calls.md#group-calls). |
 | `open_direct`, `create_group`, `add_members`, `remove_member`, `leave`, `rooms`, `members` | See [Changing member lists](#changing-member-lists) | A user's direct and group chats, and who is in them. |
+| `register_device`, `retire_device`, `publish_key_packages`, `devices`, `claim_key_packages` | See [e2ee.md](e2ee.md#key-directory) | The MLS key directory: a user's devices and their key packages. |
 
 Server to client:
 
@@ -66,6 +67,7 @@ Server to client:
 | `ticket` | `room`, `url`, `token`, `expires_at`, `call` when the ticket belongs to a call | The answer to `call`: connect LiveKit's SDK to `url` with `token` before `expires_at` (Unix seconds). See [calls.md](calls.md). |
 | `call_ringing`, `call_answered`, `call_declined`, `call_cancelled`, `call_missed`, `call_ended`, `call_left`, `call_moved` | `room`, `call`, `from`; `expires_at` (ringing), `by` (who did it, when someone did), `expelled` (moved) | Unasked, on every socket of the call's members, joined to the room or not: a call rings, or how it went. See [calls.md](calls.md#ringing) and [calls.md](calls.md#group-calls). |
 | `direct`, `group`, `added`, `removed`, `left`, `rooms`, `members`, `member` | See [Changing member lists](#changing-member-lists) | Answers to the member-list commands, and `member`, sent unasked when a list you are on, or of a room you joined, changes. |
+| `device_registered`, `device_retired`, `key_packages_published`, `devices`, `key_packages`, `replenish` | See [e2ee.md](e2ee.md#key-directory) | Answers to the key directory's commands, and `replenish`, sent unasked to a device's connections when it should publish more. |
 | `error` | `reason`, plus `room` and `id` when known, `retry_after_ms` for `rate_limited` and for a call's `unavailable` | A command failed. |
 
 ```json
@@ -305,6 +307,7 @@ As `user-1`:
 | `unavailable` | The room's owner or the store could not be reached, or the server could not take the command just then; also sent unasked, with `room`, when the server could not confirm your membership of a room you are in (below), which you then no longer receive | Retry; resend a `send` with the same `id`; `join` a room it was sent unasked for again |
 | `fenced` | The room changed owners while the write was in flight | Retry with the same `id` |
 | `conflict` | This `id` was already used for a different message in the room | Send it under a new `id` |
+| `unknown_device`, `device_retired`, `device_limit`, `key_packages_full` | A key directory command was refused; see [e2ee.md](e2ee.md#key-directory) | As there |
 
 ## Limits
 
@@ -325,6 +328,7 @@ As `user-1`:
 | Resume and history output | 128 KiB queued behind a connection's unread output | Shorter page, or `busy` |
 | History pages and resumes | Counted with joins: burst 64, then 1/s per user | `error` `busy` |
 | Member-list changes | Burst 20, then 1 each 3 s per user across the user's connections on a node | `error` `rate_limited` with `retry_after_ms` |
+| Key directory | `devices` and `claim_key_packages`: burst 120, then 2/s; `register_device`, `publish_key_packages` and `retire_device`: burst 20, then 1 each 3 s; per user across the user's connections on a node, and 8 waiting per connection ([e2ee.md](e2ee.md#key-directory)) | `error` `rate_limited` with `retry_after_ms`; `busy` |
 | `rooms` and `members` pages | Counted with joins; 1 to 100 entries each | `error` `busy` |
 | Group size | 100 members; 50 users named per `create_group` or `add_members` | `error` `too_many_members`; `malformed` |
 | Lossy delivery | Nothing new while more than 64 KiB behind; then the newest 64 missed, oldest first | Gap in seqs; fill from history |

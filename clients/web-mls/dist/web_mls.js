@@ -191,6 +191,14 @@ export class MessageInfo {
         return v1;
     }
     /**
+     * Whether a key package is a last-resort one (RFC 9420, section 16.8).
+     * @returns {boolean | undefined}
+     */
+    get lastResort() {
+        const ret = wasm.messageinfo_lastResort(this.__wbg_ptr);
+        return ret === 0xFFFFFF ? undefined : ret !== 0;
+    }
+    /**
      * `key_package`, `welcome`, `private_message`, `public_message` or `group_info`.
      * @returns {string}
      */
@@ -334,11 +342,26 @@ export class MlsClient {
         return MlsGroup.__wrap(ret[0]);
     }
     /**
-     * A fresh single-use KeyPackage as an MLSMessage: post it to the room for a member to add.
+     * A fresh single-use KeyPackage as an MLSMessage: publish it to the key directory (or,
+     * without one, post it to the room) for a member to add.
      * @returns {Uint8Array}
      */
     keyPackage() {
         const ret = wasm.mlsclient_keyPackage(this.__wbg_ptr);
+        if (ret[3]) {
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * A last-resort KeyPackage as an MLSMessage, for the key directory to hand out once the
+     * single-use ones have run out. It may be used by many welcomes, so its private key stays.
+     * @returns {Uint8Array}
+     */
+    lastResortKeyPackage() {
+        const ret = wasm.mlsclient_lastResortKeyPackage(this.__wbg_ptr);
         if (ret[3]) {
             throw takeFromExternrefTable0(ret[2]);
         }

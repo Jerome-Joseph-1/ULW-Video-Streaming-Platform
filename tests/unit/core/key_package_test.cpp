@@ -5,6 +5,7 @@
 
 namespace {
 
+using core::ports::check_key_package;
 using core::ports::check_key_package_batch;
 using core::ports::E2eeError;
 using core::ports::KeyPackageBytes;
@@ -30,6 +31,14 @@ TEST(KeyPackageBatch, RefusesAnEmptyBatchAndOneNoDeviceCouldHold) {
     EXPECT_TRUE(check_key_package_batch(full));
     const std::vector<KeyPackageBytes> over(kMaxKeyPackagesPerDevice + 1, KeyPackageBytes(300));
     EXPECT_EQ(check_key_package_batch(over).error(), E2eeError::Invalid);
+}
+
+TEST(KeyPackage, ALastResortPackageHasTheSameBounds) {
+    EXPECT_TRUE(check_key_package(KeyPackageBytes(1)));
+    EXPECT_TRUE(check_key_package(KeyPackageBytes(kMaxKeyPackageBytes)));
+    EXPECT_EQ(check_key_package(KeyPackageBytes{}).error(), E2eeError::Invalid);
+    EXPECT_EQ(check_key_package(KeyPackageBytes(kMaxKeyPackageBytes + 1)).error(),
+              E2eeError::Invalid);
 }
 
 } // namespace

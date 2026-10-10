@@ -318,6 +318,19 @@ TEST_F(RecorderTest, AStreamThatHasNotEndedHasNothingToRecord) {
     EXPECT_TRUE(catalog.rows.empty());
 }
 
+// live.md: a stream that ends with no media becomes no video. Nothing is marked either, so the
+// stream's row keeps a null video_id rather than a failure.
+TEST_F(RecorderTest, AStreamThatEndedWithNoMediaHasNothingToRecord) {
+    // Ended before any publisher came: no playlist was ever stored.
+    EXPECT_EQ(record().outcome, RecordOutcome::NothingToRecord);
+    // Ended with its playlist closed and no segment in it.
+    playlist(0, 0, [](std::uint64_t) { return 0U; });
+    EXPECT_EQ(record().outcome, RecordOutcome::NothingToRecord);
+    EXPECT_TRUE(copier.jobs.empty());
+    EXPECT_TRUE(catalog.rows.empty());
+    EXPECT_EQ(stored_videos(), 0U);
+}
+
 TEST_F(RecorderTest, AnEndBehindANewerClaimIsAStaleWritersAndNothingIsRecorded) {
     run_of(0, 0, 3);
     playlist(3, 2, [](std::uint64_t) { return 0U; });

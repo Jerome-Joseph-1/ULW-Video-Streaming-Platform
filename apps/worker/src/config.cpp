@@ -55,7 +55,7 @@ constexpr std::string_view kDefaultPath = "/usr/local/bin:/usr/bin:/bin";
 constexpr unsigned kDefaultThreads = 4;
 // Past this, x264's frame threads stop scaling and only multiply the lookahead memory.
 constexpr unsigned kMaxThreads = 64;
-// Segments uploaded at once while publishing (ADR-0102): 8 keeps a worker far inside R2's
+// Segments uploaded at once while publishing (ADR-0103): 8 keeps a worker far inside R2's
 // request limits while the uplink, not round trips, bounds a long video's publish.
 constexpr unsigned kDefaultPublishConcurrency = 8;
 constexpr unsigned kMaxPublishConcurrency = 32;

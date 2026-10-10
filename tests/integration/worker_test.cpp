@@ -404,7 +404,7 @@ TEST_F(WorkerTest, RunsAgainstMinio) {
                  "ULW_S3_SECRET_ACCESS_KEY=" + env_or("ULW_MINIO_SECRET_KEY", "ulw-dev-secret")});
 }
 
-// ADR-0102: a rendition of about 500 segments goes up whole from the publish pool, each of its
+// ADR-0103: a rendition of about 500 segments goes up whole from the publish pool, each of its
 // threads on a connection it keeps. 2,000 s at 5 fps and 240 lines: one rung, 500 segments of
 // 4 s, a minute or so of transcoding.
 TEST_F(WorkerTest, ALongRenditionPublishesWholeFromThePoolToMinio) {

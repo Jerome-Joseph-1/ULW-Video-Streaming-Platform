@@ -263,6 +263,17 @@ TEST_F(JobRunnerTest, AnOutputTheScratchSpaceCannotHoldGivesTheJobBackBeforeTran
     EXPECT_TRUE(scratch_is_empty());
 }
 
+// A source more than a third of the scratch space (a long live recording, live.md) is given
+// back before it is downloaded, with the reason a client reads once its retries run out.
+TEST_F(JobRunnerTest, ASourceTheScratchSpaceCannotHoldGivesTheJobBackBeforeDownloading) {
+    transfer.reported_size = std::uint64_t{1} << 62U;
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    EXPECT_EQ(transcoder.runs, 0);
+    EXPECT_EQ(writes(),
+              std::vector<std::string>{"queue fail retryable no scratch space for the source"});
+    EXPECT_TRUE(scratch_is_empty());
+}
+
 TEST_F(JobRunnerTest, OutputThatFailsVerificationOnAFullDiskIsRetriedNotFailed) {
     // ffmpeg exits 0 on a full disk and leaves output that cannot pass verification.
     transcoder.during_run = [this](core::ports::ITranscodeProgress&, const std::stop_token&) {
@@ -393,7 +404,7 @@ TEST_F(JobRunnerTest, ALeaseLostWhilePublishingStopsTheUploadsBeforeTheMaster) {
     EXPECT_EQ(transfer.objects().count(kPrefix + "master.m3u8"), 0U);
 }
 
-// ADR-0102: the publish pool. The fake transcoder's output is six segments (an init and two
+// ADR-0103: the publish pool. The fake transcoder's output is six segments (an init and two
 // media segments per rung), two media playlists and the master.
 const std::vector<std::string> kSegments{"720p/init_0.mp4",    "720p/seg_00000.m4s",
                                          "720p/seg_00001.m4s", "360p/init_1.mp4",

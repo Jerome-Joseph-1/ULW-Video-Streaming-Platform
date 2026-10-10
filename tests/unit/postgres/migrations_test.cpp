@@ -114,4 +114,20 @@ TEST(BundledMigrations, ThePurgeQueueMigrationTouchesNoExistingTable) {
     FAIL() << "no video_purges migration";
 }
 
+// 0018 (ADR-0102) only adds the last-resort packages' table: nothing else is altered or scanned.
+TEST(BundledMigrations, TheLastResortMigrationOnlyCreatesItsTable) {
+    for (const auto& m : bundled_migrations()) {
+        if (m.name != "e2ee_last_resort") {
+            continue;
+        }
+        const std::string_view sql{m.sql};
+        EXPECT_NE(sql.find("\nCREATE TABLE last_resort_key_packages"), std::string_view::npos);
+        EXPECT_EQ(sql.find("\nALTER"), std::string_view::npos);
+        EXPECT_EQ(sql.find("\nCREATE INDEX"), std::string_view::npos);
+        EXPECT_EQ(sql.find("\nUPDATE"), std::string_view::npos);
+        return;
+    }
+    FAIL() << "no e2ee_last_resort migration";
+}
+
 } // namespace

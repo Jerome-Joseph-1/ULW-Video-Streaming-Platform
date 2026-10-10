@@ -293,6 +293,29 @@ TEST_F(PgLiveStreamsTest, TheRecordingIsTheVideoThePackagerQueued) {
     EXPECT_EQ(found->recording, video);
 }
 
+// live.md: a stream that becomes no video answers a null video_id, whether nothing was recorded
+// at all or its recording was marked as failed.
+TEST_F(PgLiveStreamsTest, AStreamThatBecameNoVideoHasNoRecording) {
+    const auto unrecorded = create("alice");
+    ASSERT_TRUE(unrecorded);
+    ASSERT_TRUE(end(unrecorded->stream.id, LiveEnd::Owner, 1'767'225'700));
+    const auto nothing = find(unrecorded->stream.id);
+    ASSERT_TRUE(nothing);
+    EXPECT_EQ(nothing->recording, std::nullopt);
+
+    const auto failed = create("bob");
+    ASSERT_TRUE(failed);
+    ASSERT_TRUE(end(failed->stream.id, LiveEnd::Finished, 1'767'225'700));
+    auto conn = db->session();
+    ASSERT_TRUE(conn.exec(
+        "INSERT INTO live_recordings (stream_id, failure) VALUES ($1, $2)",
+        Params{}.add_text(failed->stream.id.to_string()).add_text("init_0.mp4 is missing")));
+    const auto found = find(failed->stream.id);
+    ASSERT_TRUE(found);
+    EXPECT_EQ(found->state, LiveState::Ended);
+    EXPECT_EQ(found->recording, std::nullopt);
+}
+
 TEST_F(PgLiveStreamsTest, TheUnfinishedAreListedOldestFirst) {
     const auto a = create("a", 10, 1'767'225'603);
     const auto b = create("b", 10, 1'767'225'601);

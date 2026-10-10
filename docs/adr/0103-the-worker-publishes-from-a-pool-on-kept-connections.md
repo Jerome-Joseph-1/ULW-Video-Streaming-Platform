@@ -1,4 +1,4 @@
-# 0102. The worker publishes segments from a bounded pool of threads, each keeping one connection to the store
+# 0103. The worker publishes segments from a bounded pool of threads, each keeping one connection to the store
 
 Status: Accepted
 Date: 2026-10-09

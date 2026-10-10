@@ -2,12 +2,17 @@
 // the stream ended, and the one video that becomes taken to ready by transcode_worker, all
 // separate processes on a scratch Postgres database. The M33 acceptance runs, including the
 // stream whose end is seen twice, the packager that dies mid-stream, and the workers that die
-// or come back from the dead while transcoding a recording.
+// or come back from the dead while transcoding a recording, and the stream service's own row
+// for a stream, which names the recording's video once it is queued (live.md).
 #include "core/models/ids.hpp"
+#include "core/ports/live.hpp"
 #include "infra/ffmpeg/transcoder.hpp"
 #include "infra/postgres/job_queue.hpp"
+#include "infra/postgres/live_streams.hpp"
 #include "infra/storage/fs_transfer.hpp"
 #include "infra/storage/s3_transfer.hpp"
+#include "net/offload_pool.hpp"
+#include "net/reactor_factory.hpp"
 #include "os/system_clock.hpp"
 #include "os/system_random.hpp"
 #include "os/unique_fd.hpp"
@@ -15,6 +20,7 @@
 #include "postgres_harness.hpp"
 #include "support/child_process.hpp"
 #include "support/live_s3.hpp"
+#include "support/reactor_harness.hpp"
 #include "support/temp_dir.hpp"
 
 #include <sys/syscall.h>
@@ -24,6 +30,7 @@
 #include <chrono>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -38,6 +45,11 @@
 namespace {
 
 namespace fs = std::filesystem;
+using core::ports::LiveEnd;
+using core::ports::LiveResult;
+using core::ports::LiveState;
+using core::ports::LiveStoreError;
+using core::ports::LiveStream;
 using infra::postgres::Params;
 using std::chrono::milliseconds;
 using std::chrono::seconds;
@@ -162,6 +174,9 @@ protected:
     }
 
     void TearDown() override {
+        offload_.reset();
+        streams_.reset();
+        reactor_.reset();
         if (minio_) {
             ulw::test::remove_objects(*minio_, "live/" + stream_ + "/");
             for (const std::string& video : videos()) {
@@ -371,6 +386,66 @@ protected:
         EXPECT_EQ(worker->wait_exit(kExitPatience), 0);
     }
 
+    // A stream the gateway's stream service started for the streamer, live: its row in
+    // live_streams, which GET /api/v1/live/{id} answers from, and the id the packager runs as.
+    std::optional<core::LiveStreamId> start_service_stream() {
+        auto reactor = net::make_reactor(net::ReactorKind::Epoll, clock_, 256);
+        EXPECT_TRUE(reactor) << std::strerror(reactor.error());
+        if (!reactor) {
+            return std::nullopt;
+        }
+        reactor_ = std::move(*reactor);
+        auto pool = net::OffloadPool::create(*reactor_, 1);
+        EXPECT_TRUE(pool);
+        if (!pool) {
+            return std::nullopt;
+        }
+        offload_ = std::move(*pool);
+        auto made = infra::postgres::PgLiveStreams::create(
+            *reactor_, *offload_, infra::postgres::LiveStreamsConfig{.conninfo = db_->conninfo()});
+        EXPECT_TRUE(made) << made.error();
+        if (!made) {
+            return std::nullopt;
+        }
+        streams_ = std::move(*made);
+        const auto id = core::LiveStreamId::generate(clock_, random_);
+        std::optional<LiveResult<core::ports::CreatedLiveStream>> created;
+        streams_->create({.id = id,
+                          .owner = *core::UserId::parse(kOwner),
+                          .passphrase = std::string(kPassphrase),
+                          .at = clock_.wall_now()},
+                         {.max_unfinished = 10, .per_owner_per_hour = 10},
+                         [&](auto x) noexcept { created = std::move(x); });
+        EXPECT_TRUE(wait(created));
+        std::optional<LiveResult<LiveStream>> live;
+        streams_->mark_live(id, clock_.wall_now(), [&](auto x) noexcept { live = std::move(x); });
+        EXPECT_TRUE(wait(live));
+        stream_ = id.to_string();
+        return id;
+    }
+
+    // What the stream service answers GET /api/v1/live/{id} from.
+    LiveResult<LiveStream> service_view(const core::LiveStreamId& id) {
+        std::optional<LiveResult<LiveStream>> found;
+        streams_->find(id, [&](auto x) noexcept { found = std::move(x); });
+        return wait(found);
+    }
+
+    void end_service_stream(const core::LiveStreamId& id, LiveEnd reason) {
+        std::optional<LiveResult<core::ports::EndedLiveStream>> ended;
+        streams_->end(id, reason, clock_.wall_now(),
+                      [&](auto x) noexcept { ended = std::move(x); });
+        EXPECT_TRUE(wait(ended));
+    }
+
+    template <class T> LiveResult<T> wait(std::optional<LiveResult<T>>& r) {
+        if (!ulw::test::pump_until(*reactor_, [&] { return r.has_value(); }, seconds(15))) {
+            ADD_FAILURE() << "the stream store never answered";
+            return std::unexpected(LiveStoreError::Unavailable);
+        }
+        return std::move(*r);
+    }
+
     os::SystemClock clock_;
     os::SystemRandom random_;
     std::unique_ptr<ScratchDatabase> db_;
@@ -383,6 +458,9 @@ protected:
     std::string stream_;
     std::string last_output_;
     std::vector<std::unique_ptr<TempDir>> scratch_dirs_;
+    std::unique_ptr<net::IReactor> reactor_;
+    std::unique_ptr<net::OffloadPool> offload_;
+    std::unique_ptr<infra::postgres::PgLiveStreams> streams_;
 };
 
 TEST_F(LiveRecordingTest, AnEndedStreamBecomesExactlyOneVideoThatGoesFromProcessingToReady) {
@@ -612,6 +690,60 @@ TEST_F(LiveRecordingTest, AStaleWorkerOnALiveSourcedJobIsFencedOutAndPublishesNo
     EXPECT_EQ(a->wait_exit(kExitPatience), 0);
     b->signal(SIGTERM);
     EXPECT_EQ(b->wait_exit(kExitPatience), 0);
+}
+
+// live.md, When a stream ends, as the stream service sees it: a stream started through the
+// service is published and ends; its row answers no video until the recording is queued, then
+// names that video, which is the streamer's and goes from processing to ready with the VOD
+// ladder for the stream's resolution.
+TEST_F(LiveRecordingTest, AServiceStreamThatEndsNamesItsRecordingWhichGoesToReady) {
+    const auto id = start_service_stream();
+    ASSERT_TRUE(id);
+    const auto starting = service_view(*id);
+    ASSERT_TRUE(starting);
+    EXPECT_EQ(starting->recording, std::nullopt);
+
+    ASSERT_EQ(stream_for(10), 0) << last_output_;
+    end_service_stream(*id, LiveEnd::Finished);
+    const std::string video = the_video();
+    EXPECT_NE(last_output_.find("recording: queued as video " + video), std::string::npos)
+        << last_output_;
+    const auto ended = service_view(*id);
+    ASSERT_TRUE(ended);
+    EXPECT_EQ(ended->state, LiveState::Ended);
+    ASSERT_TRUE(ended->recording);
+    EXPECT_EQ(ended->recording->to_string(), video);
+    // It starts private, as an upload does.
+    EXPECT_EQ(query("SELECT concat_ws(' ', state, visibility, title) FROM videos"),
+              "processing private Live stream " + stream_);
+
+    run_worker_to_done();
+    expect_one_ready_video(10);
+    const auto later = service_view(*id);
+    ASSERT_TRUE(later);
+    EXPECT_EQ(later->recording, ended->recording);
+}
+
+// live.md: a stream that ends with no media becomes no video, and its video_id stays null.
+TEST_F(LiveRecordingTest, AServiceStreamThatEndsWithNoMediaBecomesNoVideo) {
+    const auto id = start_service_stream();
+    ASSERT_TRUE(id);
+    const auto packager = start_packager();
+    ASSERT_TRUE(ingest_port(*packager)) << packager->output();
+    // Ended before any publisher sent a byte.
+    packager->signal(SIGUSR1);
+    ASSERT_EQ(packager->wait_exit(kJobPatience), 0) << packager->output();
+    EXPECT_NE(packager->output().find("recording: nothing to record"), std::string::npos)
+        << packager->output();
+    end_service_stream(*id, LiveEnd::Owner);
+
+    EXPECT_EQ(query("SELECT count(*) FROM videos"), "0");
+    EXPECT_EQ(query("SELECT count(*) FROM jobs"), "0");
+    EXPECT_EQ(query("SELECT count(*) FROM live_recordings"), "0");
+    const auto ended = service_view(*id);
+    ASSERT_TRUE(ended);
+    EXPECT_EQ(ended->state, LiveState::Ended);
+    EXPECT_EQ(ended->recording, std::nullopt);
 }
 
 } // namespace

@@ -474,7 +474,7 @@ private:
     }
 
     // Uploads `items` from up to `threads` threads at once, this one among them, each taking
-    // the next item not yet taken (ADR-0102). The first failure stops every thread from taking
+    // the next item not yet taken (ADR-0103). The first failure stops every thread from taking
     // another; one losing the lease fails its next upload, so the pool stops within one request
     // per thread. With one thread it is the sequential loop, in order.
     std::expected<void, std::string> upload_all(std::span<const PublishItem> items,

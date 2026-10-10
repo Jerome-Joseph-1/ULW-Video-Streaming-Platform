@@ -1,8 +1,10 @@
 # Live streams
 
-> **Draft.** [Starting a stream](#starting-a-stream) is served by the gateway (ADR-0092),
-> [Publishing](#publishing) is settled by M30, [Watching a stream](#watching-a-stream) by M31 and
-> [When a stream ends](#when-a-stream-ends) by M33.
+> **Stable.** [Starting a stream](#starting-a-stream), [Publishing](#publishing),
+> [Watching a stream](#watching-a-stream) and [When a stream ends](#when-a-stream-ends), as
+> below, are kept under the compatibility rules in [versioning.md](versioning.md). The gateway
+> serves them wherever the operator has turned live streams on (`LIVEKIT_API_URL`,
+> [operator-contract.md](operator-contract.md)); elsewhere the stream routes answer `404`.
 
 A broadcaster publishes into the realtime tier with WHIP (RFC 9725). The SFU's recorder relays
 the stream to a packager, which turns it into HLS and writes its segments to the same object

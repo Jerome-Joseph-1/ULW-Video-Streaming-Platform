@@ -154,7 +154,7 @@ TEST_F(WorkerConfigTest, ThreadsDefaultToAFixedNumberAndMayBeSet) {
     }
 }
 
-// ADR-0102: eight segments at once unless set; 1 is the sequential upload.
+// ADR-0103: eight segments at once unless set; 1 is the sequential upload.
 TEST_F(WorkerConfigTest, PublishConcurrencyDefaultsToEightAndMayBeSetFrom1To32) {
     EXPECT_EQ(load()->publish_concurrency, 8U);
     env["ULW_PUBLISH_CONCURRENCY"] = "1";

@@ -93,7 +93,7 @@ public:
 // cache keeps the connection to a host, TLS session included, open for the next request:
 // consecutive requests skip the TCP and TLS handshakes. Each request is configured afresh, so
 // it behaves as perform() and perform_upload() do, but for the connection it may reuse. Not
-// safe from two threads at once: a thread that wants one keeps its own (ADR-0102).
+// safe from two threads at once: a thread that wants one keeps its own (ADR-0103).
 class Session {
 public:
     Session() noexcept = default;

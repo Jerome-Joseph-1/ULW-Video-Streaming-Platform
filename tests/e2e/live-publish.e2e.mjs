@@ -125,9 +125,38 @@ test('a stream started through the API is published, watched, ended and recorded
         owner))).body.state, { timeout: 180_000, intervals: [1000] }).toBe('ready');
       const recorded = await json(await api('GET', `/api/v1/videos/${video}`, owner));
       expect(recorded.body.title).toBe(`Live stream ${id}`);
+      expect(recorded.body.visibility).toBe('private');
       expect(recorded.body.duration_ms).toBeGreaterThan(kWatchedSegments * kSegmentMs);
+      // Its renditions are the VOD ladder for the stream's 720p: 720p and 360p, each a media
+      // playlist through the gateway with segments in it.
       const master = await api('GET', `/api/v1/videos/${video}/master.m3u8`, owner);
       expect(master.status).toBe(200);
+      const variants = (await master.text()).split('\n').filter((l) => l && !l.startsWith('#'));
+      const renditions = variants.map((uri) => new URL(uri, stack.gateway).pathname);
+      expect(renditions.toSorted()).toEqual([`/api/v1/videos/${video}/360p/index.m3u8`,
+        `/api/v1/videos/${video}/720p/index.m3u8`]);
+      for (const rendition of renditions) {
+        const media = await api('GET', rendition, owner);
+        expect(media.status).toBe(200);
+        const text = await media.text();
+        expect(text).toContain('#EXT-X-ENDLIST');
+        expect(text.split('#EXTINF').length - 1).toBeGreaterThan(0);
+      }
+
+      // A stream that ends with no media becomes no video: the owner's next stream, ended
+      // before anything was published, keeps a null video_id.
+      const empty = await json(await api('POST', '/api/v1/live', owner));
+      expect(empty.status).toBe(201);
+      const emptyRoute = `/api/v1/live/${empty.body.id}`;
+      const emptyEnded = await json(await api('POST', `${emptyRoute}/end`, owner));
+      expect(emptyEnded.status).toBe(200);
+      expect(emptyEnded.body.state).toBe('ended');
+      expect(emptyEnded.body.video_id).toBeNull();
+      // Long enough for a recording to have been queued, had there been one.
+      await new Promise((resolve) => setTimeout(resolve, 5_000));
+      const emptyLater = await json(await api('GET', emptyRoute, owner));
+      expect(emptyLater.body.state).toBe('ended');
+      expect(emptyLater.body.video_id).toBeNull();
       console.log(`live publish: ${JSON.stringify({ id, video,
         durationMs: recorded.body.duration_ms, viewerStartedAfterMs: played.startedAfterMs,
         playlistLoads: played.playlists.length })}`);

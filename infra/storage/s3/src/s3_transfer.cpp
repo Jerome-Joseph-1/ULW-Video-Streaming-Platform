@@ -45,7 +45,7 @@ Failed local_failure() noexcept {
 
 // Uploads keep one connection per thread for as long as the thread lives, so a worker
 // publishing thousands of segments negotiates TLS once per thread rather than once per file
-// (ADR-0102). Each attempt is still signed afresh, so a retry behaves as before.
+// (ADR-0103). Each attempt is still signed afresh, so a retry behaves as before.
 curl::Session& upload_session() {
     thread_local curl::Session session;
     return session;

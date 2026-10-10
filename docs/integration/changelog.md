@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## 2026-10-09: the worker publishes long videos in minutes, not tens of minutes
 
-<!-- apps/worker/src/job_runner.cpp (publish, upload_all), apps/worker/src/config.cpp (ULW_PUBLISH_CONCURRENCY), infra/curl/src/http.cpp (Session), infra/storage/s3/src/s3_transfer.cpp (upload_session), deploy/kubernetes/base/video-worker/deployment.yaml, docs/adr/0102-the-worker-publishes-from-a-pool-on-kept-connections.md -->
+<!-- apps/worker/src/job_runner.cpp (publish, upload_all), apps/worker/src/config.cpp (ULW_PUBLISH_CONCURRENCY), infra/curl/src/http.cpp (Session), infra/storage/s3/src/s3_transfer.cpp (upload_session), deploy/kubernetes/base/video-worker/deployment.yaml, docs/adr/0103-the-worker-publishes-from-a-pool-on-kept-connections.md -->
 
 Operators only; nothing a client sends or receives changes. A video becomes `ready` sooner after
 its encode: the worker uploads its segments several at once, each upload thread keeping one
@@ -22,6 +22,54 @@ What to do:
   `ULW_PUBLISH_CONCURRENCY: "8"`; set it to `1` for the previous one-at-a-time upload, or higher
   for a fast uplink to a distant store (RUNBOOK 4b). Expect up to that many concurrent PUTs per
   worker against your bucket.
+
+## 2026-10-09: end-to-end encryption is Stable, with a key directory and every device a member
+
+<!-- apps/chat/src/key_directory.cpp, apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, infra/postgres/src/e2ee_directory.cpp, migrations/0018_e2ee_last_resort.sql, clients/web-mls/js/mls-room.js, docs/integration/e2ee.md, docs/adr/0102-the-key-directory-is-served-and-every-device-is-a-member.md -->
+
+Additive (versioning rule 1): new message `type`s and `error` reasons on the chat socket, a new
+migration, and new metrics. Nothing a client sends today is answered differently.
+
+| Before | Now |
+|---|---|
+| [e2ee.md](e2ee.md) was a draft, and nothing served the key directory | Stable. The chat socket serves the directory: `register_device`, `publish_key_packages`, `retire_device`, `devices` and `claim_key_packages`, answered `device_registered`, `key_packages_published`, `device_retired`, `devices` and `key_packages`, and `replenish` sent unasked ([Key directory](e2ee.md#key-directory)) |
+| A device out of key packages could not be invited | Each device keeps a last-resort package, handed out (and kept) once its single-use ones are gone |
+| Each user had one device in a group, by convention; nothing found a user's other devices | Every device is its own member, `<user>/<device id>`: the group's adder lists every member's devices, claims a package of each device the group lacks and adds them in one commit, and removes devices retired or users no longer listed ([Multi-device](e2ee.md#multi-device)) |
+| The browser client posted key packages to the room | It publishes them to the directory (`MlsDirectory`) and adds devices with `reconcile(users)`; key packages posted to the room are still accepted |
+| | New `error` reasons for these commands: `unknown_device`, `device_retired`, `device_limit`, `key_packages_full`, and `not_shared`, `rate_limited`, `busy`, `too_large` as elsewhere |
+
+What to do:
+
+- **Clients:** mint a device id per device and use `<user>/<device id>` as its MLS identity;
+  register and top up on every connect; have the first member's device call `reconcile` with
+  the member list. Pages built on `mls-room.js` without a directory keep working unchanged.
+- **Operators:** migration 0018 must run after 0017 (RUNBOOK); it only creates an empty table.
+  Deploy the gateway (which runs migrations) before chat. Each chat node opens two more database
+  sessions (`application_name` `ulw-e2ee`). New `e2ee_*` metrics ([operator-contract.md](operator-contract.md)).
+
+## 2026-10-09: live streams are Stable
+
+<!-- docs/integration/live.md, docs/integration/versioning.md, apps/gateway/src/connection.cpp (respond_stream), apps/live-packager/src/recorder.cpp, infra/postgres/src/live_recordings.cpp, tests/integration/live_recording_test.cpp, tests/e2e/live-publish.e2e.mjs -->
+
+Live streams leave draft (M33). Nothing in the API changes today: what [live.md](live.md)
+describes is what is served, and it is now kept under the compatibility rules in
+[versioning.md](versioning.md).
+
+| Before | Now |
+|---|---|
+| Starting, ticketing, going live and ending a stream (`/api/v1/live`) were a draft | Stable |
+| Publishing over WHIP with the stream service's tickets was a draft | Stable |
+| Watching (`GET /api/v1/live/{id}/index.m3u8`) was a draft | Stable |
+| A stream's end and its recording were a draft until M33 | Stable: a stream that ended with media becomes exactly one video of its broadcaster's, `private`, titled `Live stream <stream id>`, that goes through `processing` to `ready` with the VOD ladder for the stream's resolution; the owner reads its id as `video_id` on `GET /api/v1/live/{id}`. A stream that ends with no media, or whose media cannot be read back, becomes no video, and `video_id` stays `null` |
+
+What to do:
+
+- **Clients:** nothing to change. After a stream ends, poll `GET /api/v1/live/{id}` for
+  `video_id`, then follow the video as any other; treat a `video_id` that stays `null` as a
+  stream with no recording. From now on a breaking change to live streams is announced here
+  ahead of time; additive ones (a new field, an `ended_by` value) may arrive without notice, so
+  ignore what you do not know.
+- **Operators:** nothing to change.
 
 ## 2026-10-09: a processing video says how far along it is
 

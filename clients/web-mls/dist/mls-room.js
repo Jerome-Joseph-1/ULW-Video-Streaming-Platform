@@ -26,6 +26,15 @@
 // base64url body, every `message` frame of the room goes to `receive(frame)` (history first,
 // in seq order, the caller's own included), and a send the server refused goes to
 // `sendFailed(id, reason)`.
+//
+// With the chat server's key directory (ADR-0102), devices no longer post key packages to the
+// room. Each device registers itself (`<user>/<device id>` is its credential's identity) and
+// publishes single-use key packages and a last-resort one through an `MlsDirectory`; the
+// device at the first leaf calls `reconcile(users)` with the room's member list, which lists
+// every member's devices, claims a package of each device the group lacks, asks
+// `approveKeyPackage`, and adds them all in one commit; it also removes the devices of users
+// no longer listed and devices their users retired. Rooms still accept key packages posted the
+// old way, so pages without a directory keep working.
 
 import init, { MlsClient, inspect } from "./web_mls.js";
 
@@ -98,6 +107,162 @@ const EARLY_LIMIT = 256;
 const DECIDED_LIMIT = 1024;
 // Refusals that resending under the same id cannot fix.
 const FINAL_REFUSALS = new Set(["conflict", "malformed", "bad_body", "bad_room", "bad_id", "not_member", "too_large"]);
+// A device id as the directory knows it: a canonical lowercase UUID.
+const DEVICE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Runs `save` for one state at a time, in the order asked: hand the same one to every MlsRoom
+ *  and the MlsDirectory of a device, so an older state never lands after a newer one. */
+export function inOrder(save) {
+    let last = Promise.resolve();
+    return (state) => {
+        const next = last.then(() => save(state));
+        last = next.catch(() => {});
+        return next;
+    };
+}
+
+// --- the key directory ------------------------------------------------------------------------
+
+// Directory refusals that asking again, a little later, may cure.
+const DIRECTORY_RETRY = new Set(["rate_limited", "busy", "unavailable"]);
+const DIRECTORY_TRIES = 5;
+
+/** The chat server's key directory (docs/integration/e2ee.md, "Key directory") for one device,
+ *  over the chat socket the page already has. Every frame the socket receives goes to
+ *  `receive(frame)`, which takes the directory's answers and `replenish` frames and says
+ *  whether it took the frame. */
+export class MlsDirectory {
+    /**
+     * @param {object} o
+     * @param {MlsClient} o.client    this device; its identity is `<user>/<device>`
+     * @param {string} o.device        this device's id: a lowercase UUID, minted once per device
+     * @param {(command: object) => void} o.send  sends one command as JSON on the chat socket
+     * @param {(state: Uint8Array) => void|Promise<void>} [o.onState]  saves the client's state;
+     *        awaited before any package is published, since a package whose private key was not
+     *        saved can never be used. Use the rooms' own saver, through `inOrder`
+     * @param {number} [o.target]      how many single-use packages to keep published (20)
+     * @param {(e: object) => void} [o.onEvent]  published, replenish, error
+     * @param {number} [o.timeoutMs]   how long to wait for an answer (15 s)
+     */
+    constructor({ client, device, send, onState, target, onEvent, timeoutMs }) {
+        if (!DEVICE_ID.test(device)) {
+            throw new Error("invalid_argument");
+        }
+        this.client = client;
+        this.device = device;
+        this.post = send;
+        this.onState = onState ?? (() => {});
+        this.target = Math.min(Math.max(target ?? 20, 1), 100);
+        this.onEvent = onEvent ?? (() => {});
+        this.timeoutMs = timeoutMs ?? 15000;
+        this.pending = new Map();
+        this.stocking = null;
+    }
+
+    /** Takes a frame from the chat socket if it is the directory's: true when it was. */
+    receive(frame) {
+        if (frame.type === "replenish") {
+            if (frame.device === this.device) {
+                this.onEvent({ type: "replenish" });
+                void this.ensureStock().catch((e) => this.onEvent({ type: "error", reason: e.message }));
+            }
+            return true;
+        }
+        const waiting = frame.id === undefined ? undefined : this.pending.get(frame.id);
+        if (!waiting) {
+            return false;
+        }
+        this.pending.delete(frame.id);
+        clearTimeout(waiting.timer);
+        if (frame.type !== "error") {
+            waiting.resolve(frame);
+            return true;
+        }
+        if (DIRECTORY_RETRY.has(frame.reason) && waiting.tries < DIRECTORY_TRIES) {
+            setTimeout(() => this.#send(waiting), frame.retry_after_ms ?? 500 * waiting.tries);
+            return true;
+        }
+        const error = new Error(frame.reason);
+        error.frame = frame;
+        waiting.reject(error);
+        return true;
+    }
+
+    /** Sends one directory command and resolves with its answer; rejects with the refusal's
+     *  reason as the message. Rate limits and outages are waited out a few times first. */
+    request(command) {
+        return new Promise((resolve, reject) => {
+            this.#send({ command, resolve, reject, tries: 0 });
+        });
+    }
+
+    #send(waiting) {
+        const id = `dir-${crypto.randomUUID()}`;
+        waiting.tries += 1;
+        waiting.timer = setTimeout(() => {
+            this.pending.delete(id);
+            waiting.reject(new Error("timeout"));
+        }, this.timeoutMs);
+        this.pending.set(id, waiting);
+        this.post({ ...waiting.command, id });
+    }
+
+    /** Registers this device (again: it is idempotent) and tops its packages up: on every
+     *  connect, after a `replenish`, and after joining a group, which spent one. */
+    ensureStock() {
+        this.stocking ??= (async () => {
+            try {
+                const supply = await this.request({ type: "register_device", device: this.device });
+                return await this.#topUp(supply);
+            } finally {
+                this.stocking = null;
+            }
+        })();
+        return this.stocking;
+    }
+
+    async #topUp(supply) {
+        const missing = Math.max(0, this.target - supply.key_packages);
+        const needLastResort = supply.last_resort !== "fresh";
+        // Topped up once half the supply is gone, or when the last resort was used.
+        if (!needLastResort && missing * 2 < this.target) {
+            return supply;
+        }
+        const command = { type: "publish_key_packages", device: this.device };
+        if (missing > 0) {
+            command.key_packages = Array.from({ length: missing }, () => toBase64url(this.client.keyPackage()));
+        }
+        if (needLastResort) {
+            command.last_resort = toBase64url(this.client.lastResortKeyPackage());
+        }
+        // The private halves are in the state now; it is saved before anyone can be given them.
+        await this.onState(this.client.exportState());
+        const published = await this.request(command);
+        this.onEvent({ type: "published", keyPackages: published.key_packages, lastResort: published.last_resort });
+        return published;
+    }
+
+    /** The user's live devices: `[{device}]`, with `key_packages` and `last_resort` for the
+     *  page's own user. Another user's only if the two share a direct or group chat. */
+    async devices(user) {
+        return (await this.request({ type: "devices", user })).devices;
+    }
+
+    /** One key package of each named device of `user` (every live one without `devices`):
+     *  `{key_packages: [{device, key_package, last_resort}], exhausted, gone, unavailable}`. */
+    claim(user, devices) {
+        const command = { type: "claim_key_packages", user };
+        if (devices?.length) {
+            command.devices = devices;
+        }
+        return this.request(command);
+    }
+
+    /** Retires this device for good: its packages go and its id never comes back. */
+    retire() {
+        return this.request({ type: "retire_device", device: this.device });
+    }
+}
 
 export class MlsRoom {
     /**
@@ -111,12 +276,16 @@ export class MlsRoom {
      *        commit, removed, denied, ignored, error: for display
      * @param {(state: Uint8Array) => void|Promise<void>} [o.onState]  the client's state, to
      *        keep (IndexedDB); awaited before anything is posted, and a rejection is an error
-     * @param {(kp: {identity, chatSender, fingerprint, keyPackageRef}) => boolean|Promise<boolean>}
-     *        [o.approveKeyPackage]  whether to add the device that posted this key package;
-     *        no by default. Asked only on the device at the group's first leaf, and only when
-     *        the identity's user part is the chat user who posted it.
+     * @param {(kp: {identity, chatSender, fingerprint, keyPackageRef, device?, lastResort?}) => boolean|Promise<boolean>}
+     *        [o.approveKeyPackage]  whether to add the device that posted this key package, or
+     *        whose package the directory handed out (then with `device`); no by default. Asked
+     *        only on the device at the group's first leaf, and only when the identity's user
+     *        part is the chat user who posted it, or, from the directory, when the identity is
+     *        exactly `<user>/<device>` of the device claimed.
+     * @param {MlsDirectory} [o.directory]  the key directory: `announce()` publishes through
+     *        it instead of posting to the room, and `reconcile(users)` adds devices from it
      */
-    constructor({ client, room, user, send, onMessage, onEvent, onState, approveKeyPackage }) {
+    constructor({ client, room, user, send, onMessage, onEvent, onState, approveKeyPackage, directory }) {
         this.client = client;
         this.room = room.toLowerCase();
         this.groupId = utf8(this.room);
@@ -126,6 +295,10 @@ export class MlsRoom {
         this.onEvent = onEvent ?? (() => {});
         this.onState = onState ?? (() => {});
         this.approve = approveKeyPackage ?? (() => false);
+        this.directory = directory ?? null;
+        this.users = null; // the member list reconcile() was last given
+        this.reconciling = false;
+        this.reconcileAgain = false;
         this.group = null;
         this.early = []; // group messages from before this device joined
         this.queue = []; // key packages waiting to be decided on
@@ -164,7 +337,12 @@ export class MlsRoom {
 
     #loadMemo() {
         const memo = this.#allMemos()[this.room] ?? {};
-        return { outbox: memo.outbox ?? [], announced: memo.announced ?? false, decided: memo.decided ?? [] };
+        return {
+            outbox: memo.outbox ?? [],
+            announced: memo.announced ?? false,
+            decided: memo.decided ?? [],
+            refused: memo.refused ?? [], // directory devices whose addition was not approved
+        };
     }
 
     // Saves the state as it is now, then posts `entries`. Resolves when both are done. A save
@@ -172,6 +350,7 @@ export class MlsRoom {
     #commit(entries = []) {
         const all = this.#allMemos();
         this.memo.decided = this.memo.decided.slice(-DECIDED_LIMIT);
+        this.memo.refused = this.memo.refused.slice(-DECIDED_LIMIT);
         all[this.room] = this.memo;
         this.client.appData = utf8(JSON.stringify(all));
         const state = this.client.exportState();
@@ -210,11 +389,157 @@ export class MlsRoom {
         void this.#drain();
     }
 
-    /** Posts a fresh key package, asking the group's first member to add this device. */
+    /** Asks to be added: with a directory, registers this device and publishes its packages
+     *  there, for the group's first member to find; without one, posts a fresh key package to
+     *  the room. Either way this device then takes the room's welcome. */
     async announce() {
+        if (this.directory) {
+            await this.directory.ensureStock();
+            this.memo.announced = true;
+            await this.#commit();
+            return;
+        }
         const kp = this.client.keyPackage();
         this.memo.announced = true;
         await this.#commit([this.#outbox("key_package", kp)]);
+    }
+
+    /** Brings the group in line with the room's member list `users` (chat user ids), on the
+     *  device at the first leaf; elsewhere it does nothing. Every live device of each user that
+     *  the group lacks is claimed from the directory and, once approved, added in one commit;
+     *  a device of a user not listed, or one its user retired, is removed, one commit at a
+     *  time. Call it when the member list is read, on each `member` frame, and now and then: a
+     *  device registered since is found the next time. Never rejects: failures are events. */
+    async reconcile(users) {
+        if (!this.directory) {
+            throw new Error("no directory");
+        }
+        this.users = [...new Set(users)];
+        if (this.reconciling) {
+            this.reconcileAgain = true;
+            return;
+        }
+        this.reconciling = true;
+        try {
+            do {
+                this.reconcileAgain = false;
+                await this.#reconcileOnce(this.users);
+            } while (this.reconcileAgain);
+        } catch (e) {
+            this.onEvent({ type: "error", reason: `reconcile: ${e?.message ?? e}` });
+        } finally {
+            this.reconciling = false;
+        }
+    }
+
+    async #reconcileOnce(users) {
+        if (!this.#canAdd()) {
+            return;
+        }
+        const live = new Map();
+        for (const user of users) {
+            live.set(user, new Set((await this.directory.devices(user)).map((d) => d.device)));
+        }
+        if (!this.#canAdd()) {
+            return;
+        }
+        // Removals first, one commit each; the echo of each runs this again.
+        const own = text(this.client.identity);
+        for (const m of this.members()) {
+            if (m.identity === own) {
+                continue;
+            }
+            const user = userPart(m.identity);
+            const device = m.identity.slice(user.length + 1);
+            // A device of the old convention (any name but a device id) goes only with its user.
+            const gone = !live.has(user) || (DEVICE_ID.test(device) && !live.get(user).has(device));
+            if (gone) {
+                const epoch = this.group.epoch;
+                const commit = this.group.remove(utf8(m.identity));
+                const entry = this.#outbox("commit", commit, { epoch, directory: true });
+                this.onEvent({ type: "removing", who: m.identity });
+                await this.#commit([entry]);
+                return;
+            }
+        }
+        const have = new Set(this.members().map((m) => m.identity));
+        const approved = [];
+        for (const [user, devices] of live) {
+            const missing = [...devices].filter((d) => !have.has(`${user}/${d}`) && !this.memo.refused.includes(`${user}/${d}`));
+            if (!missing.length) {
+                continue;
+            }
+            const answer = await this.directory.claim(user, missing);
+            for (const d of answer.exhausted ?? []) {
+                this.onEvent({ type: "exhausted", who: `${user}/${d}` });
+            }
+            for (const kp of answer.key_packages ?? []) {
+                const added = await this.#decide(user, kp);
+                if (added) {
+                    approved.push(added);
+                }
+            }
+        }
+        if (!approved.length || !this.#canAdd()) {
+            // Packages claimed for a group that moved on meanwhile are spent; the next round
+            // claims others.
+            await this.#commit();
+            if (approved.length) {
+                this.reconcileAgain = true;
+            }
+            return;
+        }
+        const epoch = this.group.epoch;
+        const added = this.group.add(approved.map((a) => a.bytes));
+        const entry = this.#outbox("commit", added.commit, {
+            epoch,
+            welcome: toBase64url(added.welcome),
+            refs: approved.map((a) => a.ref),
+            directory: true,
+        });
+        for (const a of approved) {
+            this.onEvent({ type: "adding", who: a.identity, fingerprint: a.fingerprint, lastResort: a.lastResort });
+        }
+        await this.#commit([entry]);
+    }
+
+    // Whether to add the device a claimed package is for: the package must be a key package
+    // whose credential names exactly that device of that user, and the page must say yes.
+    async #decide(user, kp) {
+        const identity = `${user}/${kp.device}`;
+        let bytes;
+        let info;
+        try {
+            bytes = fromBase64url(kp.key_package);
+            info = inspect(bytes);
+        } catch (e) {
+            this.onEvent({ type: "denied", identity, reason: e?.message ?? "malformed" });
+            return null;
+        }
+        if (info.wireFormat !== "key_package" || text(info.identity) !== identity) {
+            this.onEvent({ type: "denied", identity, reason: "credential names another device" });
+            return null;
+        }
+        const ask = {
+            identity,
+            chatSender: user,
+            device: kp.device,
+            fingerprint: info.fingerprint,
+            keyPackageRef: info.keyPackageRef,
+            lastResort: kp.last_resort === true,
+        };
+        let yes = false;
+        try {
+            yes = (await this.approve(ask)) === true;
+        } catch (e) {
+            this.onEvent({ type: "error", reason: `approval failed: ${e?.message ?? e}` });
+        }
+        if (!yes) {
+            this.memo.refused.push(identity);
+            this.onEvent({ type: "denied", ...ask, reason: "not approved" });
+            return null;
+        }
+        return { bytes, identity, fingerprint: info.fingerprint, ref: info.keyPackageRef, lastResort: ask.lastResort };
     }
 
     /** Encrypts and posts a text message; resolves to its id once saved and posted. */
@@ -305,14 +630,27 @@ export class MlsRoom {
         // Every lower seq has been handled: if no other commit took the epoch, this one won.
         if (this.group?.hasPendingCommit && this.group.epoch === entry.epoch) {
             this.group.mergePendingCommit();
-            const welcome = this.#outbox("welcome", fromBase64url(entry.welcome));
-            this.onEvent({ type: "added", seq: frame.seq, epoch: this.group.epoch, members: this.members() });
-            const done = this.#commit([welcome]);
+            const posts = [];
+            if (entry.welcome) {
+                posts.push(this.#outbox("welcome", fromBase64url(entry.welcome)));
+                this.onEvent({ type: "added", seq: frame.seq, epoch: this.group.epoch, members: this.members() });
+            } else {
+                this.onEvent({ type: "commit", seq: frame.seq, sender: text(this.client.identity), epoch: this.group.epoch, members: this.members() });
+            }
+            const done = this.#commit(posts);
             void this.#drain();
+            this.#reconcileLater();
             return done;
         }
         if (this.group?.hasPendingCommit) {
             this.group.clearPendingCommit();
+        }
+        if (entry.directory) {
+            // Lost the epoch: the next round decides again, with packages claimed afresh.
+            this.onEvent({ type: "lost", seq: frame.seq, epoch: entry.epoch });
+            const done = this.#commit();
+            this.#reconcileLater();
+            return done;
         }
         // Lost the epoch: the devices it added are decided on again.
         this.memo.decided = this.memo.decided.filter((r) => !(entry.refs ?? []).includes(r));
@@ -331,6 +669,13 @@ export class MlsRoom {
             return false;
         }
         return sameBytes(this.group.members()[0].identity, this.client.identity);
+    }
+
+    // Once the group has moved, the member list last given is looked at again.
+    #reconcileLater() {
+        if (this.directory && this.users) {
+            setTimeout(() => void this.reconcile(this.users), 0);
+        }
     }
 
     // Decides on queued key packages one at a time, while this device may add. Never rejects (a
@@ -403,6 +748,10 @@ export class MlsRoom {
         this.memo.announced = false;
         // The welcome used the key package; it is no longer outstanding.
         this.memo.outbox = this.memo.outbox.filter((e) => e.kind !== "key_package");
+        if (this.directory) {
+            // One of this device's packages was spent: publish another.
+            void this.directory.ensureStock().catch((e) => this.onEvent({ type: "error", reason: `stock: ${e.message}` }));
+        }
         this.onEvent({ type: "joined", seq: frame.seq, epoch: this.group.epoch, members: this.members() });
         const done = this.#commit();
         const early = this.early;

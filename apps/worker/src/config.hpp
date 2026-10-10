@@ -37,7 +37,7 @@ struct Config {
     std::string search_path;
     unsigned ffmpeg_threads = 1;
     // Segments uploaded at once while publishing, each thread on a connection of its own
-    // (ADR-0102); 1 uploads one at a time, as before it.
+    // (ADR-0103); 1 uploads one at a time, as before it.
     unsigned publish_concurrency = 8;
     ops::Level log_level = ops::Level::Info;
     // Who to become when started as root.
