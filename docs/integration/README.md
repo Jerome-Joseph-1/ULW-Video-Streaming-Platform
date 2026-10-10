@@ -13,8 +13,8 @@ against in HTML comments, for maintainers.
   (R2 or any S3-compatible store) over presigned URLs and never pass through the service.
 - **Identity** from the operator's identity provider: the same JWT the apps already hold,
   verified against the provider's JWKS. There are no ULW accounts.
-- **Realtime**: chat (direct and group chats, history, presence, the operator's service API)
-  and 1:1 and group calls are Stable; live streams and end-to-end encryption are drafts.
+- **Realtime**: chat (direct and group chats, history, presence, the operator's service API),
+  1:1 and group calls, and live streams are Stable; end-to-end encryption is a draft.
 
 ## Pages
 
@@ -28,7 +28,7 @@ against in HTML comments, for maintainers.
 | [changelog.md](changelog.md) | Changes to the Stable pages a client may have to act on | Stable |
 | [chat.md](chat.md) | WebSocket endpoint, envelope, resume, history, member lists, presence and the service API | Stable |
 | [calls.md](calls.md) | 1:1 and group calls | Stable |
-| [live.md](live.md) | Live streams | Draft until M33 |
+| [live.md](live.md) | Live streams: starting, publishing over WHIP, watching, and the recording each becomes | Stable |
 | [e2ee.md](e2ee.md) | End-to-end encrypted chat | Draft until M22 |
 
 "Stable" means the contract described there (the `/api/v1` endpoints, and chat's WebSocket and

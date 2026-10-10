@@ -131,6 +131,10 @@ public:
     // Runs after each upload, with the key it wrote.
     std::function<void(const std::string&)> after_upload;
 
+    // What size() reports for an object that exists, in place of its real size: a source too
+    // large for any scratch filesystem without storing one.
+    std::optional<std::uint64_t> reported_size;
+
     void put(const std::string& key, std::string bytes) { objects_[key] = std::move(bytes); }
     [[nodiscard]] const std::map<std::string, std::string>& objects() const { return objects_; }
 
@@ -140,7 +144,7 @@ public:
         if (it == objects_.end()) {
             return std::unexpected(core::ports::StorageError::NotFound);
         }
-        return it->second.size();
+        return reported_size.value_or(it->second.size());
     }
     std::expected<std::uint64_t, core::ports::StorageError>
     download(const core::StorageKey& key, const std::filesystem::path& destination) override {
