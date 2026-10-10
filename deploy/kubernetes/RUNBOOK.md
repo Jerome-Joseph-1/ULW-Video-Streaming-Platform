@@ -525,6 +525,34 @@ A change takes effect at the user's next request on every gateway: nothing is ca
 URLs a playlist handed out before stay valid until they expire (at most 7 days, usually an hour
 or two), as for any viewer.
 
+**Migration 0018 (the key directory's last-resort packages, docs/adr/0102) comes after 0017.**
+It only creates `last_resort_key_packages`, an empty table whose foreign key holds a lock on
+`devices` for the moment until its commit: no off-peak window. Deploy the gateway, whose init
+container runs it, before chat: until it has run, chat answers most key directory commands
+`unavailable`. From this release each chat pod opens two more database
+sessions for the directory (`application_name` `ulw-e2ee`); count them in the database's
+`max_connections`. The directory's tables hold public key material only, never a private key.
+To see a user's devices and what each holds, as the service's role:
+
+```sql
+SELECT d.id, d.registered_at, d.revoked_at,
+       (SELECT count(*) FROM key_packages k WHERE k.device_id = d.id) AS key_packages,
+       l.published_at AS last_resort_published, l.served_at AS last_resort_served
+  FROM devices d LEFT JOIN last_resort_key_packages l ON l.device_id = d.id
+ WHERE d.user_id = '<user id>' ORDER BY d.registered_at;
+```
+
+A device lost for good (a wiped browser profile) still counts toward its user's 16 until it is
+retired: the user retires it from another device (`retire_device`), or, as the service's role:
+
+```sql
+BEGIN;
+UPDATE devices SET revoked_at = now() WHERE id = '<device uuid>' AND revoked_at IS NULL;
+DELETE FROM key_packages WHERE device_id = '<device uuid>';
+DELETE FROM last_resort_key_packages WHERE device_id = '<device uuid>';
+COMMIT;
+```
+
 The NetworkPolicies allow ports, not addresses, because Postgres and the store often run outside
 the cluster. If their addresses are stable, patch them in as an `ipBlock` on the 5432 and 443
 rules.

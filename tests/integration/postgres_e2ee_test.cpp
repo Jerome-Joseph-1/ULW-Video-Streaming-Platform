@@ -142,6 +142,45 @@ TEST_F(E2eeRaceTest, ConcurrentFetchersOfTheLastPackageHaveExactlyOneWinner) {
     EXPECT_EQ(packages_left(), "0");
 }
 
+// ADR-0102: with a last-resort package behind the last single-use one, nobody comes away empty,
+// and still only one contender gets the single-use package.
+TEST_F(E2eeRaceTest, ConcurrentFetchersOfTheLastPackageFallBackToTheLastResort) {
+    stock(1);
+    Answer<void> kept;
+    harness_->delivery().publish_last_resort(alice_, device_, package_of(400, 99), kept.callback());
+    ASSERT_TRUE(ulw::test::await(harness_->reactor(), kept));
+    hold_device();
+    std::vector<Answer<FetchedKeyPackage>> answers(kContenders);
+    for (auto& a : answers) {
+        harness_->delivery().fetch_key_package(alice_, device_, a.callback());
+    }
+    release_when_waiting(kContenders);
+    await_all(answers);
+
+    std::size_t single = 0;
+    std::size_t last_resort = 0;
+    for (const auto& a : answers) {
+        ASSERT_TRUE(a.get()) << to_string(a.get().error());
+        EXPECT_TRUE(a.get()->replenish);
+        if (a.get()->last_resort) {
+            ++last_resort;
+            EXPECT_EQ(a.get()->package, package_of(400, 99));
+        } else {
+            ++single;
+            EXPECT_EQ(a.get()->package, package_of(300, 0));
+        }
+    }
+    EXPECT_EQ(single, 1U);
+    EXPECT_EQ(last_resort, kContenders - 1);
+    EXPECT_EQ(packages_left(), "0");
+    auto conn = harness_->db().session();
+    EXPECT_EQ(scalar(conn,
+                     "SELECT served_at IS NOT NULL FROM last_resort_key_packages "
+                     "WHERE device_id = $1",
+                     Params{}.add_uuid(device_.uuid())),
+              "t");
+}
+
 // A fetch that deletes the oldest row without locking it first loses this one: all contenders
 // pick the same row, and every loser returns empty-handed although packages remain.
 TEST_F(E2eeRaceTest, ConcurrentFetchersEachTakeADifferentPackageUntilNoneRemain) {

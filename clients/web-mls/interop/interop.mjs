@@ -6,7 +6,9 @@
 // Room one: the browser starts the group and adds the native device; then a second browser
 // device announces itself and the first adds it, and the native device follows the commit.
 // Room two: the native device starts the group, adds a browser device, and later a second one,
-// whose commit the first browser device follows. In both, everyone reads everyone, the bodies
+// whose commit the first browser device follows. Room three: nothing asks through the room; the
+// key directory (ADR-0102) holds every device's packages, and a browser device adds its user's
+// second browser device and the native device in one commit. Everyone reads everyone, the bodies
 // stored are the bytes each side made, and a browser device saved to bytes and restored mid-way
 // keeps reading. Exits non-zero on the first failure.
 
@@ -237,12 +239,106 @@ async function roomTwo(db) {
     }
 }
 
+// --- room three: devices found through the key directory (ADR-0102) ---------------------------
+
+// A browser device with the directory: its identity is `<user>/<device id>`.
+function directoryDevice(socket, room) {
+    const id = randomUUID();
+    const client = new MlsClient(utf8(`${socket.user}/${id}`));
+    const save = mls.inOrder(() => {});
+    const directory = new mls.MlsDirectory({ client, device: id, send: (c) => socket.ws.send(JSON.stringify(c)), onState: save });
+    const device = browserDevice(socket, room, client);
+    // browserDevice made its room without the directory; this one has it.
+    device.mls = new MlsRoom({
+        client,
+        room,
+        user: socket.user,
+        directory,
+        send: (i, body) => socket.send(room, i, body),
+        approveKeyPackage: () => true,
+        onMessage: (m) => device.received.push(m),
+        onEvent: (e) => device.events.push(e),
+        onState: save,
+    });
+    socket.onFrame = (f) => {
+        if (directory.receive(f)) {
+            return;
+        }
+        if (f.type === "message" && f.room === room) {
+            device.mls.receive(f);
+        }
+    };
+    Object.assign(device, { id, directory, identity: `${socket.user}/${id}` });
+    return device;
+}
+
+async function roomThree(db) {
+    const room = randomUUID();
+    psql(db, `INSERT INTO chat_rooms (room_id, kind) VALUES ('${room}', 'group_chat')`);
+    for (const u of ["web-a", "ffi-b"]) {
+        psql(db, `INSERT INTO chat_members (room_id, user_id) VALUES ('${room}', '${u}')`);
+    }
+    // web-a has two browser devices, each on its own socket.
+    const [sa1, sa2, sb] = ["web-a", "web-a", "ffi-b"].map((u) => new Socket(u));
+    await Promise.all([sa1, sa2, sb].map((s) => s.open()));
+    await Promise.all([sa1, sa2, sb].map((s) => s.join(room)));
+
+    const a1 = directoryDevice(sa1, room);
+    const a2 = directoryDevice(sa2, room);
+    await a1.directory.ensureStock();
+    await a1.mls.create();
+    await a2.mls.announce();
+
+    // The native device registers and publishes two packages through the same commands.
+    const bId = randomUUID();
+    const b = await NativeDevice.create(`ffi-b/${bId}`);
+    const ask = async (command, answer) => {
+        const id = randomUUID();
+        sb.ws.send(JSON.stringify({ ...command, id }));
+        const frame = await sb.wait((f) => f.id === id && (f.type === answer || f.type === "error"), answer);
+        assert.equal(frame.type, answer, JSON.stringify(frame));
+        return frame;
+    };
+    await ask({ type: "register_device", device: bId }, "device_registered");
+    const packages = [await b.keyPackage(), await b.keyPackage()];
+    const published = await ask({ type: "publish_key_packages", device: bId,
+        key_packages: packages.map((p) => Buffer.from(p).toString("base64url")) }, "key_packages_published");
+    assert.equal(published.key_packages, 2);
+
+    // web-a's first device adds every device it finds: its sibling and the native one.
+    await a1.mls.reconcile(["web-a", "ffi-b"]);
+    await a2.until(() => a2.mls.joined, "web-a's second device never joined");
+    const welcome = await sb.message(room, (f) => f.sender === "web-a" &&
+        inspect(fromBase64url(f.body)).wireFormat === "welcome", "the welcome");
+    await b.call("join", Buffer.from(fromBase64url(welcome.body)).toString("hex"));
+    assert.equal(await b.number("members"), 3);
+    assert.equal(a1.mls.group.memberCount, 3);
+    assert.deepEqual(a1.mls.members().map((m) => m.identity).sort(), [a1.identity, a2.identity, `ffi-b/${bId}`].sort());
+    log("room three: a browser device added its sibling and the bridge's device from the key directory");
+
+    await sb.sendAndWait(room, await b.encrypt("from the bridge"));
+    await a1.heard("from the bridge");
+    await a2.heard("from the bridge");
+    await a2.mls.sendText("from web-a's second device");
+    const fromA2 = await sb.message(room, (f) => f.sender === "web-a" &&
+        inspect(fromBase64url(f.body)).contentType === "application", "web-a's message");
+    assert.equal((await b.process(fromBase64url(fromA2.body))).plaintext, "from web-a's second device");
+    await a1.heard("from web-a's second device");
+    // One of the bridge's packages was spent, the other is still there.
+    assert.equal(psql(db, `SELECT count(*) FROM key_packages WHERE device_id = '${bId}'`).trim(), "1");
+    log("room three: every device reads every other's messages");
+    for (const s of [sa1, sa2, sb]) {
+        s.ws.close();
+    }
+}
+
 await run(async () => {
     const db = scratchDatabase();
     const chatOutput = await startChat(db);
     try {
         const stored = await roomOne(db);
         await roomTwo(db);
+        await roomThree(db);
         log(`passed: ${stored} room-one bodies stored exactly as sent; ciphersuite 1 on both sides`);
     } catch (e) {
         console.error(chatOutput().slice(-4000));

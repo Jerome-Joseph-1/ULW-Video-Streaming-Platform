@@ -7,9 +7,16 @@ E2eeResult<void> check_key_package_batch(std::span<const KeyPackageBytes> batch)
         return std::unexpected(E2eeError::Invalid);
     }
     for (const KeyPackageBytes& package : batch) {
-        if (package.empty() || package.size() > kMaxKeyPackageBytes) {
-            return std::unexpected(E2eeError::Invalid);
+        if (auto checked = check_key_package(package); !checked) {
+            return checked;
         }
+    }
+    return {};
+}
+
+E2eeResult<void> check_key_package(const KeyPackageBytes& package) {
+    if (package.empty() || package.size() > kMaxKeyPackageBytes) {
+        return std::unexpected(E2eeError::Invalid);
     }
     return {};
 }

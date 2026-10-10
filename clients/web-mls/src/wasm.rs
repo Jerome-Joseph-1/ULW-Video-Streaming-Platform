@@ -82,10 +82,18 @@ impl JsClient {
         self.inner.set_app_data(data);
     }
 
-    /// A fresh single-use KeyPackage as an MLSMessage: post it to the room for a member to add.
+    /// A fresh single-use KeyPackage as an MLSMessage: publish it to the key directory (or,
+    /// without one, post it to the room) for a member to add.
     #[wasm_bindgen(js_name = keyPackage)]
     pub fn key_package(&self) -> Result<Vec<u8>, JsError> {
         self.inner.key_package().map_err(js)
+    }
+
+    /// A last-resort KeyPackage as an MLSMessage, for the key directory to hand out once the
+    /// single-use ones have run out. It may be used by many welcomes, so its private key stays.
+    #[wasm_bindgen(js_name = lastResortKeyPackage)]
+    pub fn last_resort_key_package(&self) -> Result<Vec<u8>, JsError> {
+        self.inner.last_resort_key_package().map_err(js)
     }
 
     /// A new group, at epoch 0, with this device its only member. The chat convention is the
@@ -276,6 +284,12 @@ impl MessageInfo {
     #[wasm_bindgen(getter, js_name = keyPackageRef)]
     pub fn key_package_ref(&self) -> Option<String> {
         self.info.key_package_ref.clone()
+    }
+
+    /// Whether a key package is a last-resort one (RFC 9420, section 16.8).
+    #[wasm_bindgen(getter, js_name = lastResort)]
+    pub fn last_resort(&self) -> Option<bool> {
+        self.info.last_resort
     }
 }
 

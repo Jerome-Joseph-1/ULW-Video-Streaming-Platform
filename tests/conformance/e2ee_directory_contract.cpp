@@ -203,6 +203,133 @@ TEST_P(DirectoryContract, DeregistrationLeavesTheUsersOtherDevicesAlone) {
     EXPECT_TRUE(fetch(alice, laptop));
 }
 
+// ADR-0102: a device's last-resort package --------------------------------------------------
+
+TEST_P(DirectoryContract, TheLastResortIsHandedOutOnlyOnceTheSingleUsePackagesRunOut) {
+    const core::DeviceId device = stocked_device(1);
+    ASSERT_TRUE(publish_last_resort(alice, device, package_of(400, 77)));
+
+    const auto single = fetch(alice, device);
+    ASSERT_TRUE(single);
+    EXPECT_EQ(single->package, package_of(300, 0));
+    EXPECT_FALSE(single->last_resort);
+
+    // Kept, so every later fetch gets it again, each with the replenish signal.
+    for (int i = 0; i < 3; ++i) {
+        const auto last = fetch(alice, device);
+        ASSERT_TRUE(last) << to_string(last.error());
+        EXPECT_EQ(last->package, package_of(400, 77));
+        EXPECT_TRUE(last->last_resort);
+        EXPECT_TRUE(last->replenish);
+    }
+
+    // Single-use packages published again come first.
+    ASSERT_EQ(publish(alice, device, {package_of(300, 5)}), 1U);
+    const auto fresh = fetch(alice, device);
+    ASSERT_TRUE(fresh);
+    EXPECT_EQ(fresh->package, package_of(300, 5));
+    EXPECT_FALSE(fresh->last_resort);
+}
+
+TEST_P(DirectoryContract, ADeviceWithoutALastResortIsExhausted) {
+    const core::DeviceId device = stocked_device(0);
+    EXPECT_EQ(fetch(alice, device).error(), E2eeError::Exhausted);
+    ASSERT_TRUE(publish_last_resort(alice, device, package_of(300, 1)));
+    EXPECT_TRUE(fetch(alice, device));
+}
+
+TEST_P(DirectoryContract, PublishingALastResortReplacesTheOldOneAndMarksItFresh) {
+    const core::DeviceId device = stocked_device(0);
+    ASSERT_TRUE(publish_last_resort(alice, device, package_of(300, 1)));
+    auto listed = devices_of(alice);
+    ASSERT_TRUE(listed);
+    ASSERT_EQ(listed->size(), 1U);
+    EXPECT_EQ(listed->front().last_resort, core::ports::LastResort::Fresh);
+
+    ASSERT_TRUE(fetch(alice, device));
+    listed = devices_of(alice);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->front().last_resort, core::ports::LastResort::Used);
+
+    ASSERT_TRUE(publish_last_resort(alice, device, package_of(300, 2)));
+    listed = devices_of(alice);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->front().last_resort, core::ports::LastResort::Fresh);
+    const auto replaced = fetch(alice, device);
+    ASSERT_TRUE(replaced);
+    EXPECT_EQ(replaced->package, package_of(300, 2));
+}
+
+TEST_P(DirectoryContract, ALastResortIsBoundedAndOnlyItsOwnUsersToPublish) {
+    const core::DeviceId device = stocked_device(0);
+    EXPECT_EQ(publish_last_resort(alice, device, {}).error(), E2eeError::Invalid);
+    EXPECT_EQ(publish_last_resort(alice, device, package_of(kMaxKeyPackageBytes + 1, 0)).error(),
+              E2eeError::Invalid);
+    EXPECT_TRUE(publish_last_resort(alice, device, package_of(kMaxKeyPackageBytes, 0)));
+    EXPECT_EQ(publish_last_resort(bob, device, package_of(300, 1)).error(), E2eeError::NotFound);
+    EXPECT_EQ(publish_last_resort(alice, new_device(), package_of(300, 1)).error(),
+              E2eeError::NotFound);
+    // Bob's attempt left alice's package as it was.
+    const auto fetched = fetch(alice, device);
+    ASSERT_TRUE(fetched);
+    EXPECT_EQ(fetched->package, package_of(kMaxKeyPackageBytes, 0));
+}
+
+TEST_P(DirectoryContract, RetiringADeviceDropsItsLastResort) {
+    const core::DeviceId device = stocked_device(0);
+    ASSERT_TRUE(publish_last_resort(alice, device, package_of(300, 1)));
+    ASSERT_TRUE(retire(alice, device));
+    EXPECT_EQ(fetch(alice, device).error(), E2eeError::Revoked);
+    EXPECT_EQ(publish_last_resort(alice, device, package_of(300, 2)).error(), E2eeError::Revoked);
+}
+
+TEST_P(DirectoryContract, RetiredDevicesWithALastResortStillLeaveTheirTombstonesBounded) {
+    // A tombstone that is dropped must not be held back by a last-resort row of its own.
+    for (std::size_t i = 0; i < core::ports::kRetiredDevicesKept + 1; ++i) {
+        const core::DeviceId device = new_device();
+        ASSERT_TRUE(enrol(alice, device));
+        ASSERT_TRUE(publish_last_resort(alice, device, package_of(300, 1)));
+        ASSERT_TRUE(retire(alice, device)) << i;
+    }
+}
+
+// The device list ------------------------------------------------------------------------------
+
+TEST_P(DirectoryContract, AUsersLiveDevicesAreListedWithTheirSupply) {
+    const auto none = devices_of(alice);
+    ASSERT_TRUE(none);
+    EXPECT_TRUE(none->empty());
+
+    const core::DeviceId phone = stocked_device(3);
+    const core::DeviceId laptop = stocked_device(0);
+    const core::DeviceId old = stocked_device(2);
+    ASSERT_TRUE(publish_last_resort(alice, laptop, package_of(300, 1)));
+    ASSERT_TRUE(retire(alice, old));
+    ASSERT_TRUE(enrol(bob, new_device()));
+
+    const auto listed = devices_of(alice);
+    ASSERT_TRUE(listed);
+    ASSERT_EQ(listed->size(), 2U) << "retired devices and other users' are not listed";
+    // In byte order of their ids.
+    EXPECT_LT((*listed)[0].device, (*listed)[1].device);
+    for (const core::ports::DeviceEntry& entry : *listed) {
+        if (entry.device == phone) {
+            EXPECT_EQ(entry.key_packages, 3U);
+            EXPECT_EQ(entry.last_resort, core::ports::LastResort::None);
+        } else {
+            EXPECT_EQ(entry.device, laptop);
+            EXPECT_EQ(entry.key_packages, 0U);
+            EXPECT_EQ(entry.last_resort, core::ports::LastResort::Fresh);
+        }
+    }
+    ASSERT_TRUE(fetch(alice, phone));
+    const auto after = devices_of(alice);
+    ASSERT_TRUE(after);
+    const auto it = std::ranges::find(*after, phone, &core::ports::DeviceEntry::device);
+    ASSERT_NE(it, after->end());
+    EXPECT_EQ(it->key_packages, 2U);
+}
+
 TEST_P(DirectoryContract, CommitEpochsAreClaimedInOrderAndOnce) {
     const core::DeviceId phone = stocked_device(0);
     const core::DeviceId laptop = stocked_device(0);

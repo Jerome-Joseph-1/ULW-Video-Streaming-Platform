@@ -27,7 +27,9 @@ struct E2eeDirectoryConfig {
 // The device registry and key package directory on Postgres, driven by the reactor.
 //
 // The single-use guarantee rests on the fetch being one statement that deletes the package it
-// returns, so no reply can carry a package whose row survived. Deregistration and fetches of the
+// returns, so no reply can carry a package whose row survived; the device's last-resort package
+// (ADR-0102) is the one a fetch keeps, and only a fetch that took no other hands it out.
+// Deregistration and fetches of the
 // same device are serialised on the device's row lock: a fetch either finishes before the
 // device is retired or sees it retired.
 //
@@ -56,6 +58,12 @@ public:
                          core::ports::E2eeCallback<void> done) override;
     void deregister_device(const core::UserId& user, const core::DeviceId& device,
                            core::ports::E2eeCallback<void> done) override;
+    void
+    list_devices(const core::UserId& user,
+                 core::ports::E2eeCallback<std::vector<core::ports::DeviceEntry>> done) override;
+    void publish_last_resort(const core::UserId& user, const core::DeviceId& device,
+                             core::ports::KeyPackageBytes package,
+                             core::ports::E2eeCallback<void> done) override;
     void publish_key_packages(const core::UserId& user, const core::DeviceId& device,
                               std::vector<core::ports::KeyPackageBytes> batch,
                               core::ports::E2eeCallback<std::size_t> done) override;

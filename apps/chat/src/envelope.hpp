@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "core/ports/e2ee.hpp"
 #include "core/ports/media.hpp"
 #include "core/ports/message_store.hpp"
 #include "core/util/time.hpp"
@@ -62,6 +63,17 @@
 //   {"type":"rooms"}   the rooms the user is listed in; "after":"<uuid>", "limit":<1 to 100>
 //   {"type":"members","room":"<uuid>"}   a room's members, for a member; "after":"<sub>",
 //       "limit":<1 to 100>
+// The key directory (ADR-0038, ADR-0102), none of which needs a join first; each takes an
+// optional "id" (a message id's syntax) that its answer or error repeats:
+//   {"type":"register_device","device":"<uuid>"}   this user's device, idempotently
+//   {"type":"retire_device","device":"<uuid>"}   for good: its packages go, its id never returns
+//   {"type":"publish_key_packages","device":"<uuid>","key_packages":["<base64url>",...],
+//    "last_resort":"<base64url>"}   0 to 100 single-use packages and an optional last-resort
+//       one that replaces the device's; at least one package in all
+//   {"type":"devices","user":"<sub>"}   the user's live devices: one's own, or a user one shares
+//       a direct or group chat with
+//   {"type":"claim_key_packages","user":"<sub>","devices":["<uuid>",...]}   one package of each
+//       named device ("devices" optional: every live one), each handed out once
 // Server to client:
 //   {"type":"joined","room":"<uuid>","seq":<integer>}   the room's latest seq known: a client
 //                                                      whose last seq is lower missed messages
@@ -98,6 +110,16 @@
 //   {"type":"member","room":"<uuid>","user":"<sub>",
 //    "change":"added"|"removed"|"promoted"|"demoted"}   unasked: a
 //       member list this connection's user is on, or a room it has joined, changed
+//   {"type":"device_registered"|"key_packages_published","device":"<uuid>","key_packages":<n>,
+//    "last_resort":"none"|"fresh"|"used"}   the device's supply now
+//   {"type":"device_retired","device":"<uuid>"}
+//   {"type":"devices","user":"<sub>","devices":[{"device":"<uuid>"}]}   with each one's
+//       "key_packages" and "last_resort" for the user's own devices
+//   {"type":"key_packages","user":"<sub>","key_packages":[{"device":"<uuid>",
+//    "key_package":"<base64url>","last_resort":<bool>}],"exhausted":[..],"gone":[..],
+//    "unavailable":[..]}   the answer to claim_key_packages
+//   {"type":"replenish","device":"<uuid>"}   unasked, to this node's connections that registered
+//       the device: a claim left it low, or without single-use packages
 //   {"type":"error","reason":"<code>"}          with "room" and "id" when known, "user" for a
 //                                               watch, and "retry_after_ms" when the reason is
 //                                               rate_limited, or unavailable for a call
@@ -205,9 +227,46 @@ struct ListMembers {
     std::size_t limit = kDefaultListLimit;
 };
 
+// The key directory (ADR-0038, ADR-0102): each carries an optional request id, a message id's
+// syntax, which its answer and its error repeat so that a client can tell answers apart.
+struct RegisterDevice {
+    core::DeviceId device;
+    std::optional<rt::MessageKey> id = std::nullopt;
+};
+
+struct RetireDevice {
+    core::DeviceId device;
+    std::optional<rt::MessageKey> id = std::nullopt;
+};
+
+struct PublishKeyPackages {
+    core::DeviceId device;
+    // 0 to kMaxKeyPackagesPerDevice single-use packages, each 1 to kMaxKeyPackageBytes; with
+    // none, `last_resort` is there.
+    std::vector<core::ports::KeyPackageBytes> packages;
+    std::optional<core::ports::KeyPackageBytes> last_resort = std::nullopt;
+    std::optional<rt::MessageKey> id = std::nullopt;
+};
+
+struct ListDevices {
+    core::UserId user;
+    std::optional<rt::MessageKey> id = std::nullopt;
+};
+
+struct ClaimKeyPackages {
+    core::UserId user;
+    // Which of the user's devices, 1 to kMaxDevicesPerUser of them, each once; every live one
+    // when empty.
+    std::vector<core::DeviceId> devices;
+    std::optional<rt::MessageKey> id = std::nullopt;
+};
+
+using DirectoryCommand =
+    std::variant<RegisterDevice, RetireDevice, PublishKeyPackages, ListDevices, ClaimKeyPackages>;
+
 using Command =
     std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, OpenDirect, CreateGroup,
-                 AddMembers, RemoveMember, LeaveRoom, ListRooms, ListMembers>;
+                 AddMembers, RemoveMember, LeaveRoom, ListRooms, ListMembers, DirectoryCommand>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -230,6 +289,8 @@ enum class EnvelopeError : std::uint8_t {
     BadDevice,
     // Not a call id: a canonical lowercase UUID.
     BadCall,
+    // A key package above core::ports::kMaxKeyPackageBytes.
+    TooLarge,
 };
 
 [[nodiscard]] std::expected<Command, EnvelopeError> parse_command(std::string_view text);
@@ -291,6 +352,46 @@ struct ErrorContext {
     std::optional<core::Millis> retry_after;
 };
 void write_error_with(std::string& out, std::string_view reason, const ErrorContext& context);
+
+// The key directory's answers (ADR-0102). `type` is device_registered or
+// key_packages_published: the device's supply after the command.
+void write_device_supply(std::string& out, std::string_view type,
+                         const core::ports::DeviceEntry& entry,
+                         const std::optional<rt::MessageKey>& id);
+void write_device_retired(std::string& out, const core::DeviceId& device,
+                          const std::optional<rt::MessageKey>& id);
+// `supply`: each device's key_packages and last_resort too (the user's own devices only).
+void write_devices(std::string& out, const core::UserId& user,
+                   std::span<const core::ports::DeviceEntry> devices, bool supply,
+                   const std::optional<rt::MessageKey>& id);
+struct ClaimedPackage {
+    core::DeviceId device;
+    core::ports::KeyPackageBytes package;
+    bool last_resort = false;
+};
+struct ClaimOutcome {
+    std::vector<ClaimedPackage> claimed;
+    // Live devices with nothing left, devices that are not (or no longer) the user's live ones,
+    // and devices the database did not answer for.
+    std::vector<core::DeviceId> exhausted;
+    std::vector<core::DeviceId> gone;
+    std::vector<core::DeviceId> unavailable;
+};
+void write_claimed(std::string& out, const core::UserId& user, const ClaimOutcome& outcome,
+                   const std::optional<rt::MessageKey>& id);
+// Unasked, to the connections on this node that registered the device: a claim left it low or
+// without single-use packages.
+void write_replenish(std::string& out, const core::DeviceId& device);
+// A directory command refused: its request id, device or user when known.
+struct DirectoryErrorContext {
+    std::optional<rt::MessageKey> id;
+    std::optional<core::DeviceId> device;
+    std::optional<core::UserId> user;
+    std::optional<core::Millis> retry_after;
+};
+void write_directory_error(std::string& out, std::string_view reason,
+                           const DirectoryErrorContext& context);
+[[nodiscard]] std::string_view last_resort_name(core::ports::LastResort state) noexcept;
 
 // The error codes clients see.
 [[nodiscard]] std::string_view reason(EnvelopeError e) noexcept;

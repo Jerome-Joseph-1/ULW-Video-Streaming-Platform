@@ -5,6 +5,7 @@ ulw_add_library(chat_lib
     src/chat_service.cpp
     src/config.cpp
     src/envelope.cpp
+    src/key_directory.cpp
     src/key_fetcher.cpp
     src/live_chat.cpp
     src/membership.cpp

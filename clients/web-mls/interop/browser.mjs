@@ -1,7 +1,9 @@
 // example.html in two Chromium contexts (each its own user, cookie jar and IndexedDB) against a
 // real chat_server, with the FFI bridge's device in the room too: the first browser starts the
-// group and adds the second and then the native device, everyone reads everyone, and the second
-// browser reloads and comes back from IndexedDB still in the group. Run by run.sh --browser.
+// group and adds the second, found through the chat server's key directory, and then the native
+// device, which still asks the old way, with a key package posted to the room; everyone reads
+// everyone, and the second browser reloads and comes back from IndexedDB still in the group. Run
+// by run.sh --browser.
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -106,16 +108,18 @@ await run(async () => {
     await inGroup(alice, 1);
     await bob.click("#announce");
     const bobFingerprint = (await bob.textContent("#me")).split("fingerprint ")[1].replace(/\s/g, "");
-    await approveNext(alice, "bob/laptop", bobFingerprint);
+    // Bob's device registered itself in the key directory; alice's page finds it there (ADR-0102).
+    await approveNext(alice, "bob/", bobFingerprint);
     await inGroup(bob, 2);
-    log("bob's browser joined alice's group through the room");
+    log("bob's browser joined alice's group through the key directory");
     await say(alice, "hello bob, from alice's browser");
     await sees(bob, "hello bob, from alice's browser");
     await say(bob, "hi alice");
     await sees(alice, "hi alice");
     log("two browser contexts exchanged encrypted messages");
 
-    // The bridge's device asks to join; alice's page adds it.
+    // The bridge's device asks to join the old way, with a key package in the room; alice's page
+    // still adds it.
     const sc = new Socket("ffi-carol");
     await sc.open();
     await sc.join(room);
