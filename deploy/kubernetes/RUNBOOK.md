@@ -712,6 +712,22 @@ kubectl -n "$NS" get pods -o \
   jsonpath='{range .items[*]}{.metadata.name}{" "}{.status.containerStatuses[*].imageID}{"\n"}{end}'
 ```
 
+### 4b. How fast the worker publishes
+
+Once a video is encoded, the worker uploads its HLS output to the bucket: a segment per 2-4 s of
+video per rendition, about 3,500 files for a two-hour film. It uploads `ULW_PUBLISH_CONCURRENCY`
+segments at once (default 8, 1 to 32), each thread keeping its connection, and TLS session, to
+the store for the whole publish (ADR-0102). Every job logs the publish:
+
+```sh
+kubectl -n "$NAMESPACE" logs deploy/video-worker | grep -E '"event":"publish(ing|ed)"'
+```
+
+`published` carries `files`, `bytes`, `wall_ms` and `mib_per_s`. A rate near the node's uplink
+is as fast as it goes; a low rate with a fast uplink means round trips dominate, and a higher
+concurrency helps. To go back to one file at a time, set `ULW_PUBLISH_CONCURRENCY` to `1` in the
+worker Deployment of your overlay and apply it.
+
 ### For maintainers: image builds and the worker's ffmpeg
 
 The images come from two distributions (docs/adr/0074): `video-gateway` and `chat` are Ubuntu

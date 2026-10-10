@@ -14,6 +14,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <gtest/gtest.h>
 #include <mutex>
@@ -66,7 +67,8 @@ protected:
                                   .log = log},
                                  {.scratch = scratch.path(),
                                   .node = *core::NodeId::parse("worker-a"),
-                                  .lease = intervals});
+                                  .lease = intervals,
+                                  .publish_concurrency = concurrency});
         return runner.run(job, shutdown);
     }
 
@@ -99,6 +101,8 @@ protected:
     // Long enough that the keeper stays out of the way unless a test shortens it.
     worker::LeaseKeeper::Intervals intervals{.heartbeat = std::chrono::hours(1),
                                              .progress = std::chrono::hours(1)};
+    // Segments uploaded at once; 1, the sequential order, unless a test raises it.
+    unsigned concurrency = 1;
 };
 
 TEST_F(JobRunnerTest, PublishesSegmentsThenPlaylistsThenTheMasterAndOnlyThenFinishes) {
@@ -387,6 +391,127 @@ TEST_F(JobRunnerTest, ALeaseLostWhilePublishingStopsTheUploadsBeforeTheMaster) {
     EXPECT_EQ(writes(),
               std::vector<std::string>{"upload " + kPrefix + "720p/init_0.mp4 video/mp4"});
     EXPECT_EQ(transfer.objects().count(kPrefix + "master.m3u8"), 0U);
+}
+
+// ADR-0102: the publish pool. The fake transcoder's output is six segments (an init and two
+// media segments per rung), two media playlists and the master.
+const std::vector<std::string> kSegments{"720p/init_0.mp4",    "720p/seg_00000.m4s",
+                                         "720p/seg_00001.m4s", "360p/init_1.mp4",
+                                         "360p/seg_00000.m4s", "360p/seg_00001.m4s"};
+
+std::vector<std::string> uploaded_keys(const std::vector<std::string>& writes) {
+    std::vector<std::string> keys;
+    for (const std::string& w : writes) {
+        if (w.starts_with("upload " + kPrefix)) {
+            const std::string rest = w.substr(("upload " + kPrefix).size());
+            keys.push_back(rest.substr(0, rest.find(' ')));
+        }
+    }
+    return keys;
+}
+
+TEST_F(JobRunnerTest, SegmentsUploadAtOnceUpToTheConcurrency) {
+    concurrency = 3;
+    transfer.hold = std::chrono::milliseconds(100);
+    EXPECT_EQ(run(), JobOutcome::Done);
+    EXPECT_EQ(transfer.peak_in_flight(), 3);
+    EXPECT_EQ(transfer.objects().size(), 1U + kSegments.size() + 3U);
+}
+
+TEST_F(JobRunnerTest, NoMoreThreadsThanSegments) {
+    concurrency = 32;
+    transfer.hold = std::chrono::milliseconds(50);
+    EXPECT_EQ(run(), JobOutcome::Done);
+    EXPECT_LE(transfer.peak_in_flight(), static_cast<int>(kSegments.size()));
+}
+
+TEST_F(JobRunnerTest, ThePlaylistsFollowEverySegmentAndTheMasterIsLast) {
+    concurrency = 4;
+    transfer.hold = std::chrono::milliseconds(10);
+    EXPECT_EQ(run(), JobOutcome::Done);
+    const std::vector<std::string> keys = uploaded_keys(writes());
+    ASSERT_EQ(keys.size(), kSegments.size() + 3U);
+    std::vector<std::string> first(keys.begin(),
+                                   keys.begin() + static_cast<std::ptrdiff_t>(kSegments.size()));
+    std::ranges::sort(first);
+    std::vector<std::string> expected = kSegments;
+    std::ranges::sort(expected);
+    EXPECT_EQ(first, expected);
+    EXPECT_EQ(keys[kSegments.size()], "720p/index.m3u8");
+    EXPECT_EQ(keys[kSegments.size() + 1], "360p/index.m3u8");
+    EXPECT_EQ(keys.back(), "master.m3u8");
+    EXPECT_TRUE(writes().back().starts_with("queue finish"));
+}
+
+TEST_F(JobRunnerTest, AFailedUploadFailsTheAttemptAndNothingStartsAfterIt) {
+    transfer.fail_key = kPrefix + "720p/seg_00000.m4s";
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    // In order, one at a time: the init went up, the failed segment stopped everything.
+    EXPECT_EQ(writes(),
+              (std::vector<std::string>{"upload " + kPrefix + "720p/init_0.mp4 video/mp4",
+                                        "upload failed " + kPrefix + "720p/seg_00000.m4s",
+                                        "queue fail retryable publishing the output failed"}));
+}
+
+TEST_F(JobRunnerTest, AFailedUploadInThePoolPublishesNoPlaylist) {
+    concurrency = 4;
+    transfer.hold = std::chrono::milliseconds(20);
+    transfer.fail_key = kPrefix + "720p/init_0.mp4";
+    EXPECT_EQ(run(), JobOutcome::Requeued);
+    const auto objects = transfer.objects();
+    for (const char* playlist : {"720p/index.m3u8", "360p/index.m3u8", "master.m3u8"}) {
+        EXPECT_EQ(objects.count(kPrefix + playlist), 0U) << playlist;
+    }
+    EXPECT_EQ(writes().back(), "queue fail retryable publishing the output failed");
+}
+
+TEST_F(JobRunnerTest, ALeaseLostWhilePublishingStopsThePool) {
+    concurrency = 4;
+    // Long enough that the other threads are still on their first segment when the loss lands.
+    transfer.hold = std::chrono::milliseconds(300);
+    intervals.heartbeat = std::chrono::milliseconds(1);
+    std::stop_token abandon;
+    transcoder.during_run = [&abandon](core::ports::ITranscodeProgress&,
+                                       const std::stop_token& stop) { abandon = stop; };
+    // Forty more segments than the pool could have taken before the loss lands.
+    transcoder.after_run = [](const std::filesystem::path& out) {
+        for (int i = 2; i < 42; ++i) {
+            std::ofstream(out / "720p" / std::format("seg_{:05}.m4s", i)) << "segment";
+        }
+    };
+    std::atomic<bool> first{true};
+    std::atomic<bool> lost{false};
+    transfer.after_upload = [&](const std::string&) {
+        if (!first.exchange(false)) {
+            return;
+        }
+        lease_queue.answer_heartbeat(false);
+        std::mutex m;
+        std::condition_variable_any cv;
+        std::unique_lock lock(m);
+        cv.wait_for(lock, abandon, std::chrono::seconds(10), [] { return false; });
+        lost = abandon.stop_requested();
+    };
+    EXPECT_EQ(run(), JobOutcome::Abandoned);
+    ASSERT_TRUE(lost);
+    // Each thread finishes the request it had in flight, and at most one it took before the
+    // keeper saw the loss: nowhere near the 46 segments.
+    EXPECT_LE(uploaded_keys(writes()).size(), 8U);
+    EXPECT_EQ(transfer.objects().count(kPrefix + "master.m3u8"), 0U);
+}
+
+TEST_F(JobRunnerTest, ThePoolPublishesTheSameObjectsAsTheSequentialUpload) {
+    EXPECT_EQ(run(), JobOutcome::Done);
+    const auto sequential = transfer.objects();
+    // Every output object made stale, so one the pool skipped would show.
+    for (const auto& [key, bytes] : sequential) {
+        if (key.starts_with(kPrefix)) {
+            transfer.put(key, "stale");
+        }
+    }
+    concurrency = 8;
+    EXPECT_EQ(run(), JobOutcome::Done);
+    EXPECT_EQ(transfer.objects(), sequential);
 }
 
 TEST_F(JobRunnerTest, ShutdownMidTranscodeGivesTheJobBackAtOnce) {

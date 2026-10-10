@@ -59,9 +59,9 @@ private:
 };
 
 Result run_blocking(const Request& request, std::uint64_t upload_length, IBodySource* source,
-                    IDownloadSink* sink) {
+                    IDownloadSink* sink, CURL* reuse = nullptr) {
     auto exchange = detail::Exchange::create(request, upload_length, source,
-                                             detail::Exchange::Mode::Blocking, sink);
+                                             detail::Exchange::Mode::Blocking, sink, reuse);
     if (!exchange) {
         return std::unexpected(std::move(exchange.error()));
     }
@@ -114,6 +114,38 @@ Result perform_download(const Request& request, IDownloadSink& sink) {
 Result perform_upload(const Request& request, std::uint64_t length, IUploadSource& source) {
     UploadSource adapter(source);
     return run_blocking(request, length, &adapter, nullptr);
+}
+
+Session::~Session() {
+    if (easy_ != nullptr) {
+        curl_easy_cleanup(easy_);
+    }
+}
+
+void* Session::handle() noexcept {
+    if (easy_ == nullptr && detail::global_init()) {
+        easy_ = curl_easy_init();
+    }
+    return easy_;
+}
+
+Result Session::perform(const Request& request, std::span<const std::byte> body) {
+    SpanSource source(body);
+    CURL* const easy = handle();
+    if (easy == nullptr) {
+        return std::unexpected(Failure{.kind = FailureKind::Local, .detail = "curl init failed"});
+    }
+    return run_blocking(request, body.size(), &source, nullptr, easy);
+}
+
+Result Session::perform_upload(const Request& request, std::uint64_t length,
+                               IUploadSource& source) {
+    UploadSource adapter(source);
+    CURL* const easy = handle();
+    if (easy == nullptr) {
+        return std::unexpected(Failure{.kind = FailureKind::Local, .detail = "curl init failed"});
+    }
+    return run_blocking(request, length, &adapter, nullptr, easy);
 }
 
 } // namespace infra::curl

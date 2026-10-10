@@ -65,6 +65,10 @@ spec:
             # realtime (apps/worker/src/config.cpp); the CPU limit below matches it.
             - name: ULW_FFMPEG_THREADS
               value: "4"
+            # Segments uploaded at once while publishing, each thread on a connection of its
+            # own (ADR-0102). 1 uploads one at a time, as before it.
+            - name: ULW_PUBLISH_CONCURRENCY
+              value: "8"
             - name: ULW_DATABASE_URL
               valueFrom:
                 secretKeyRef:

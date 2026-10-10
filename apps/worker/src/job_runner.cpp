@@ -14,11 +14,13 @@
 #include <cstdint>
 #include <expected>
 #include <format>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stop_token>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -409,27 +411,36 @@ private:
         // ffmpeg ran on hostile input with write access to this tree; a link it left could
         // name any file the worker can read, such as its own /proc/self/environ.
         std::error_code ec;
-        if (!fs::is_regular_file(fs::symlink_status(file, ec))) {
+        const auto status = fs::symlink_status(file, ec);
+        if (!fs::is_regular_file(status)) {
             return std::unexpected("not a regular file: " + file.filename().string());
         }
         const auto parsed = core::StorageKey::parse(key);
         if (!parsed) {
             return std::unexpected("unaddressable output " + key);
         }
+        const std::uint64_t bytes = fs::file_size(file, ec);
         if (auto r = deps_.store.upload(file, *parsed, content_type(kind)); !r) {
             return std::unexpected(key + ": " + std::string(core::ports::to_string(r.error())));
         }
-        ++published_;
+        published_bytes_.fetch_add(ec ? 0 : bytes);
+        const std::size_t done = published_.fetch_add(1) + 1;
         constexpr auto kShare = static_cast<std::size_t>(kPublishedPercent - kEncodedPercent);
         const std::size_t share =
-            std::min(published_, to_publish_) * kShare / std::max<std::size_t>(to_publish_, 1);
-        keeper_.report(static_cast<std::uint8_t>(kEncodedPercent + share));
+            std::min(done, to_publish_) * kShare / std::max<std::size_t>(to_publish_, 1);
+        keeper_.raise(static_cast<std::uint8_t>(kEncodedPercent + share));
         return {};
     }
 
-    // A rung's init and media segments, in name order.
-    std::expected<void, std::string> publish_segments(const fs::path& dir,
-                                                      const std::string& rung) {
+    struct PublishItem {
+        fs::path file;
+        std::string key;
+        Output kind = Output::Segment;
+    };
+
+    // A rung's init and media segments, in name order, to `items`.
+    std::expected<void, std::string> list_segments(const fs::path& dir, const std::string& rung,
+                                                   std::vector<PublishItem>& items) const {
         std::vector<fs::path> files;
         std::error_code ec;
         if (!fs::is_directory(fs::symlink_status(dir, ec))) {
@@ -455,33 +466,82 @@ private:
             } else {
                 return std::unexpected("unexpected output " + name);
             }
-            if (auto r =
-                    upload(file, output_key(job_.video, std::format("{}/{}", rung, name)), *kind);
-                !r) {
-                return r;
+            items.push_back({.file = file,
+                             .key = output_key(job_.video, std::format("{}/{}", rung, name)),
+                             .kind = *kind});
+        }
+        return {};
+    }
+
+    // Uploads `items` from up to `threads` threads at once, this one among them, each taking
+    // the next item not yet taken (ADR-0102). The first failure stops every thread from taking
+    // another; one losing the lease fails its next upload, so the pool stops within one request
+    // per thread. With one thread it is the sequential loop, in order.
+    std::expected<void, std::string> upload_all(std::span<const PublishItem> items,
+                                                std::size_t threads) {
+        std::atomic<std::size_t> next{0};
+        std::atomic<bool> failed{false};
+        std::mutex mutex;
+        std::optional<std::string> first_error;
+        const auto drain = [&] {
+            while (!failed.load()) {
+                const std::size_t i = next.fetch_add(1);
+                if (i >= items.size()) {
+                    return;
+                }
+                if (auto r = upload(items[i].file, items[i].key, items[i].kind); !r) {
+                    const std::scoped_lock lock(mutex);
+                    if (!first_error) {
+                        first_error = std::move(r.error());
+                    }
+                    failed.store(true);
+                    return;
+                }
             }
+        };
+        {
+            std::vector<std::jthread> pool;
+            pool.reserve(threads > 0 ? threads - 1 : 0);
+            for (std::size_t t = 1; t < threads; ++t) {
+                try {
+                    pool.emplace_back(drain);
+                } catch (const std::system_error& e) {
+                    // Fewer threads publish more slowly, not wrongly.
+                    log().warn("publish thread not started", {{"job", id()}, {"error", e.what()}});
+                    break;
+                }
+            }
+            drain();
+        }
+        if (first_error) {
+            return std::unexpected(std::move(*first_error));
         }
         return {};
     }
 
     // Segments, then media playlists, then the master: a reader who finds a playlist finds
-    // everything it names, and the master, written last, is the commit point.
+    // everything it names, and the master, written last, is the commit point. Segments go up
+    // from a pool of settings_.publish_concurrency threads; the playlists, a handful, one by
+    // one once every segment is up.
     std::expected<std::vector<core::ports::Rendition>, std::string>
     publish(const fs::path& out, std::span<const core::Rung> ladder, bool has_audio) {
-        // Every file under `out` is uploaded once, so their count is the publish's length.
-        std::error_code ec;
-        to_publish_ = 0;
-        published_ = 0;
-        for (const auto& entry : fs::recursive_directory_iterator(out, ec)) {
-            if (entry.is_regular_file(ec)) {
-                ++to_publish_;
-            }
-        }
-        keeper_.report(kEncodedPercent);
+        std::vector<PublishItem> segments;
         for (const core::Rung& rung : ladder) {
-            if (auto r = publish_segments(out / rung.name, rung.name); !r) {
+            if (auto r = list_segments(out / rung.name, rung.name, segments); !r) {
                 return std::unexpected(r.error());
             }
+        }
+        // Every segment, each rung's playlist and the master.
+        to_publish_ = segments.size() + ladder.size() + 1;
+        published_.store(0);
+        published_bytes_.store(0);
+        const std::size_t threads = std::max<std::size_t>(
+            1, std::min<std::size_t>(settings_.publish_concurrency, segments.size()));
+        log().info("publishing", {{"job", id()}, {"files", to_publish_}, {"concurrency", threads}});
+        const auto started = deps_.clock.now();
+        keeper_.raise(kEncodedPercent);
+        if (auto r = upload_all(segments, threads); !r) {
+            return std::unexpected(r.error());
         }
         std::vector<core::ports::Rendition> renditions;
         for (const core::Rung& rung : ladder) {
@@ -499,6 +559,16 @@ private:
             !r) {
             return std::unexpected(r.error());
         }
+        const auto wall = std::chrono::duration_cast<core::Millis>(deps_.clock.now() - started);
+        const std::uint64_t bytes = published_bytes_.load();
+        const double seconds =
+            static_cast<double>(std::max<core::Millis::rep>(wall.count(), 1)) / 1000.0;
+        log().info("published",
+                   {{"job", id()},
+                    {"files", published_.load()},
+                    {"bytes", bytes},
+                    {"wall_ms", wall.count()},
+                    {"mib_per_s", static_cast<double>(bytes) / (1024.0 * 1024.0) / seconds}});
         return renditions;
     }
 
@@ -507,9 +577,11 @@ private:
     const core::ports::ClaimedJob& job_;
     Metrics metrics_;
     bool rerun_ = false;
-    // Files of the output uploaded so far, of how many, for the progress publishing reports.
-    std::size_t published_ = 0;
+    // Files of the output uploaded so far, of how many, and their bytes: for the progress
+    // publishing reports and its log line. The counts are bumped from the publish pool.
+    std::atomic<std::size_t> published_{0};
     std::size_t to_publish_ = 0;
+    std::atomic<std::uint64_t> published_bytes_{0};
     std::stop_source abandon_;
     LeaseKeeper keeper_;
     std::stop_callback<RequestStop> on_shutdown_;

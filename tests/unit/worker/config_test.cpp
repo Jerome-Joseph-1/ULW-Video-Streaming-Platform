@@ -154,6 +154,19 @@ TEST_F(WorkerConfigTest, ThreadsDefaultToAFixedNumberAndMayBeSet) {
     }
 }
 
+// ADR-0102: eight segments at once unless set; 1 is the sequential upload.
+TEST_F(WorkerConfigTest, PublishConcurrencyDefaultsToEightAndMayBeSetFrom1To32) {
+    EXPECT_EQ(load()->publish_concurrency, 8U);
+    env["ULW_PUBLISH_CONCURRENCY"] = "1";
+    EXPECT_EQ(load()->publish_concurrency, 1U);
+    env["ULW_PUBLISH_CONCURRENCY"] = "32";
+    EXPECT_EQ(load()->publish_concurrency, 32U);
+    for (const char* bad : {"0", "33", "eight", "-1", "8 "}) {
+        env["ULW_PUBLISH_CONCURRENCY"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_PUBLISH_CONCURRENCY") << bad;
+    }
+}
+
 TEST_F(WorkerConfigTest, WorkersSharingAScratchRootEachGetADirectoryOfTheirOwn) {
     // Startup clears the scratch directory; one worker must not clear another's live jobs.
     const auto first = load();

@@ -15,6 +15,19 @@ namespace infra::curl::detail {
 // curl_global_init, once per process, before the first handle exists.
 [[nodiscard]] bool global_init() noexcept;
 
+// Frees an Exchange's own handle. A borrowed one (Session's) is reset instead: its options go,
+// its open connections stay.
+struct EasyCleanup {
+    bool owned = true;
+    void operator()(CURL* easy) const noexcept {
+        if (owned) {
+            curl_easy_cleanup(easy);
+        } else {
+            curl_easy_reset(easy);
+        }
+    }
+};
+
 // One request's easy handle plus everything libcurl points into while it runs: the header
 // list, the error buffer, the response being received and the body source. It lives at a
 // fixed address for that reason.
@@ -30,9 +43,11 @@ public:
 
     // `source` supplies exactly `upload_length` bytes for PUT and POST; other methods ignore
     // both. With a `sink`, a 2xx body goes there instead of into the response.
+    // With `reuse`, a blocking exchange runs on that handle instead of a new one, and leaves
+    // it reset but alive, its connection cache included, for the next (Session).
     [[nodiscard]] static std::expected<std::unique_ptr<Exchange>, Failure>
     create(const Request& request, std::uint64_t upload_length, IBodySource* source,
-           Mode mode = Mode::Reactor, IDownloadSink* sink = nullptr);
+           Mode mode = Mode::Reactor, IDownloadSink* sink = nullptr, CURL* reuse = nullptr);
 
     Exchange(Token token, std::size_t max_body, std::uint64_t upload_length, IBodySource* source,
              Mode mode, IDownloadSink* sink) noexcept;
@@ -46,7 +61,7 @@ public:
     void resume_body() noexcept;
 
 private:
-    [[nodiscard]] std::expected<void, Failure> configure(const Request& request);
+    [[nodiscard]] std::expected<void, Failure> configure(const Request& request, CURL* reuse);
 
     static std::size_t on_header(char* data, std::size_t size, std::size_t count,
                                  void* self) noexcept;
@@ -57,9 +72,6 @@ private:
 
     struct SlistFree {
         void operator()(curl_slist* list) const noexcept { curl_slist_free_all(list); }
-    };
-    struct EasyCleanup {
-        void operator()(CURL* easy) const noexcept { curl_easy_cleanup(easy); }
     };
 
     // Declared before the handle so it is freed after it: libcurl reads the list until

@@ -75,29 +75,29 @@ Exchange::Exchange(Token /*token*/, std::size_t max_body, std::uint64_t upload_l
     : max_body_(max_body), upload_left_(source == nullptr ? 0 : upload_length), source_(source),
       mode_(mode), sink_(sink) {}
 
-std::expected<std::unique_ptr<Exchange>, Failure> Exchange::create(const Request& request,
-                                                                   std::uint64_t upload_length,
-                                                                   IBodySource* source, Mode mode,
-                                                                   IDownloadSink* sink) {
+std::expected<std::unique_ptr<Exchange>, Failure>
+Exchange::create(const Request& request, std::uint64_t upload_length, IBodySource* source,
+                 Mode mode, IDownloadSink* sink, CURL* reuse) {
     if (!global_init()) {
         return std::unexpected(Failure{.kind = FailureKind::Local, .detail = "curl init failed"});
     }
     auto exchange =
         std::make_unique<Exchange>(Token{}, request.max_body, upload_length, source, mode, sink);
-    if (auto configured = exchange->configure(request); !configured) {
+    if (auto configured = exchange->configure(request, reuse); !configured) {
         return std::unexpected(std::move(configured.error()));
     }
     return exchange;
 }
 
-std::expected<void, Failure> Exchange::configure(const Request& request) {
+std::expected<void, Failure> Exchange::configure(const Request& request, CURL* reuse) {
     const auto local = [](std::string detail) {
         return std::unexpected(Failure{.kind = FailureKind::Local, .detail = std::move(detail)});
     };
-    CURL* const e = curl_easy_init();
+    CURL* const e = reuse != nullptr ? reuse : curl_easy_init();
     if (e == nullptr) {
         return local("curl_easy_init failed");
     }
+    const EasyCleanup release{.owned = reuse == nullptr};
     // The TLS versions are set on the new handle before anything else, and a handle that refuses
     // them is freed here, so no path through this keeps a handle without them. TLS 1.3 at least,
     // whatever the host's OpenSSL configuration allows: libcurl's own default floor is TLS 1.0, and
@@ -114,10 +114,10 @@ std::expected<void, Failure> Exchange::configure(const Request& request) {
     constexpr long kTlsMax = CURL_SSLVERSION_MAX_TLSv1_3;
     constexpr long kTlsVersions = kTlsMin | kTlsMax;
     if (curl_easy_setopt(e, CURLOPT_SSLVERSION, kTlsVersions) != CURLE_OK) {
-        curl_easy_cleanup(e);
+        release(e);
         return local("curl refused the tls versions");
     }
-    easy_.reset(e);
+    easy_ = std::unique_ptr<CURL, EasyCleanup>(e, release);
     const auto append = [this](const char* line) {
         curl_slist* const head = header_list_.release();
         curl_slist* const grown = curl_slist_append(head, line);
