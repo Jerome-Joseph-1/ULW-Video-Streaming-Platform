@@ -57,7 +57,7 @@ exists already; it builds nothing.
 | Chat: the WebSocket envelope and the service API ([chat.md](chat.md)) | Stable |
 | Calls, 1:1 and group ([calls.md](calls.md)) | Stable |
 | End-to-end encryption: the key directory on the chat socket and the browser client's room convention ([e2ee.md](e2ee.md)) | Stable |
-| Live ([live.md](live.md)) | Draft until the milestone named at the top of the page merges |
+| Live streams: the stream endpoints under `/api/v1/live`, publishing over WHIP, live playlists and recordings ([live.md](live.md)) | Stable |
 
 ## Proposal: compatibility policy
 

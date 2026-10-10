@@ -14,8 +14,8 @@ against in HTML comments, for maintainers.
 - **Identity** from the operator's identity provider: the same JWT the apps already hold,
   verified against the provider's JWKS. There are no ULW accounts.
 - **Realtime**: chat (direct and group chats, history, presence, the operator's service API),
-  1:1 and group calls, and end-to-end encrypted chat (MLS, with a key directory for every
-  device of every user) are Stable; live streams are a draft.
+  1:1 and group calls, live streams, and end-to-end encrypted chat (MLS, with a key directory
+  for every device of every user) are Stable.
 
 ## Pages
 
@@ -29,7 +29,7 @@ against in HTML comments, for maintainers.
 | [changelog.md](changelog.md) | Changes to the Stable pages a client may have to act on | Stable |
 | [chat.md](chat.md) | WebSocket endpoint, envelope, resume, history, member lists, presence and the service API | Stable |
 | [calls.md](calls.md) | 1:1 and group calls | Stable |
-| [live.md](live.md) | Live streams | Draft until M33 |
+| [live.md](live.md) | Live streams: starting, publishing over WHIP, watching, and the recording each becomes | Stable |
 | [e2ee.md](e2ee.md) | End-to-end encrypted chat: the key directory, multi-device, the browser client | Stable |
 
 "Stable" means the contract described there (the `/api/v1` endpoints, and chat's WebSocket, its

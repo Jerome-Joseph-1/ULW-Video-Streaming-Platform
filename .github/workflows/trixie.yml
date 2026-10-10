@@ -132,8 +132,10 @@ jobs:
             -v "$PWD:$PWD" -w "$PWD" \
             -e ULW_TEST_DATABASE_URL=postgresql://postgres:testtest123@127.0.0.1:15432/postgres \
             ulw-worker-test -euo pipefail -c '
-            # strace for the trace, python3 for the child the sandbox tests allocate in.
-            deploy/docker/apt-install-debian.sh strace=6.13+ds-1 python3=3.13.5-1 >/dev/null
+            # strace for the trace, python3 for the child the sandbox tests allocate in,
+            # liburing2 for the live recording suite, whose stream rows go through a reactor.
+            deploy/docker/apt-install-debian.sh strace=6.13+ds-1 python3=3.13.5-1 \
+              liburing2=2.9-1 >/dev/null
             ffmpeg -version | head -1
             useradd -u "$(stat -c %u .)" -M -d /tmp tester
             as_tester() {

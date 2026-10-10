@@ -27,6 +27,30 @@ What to do:
   Deploy the gateway (which runs migrations) before chat. Each chat node opens two more database
   sessions (`application_name` `ulw-e2ee`). New `e2ee_*` metrics ([operator-contract.md](operator-contract.md)).
 
+## 2026-10-09: live streams are Stable
+
+<!-- docs/integration/live.md, docs/integration/versioning.md, apps/gateway/src/connection.cpp (respond_stream), apps/live-packager/src/recorder.cpp, infra/postgres/src/live_recordings.cpp, tests/integration/live_recording_test.cpp, tests/e2e/live-publish.e2e.mjs -->
+
+Live streams leave draft (M33). Nothing in the API changes today: what [live.md](live.md)
+describes is what is served, and it is now kept under the compatibility rules in
+[versioning.md](versioning.md).
+
+| Before | Now |
+|---|---|
+| Starting, ticketing, going live and ending a stream (`/api/v1/live`) were a draft | Stable |
+| Publishing over WHIP with the stream service's tickets was a draft | Stable |
+| Watching (`GET /api/v1/live/{id}/index.m3u8`) was a draft | Stable |
+| A stream's end and its recording were a draft until M33 | Stable: a stream that ended with media becomes exactly one video of its broadcaster's, `private`, titled `Live stream <stream id>`, that goes through `processing` to `ready` with the VOD ladder for the stream's resolution; the owner reads its id as `video_id` on `GET /api/v1/live/{id}`. A stream that ends with no media, or whose media cannot be read back, becomes no video, and `video_id` stays `null` |
+
+What to do:
+
+- **Clients:** nothing to change. After a stream ends, poll `GET /api/v1/live/{id}` for
+  `video_id`, then follow the video as any other; treat a `video_id` that stays `null` as a
+  stream with no recording. From now on a breaking change to live streams is announced here
+  ahead of time; additive ones (a new field, an `ended_by` value) may arrive without notice, so
+  ignore what you do not know.
+- **Operators:** nothing to change.
+
 ## 2026-10-09: a processing video says how far along it is
 
 <!-- apps/gateway/src/video_access.cpp (video_json), infra/postgres/src/upload_catalog.cpp (kFindVideoFor, kListVideos, kSetVisibility, decode_progress), infra/postgres/src/job_queue.cpp (kClaim), apps/worker/src/job_runner.cpp (KeeperProgress), docs/adr/0101-transcode-progress-on-the-video-object.md -->
