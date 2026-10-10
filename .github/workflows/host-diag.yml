@@ -1,0 +1,41 @@
+name: host-diag
+
+# Read-only snapshot of the self-hosted host: cores, memory, load, disk, the runner services and
+# what each is running, and recent OOM kills. Changes nothing on the host.
+on:
+  push:
+    branches: [claude/laughing-einstein-6o8z75]
+    paths: [.github/workflows/host-diag.yml]
+
+permissions: {}
+
+jobs:
+  snapshot:
+    runs-on: self-hosted
+    timeout-minutes: 5
+    steps:
+      - name: Snapshot
+        run: |
+          set -u
+          echo "== host"; hostname; uptime; nproc; lscpu | grep -E 'Model name|^CPU\(s\)|Thread|MHz' || true
+          echo "== memory"; free -m; swapon --show || true
+          echo "== pressure"; for r in cpu memory io; do echo "$r: $(cat /proc/pressure/$r 2>/dev/null | tr '\n' ' ')"; done
+          echo "== disk"; df -h / /home 2>/dev/null | sort -u
+          echo "== runner services"
+          systemctl list-units --plain --type=service --all --no-legend 'actions.runner.*'
+          for u in $(systemctl list-units --plain --type=service --all --no-legend 'actions.runner.*' | awk '{print $1}'); do
+            echo "-- $u"
+            systemctl show -p ActiveState,SubState,ActiveEnterTimestamp,NRestarts,MemoryCurrent,MemoryPeak,CPUUsageNSec,WorkingDirectory "$u"
+            cg=$(systemctl show -p ControlGroup --value "$u")
+            if [[ -r /sys/fs/cgroup$cg/cgroup.procs ]]; then
+              echo "procs: $(wc -l <"/sys/fs/cgroup$cg/cgroup.procs")"
+              ps -o pid,etime,pcpu,rss,comm --no-headers -p "$(paste -sd, "/sys/fs/cgroup$cg/cgroup.procs")" 2>/dev/null |
+                sort -k4 -nr | head -8
+            fi
+            journalctl -u "$u" --since "-4h" --no-pager -q 2>/dev/null | grep -E 'Running job|completed with result|Listening|error|Error' | tail -12 || true
+          done
+          echo "== top by memory"; ps -eo pid,user,etime,pcpu,rss,comm --sort=-rss | head -15
+          echo "== top by cpu"; ps -eo pid,user,etime,pcpu,rss,comm --sort=-pcpu | head -10
+          echo "== docker"; docker ps --format '{{.Names}} {{.Status}} {{.Image}}' 2>/dev/null | head -20 || true
+          echo "== OOM / kills (24h)"
+          sudo -n journalctl -k --since "-24h" --no-pager -q 2>/dev/null | grep -iE 'out of memory|oom-kill|killed process' | tail -20 || echo "(no access or none)"
