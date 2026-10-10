@@ -49,10 +49,11 @@ SELECT id, video_id, owner_id, size_bytes, chunk_size, durable_offset, state,
        (extract(epoch FROM expires_at) * 1000000)::bigint, backend_ref, object_key
   FROM uploads WHERE id = $1)sql";
 
-// The video and what the viewer ($2) is to it, in one statement (ADR-0097). Every lookup goes
-// by a primary key: chat_members (room_id, user_id) and video_grants (video_id, user_id). A
-// room shares the video only while it lists both the viewer and the owner: an owner who left
-// the room no longer shares into it. The owner needs neither, and gets false for both.
+// The video and what the viewer ($2) is to it, in one statement (ADR-0097), and while it is
+// processing, its live transcode job's state and progress (ADR-0101) through one_live_job.
+// Every lookup goes by a primary key: chat_members (room_id, user_id) and video_grants (video_id,
+// user_id). A room shares the video only while it lists both the viewer and the owner: an owner who
+// left the room no longer shares into it. The owner needs neither, and gets false for both.
 constexpr Sql kFindVideoFor = R"sql(
 SELECT v.id, v.owner_id, v.title, v.state, v.version, v.error_reason, v.duration_ms,
        v.visibility, v.visibility_room,
@@ -62,12 +63,18 @@ SELECT v.id, v.owner_id, v.title, v.state, v.version, v.error_reason, v.duration
            AND EXISTS (SELECT 1 FROM chat_members o
                         WHERE o.room_id = v.visibility_room AND o.user_id = v.owner_id),
        v.owner_id <> $2
-           AND EXISTS (SELECT 1 FROM video_grants g WHERE g.video_id = v.id AND g.user_id = $2)
-  FROM videos v WHERE v.id = $1 AND v.deleted_at IS NULL)sql";
+           AND EXISTS (SELECT 1 FROM video_grants g WHERE g.video_id = v.id AND g.user_id = $2),
+       p.state, p.progress_pct
+  FROM videos v
+  LEFT JOIN LATERAL (SELECT j.state, j.progress_pct FROM jobs j
+                     WHERE j.video_id = v.id AND v.state = 'processing'
+                       AND j.state IN ('queued', 'running')
+                     ORDER BY j.id DESC LIMIT 1) p ON true
+ WHERE v.id = $1 AND v.deleted_at IS NULL)sql";
 
 // The owner ($2) sets it, or the operator's backend ($2 = '': any owner, ADR-0100), and a room
 // only one chat_members lists the video's owner in at this moment. $4 is the room's id, or ''
-// for a visibility without one.
+// for a visibility without one. Answers the video as kFindVideoFor does, progress included.
 constexpr Sql kSetVisibility = R"sql(
 UPDATE videos SET visibility = $3, visibility_room = NULLIF($4, '')::uuid, updated_at = now()
  WHERE id = $1 AND ($2 = '' OR owner_id = $2) AND deleted_at IS NULL
@@ -75,7 +82,15 @@ UPDATE videos SET visibility = $3, visibility_room = NULLIF($4, '')::uuid, updat
                             WHERE m.room_id = NULLIF($4, '')::uuid
                               AND m.user_id = videos.owner_id))
 RETURNING id, owner_id, title, state, version, error_reason, duration_ms, visibility,
-          visibility_room)sql";
+          visibility_room,
+          (SELECT j.state FROM jobs j
+            WHERE j.video_id = videos.id AND videos.state = 'processing'
+              AND j.state IN ('queued', 'running')
+            ORDER BY j.id DESC LIMIT 1),
+          (SELECT j.progress_pct FROM jobs j
+            WHERE j.video_id = videos.id AND videos.state = 'processing'
+              AND j.state IN ('queued', 'running')
+            ORDER BY j.id DESC LIMIT 1))sql";
 
 // Why kSetVisibility changed nothing: a video of the owner's (the room was refused) or none.
 constexpr Sql kOwnsVideo = R"sql(
@@ -108,23 +123,34 @@ queued AS (
 SELECT (SELECT count(*) FROM deleted), v.state, v.deleted FROM video v)sql";
 
 // A user's videos, newest first, through videos_by_owner (owner_id, created_at DESC); the id
-// breaks ties. created_at travels as integer microseconds, so a cursor names it exactly.
+// breaks ties. A processing video's progress comes as kFindVideoFor's does. created_at travels as
+// integer microseconds, so a cursor names it exactly.
 constexpr Sql kListVideos = R"sql(
-SELECT id, owner_id, title, state, version, error_reason, duration_ms, visibility,
-       visibility_room, (extract(epoch FROM created_at) * 1000000)::bigint
-  FROM videos
- WHERE owner_id = $1 AND deleted_at IS NULL
- ORDER BY created_at DESC, id DESC
+SELECT v.id, v.owner_id, v.title, v.state, v.version, v.error_reason, v.duration_ms,
+       v.visibility, v.visibility_room, (extract(epoch FROM v.created_at) * 1000000)::bigint,
+       p.state, p.progress_pct
+  FROM videos v
+  LEFT JOIN LATERAL (SELECT j.state, j.progress_pct FROM jobs j
+                     WHERE j.video_id = v.id AND v.state = 'processing'
+                       AND j.state IN ('queued', 'running')
+                     ORDER BY j.id DESC LIMIT 1) p ON true
+ WHERE v.owner_id = $1 AND v.deleted_at IS NULL
+ ORDER BY v.created_at DESC, v.id DESC
  LIMIT $2)sql";
 
 // The same, from after a cursor: ($2, $3) are the last page's last created_at and id.
 constexpr Sql kListVideosAfter = R"sql(
-SELECT id, owner_id, title, state, version, error_reason, duration_ms, visibility,
-       visibility_room, (extract(epoch FROM created_at) * 1000000)::bigint
-  FROM videos
- WHERE owner_id = $1 AND deleted_at IS NULL
-   AND (created_at, id) < (timestamptz 'epoch' + $2 * interval '1 microsecond', $3)
- ORDER BY created_at DESC, id DESC
+SELECT v.id, v.owner_id, v.title, v.state, v.version, v.error_reason, v.duration_ms,
+       v.visibility, v.visibility_room, (extract(epoch FROM v.created_at) * 1000000)::bigint,
+       p.state, p.progress_pct
+  FROM videos v
+  LEFT JOIN LATERAL (SELECT j.state, j.progress_pct FROM jobs j
+                     WHERE j.video_id = v.id AND v.state = 'processing'
+                       AND j.state IN ('queued', 'running')
+                     ORDER BY j.id DESC LIMIT 1) p ON true
+ WHERE v.owner_id = $1 AND v.deleted_at IS NULL
+   AND (v.created_at, v.id) < (timestamptz 'epoch' + $2 * interval '1 microsecond', $3)
+ ORDER BY v.created_at DESC, v.id DESC
  LIMIT $4)sql";
 
 // Each answers whether the video exists, and grants or revokes in the same statement.
@@ -350,6 +376,36 @@ template <class T> CatalogResult<T> failure(DbError e) {
     return std::unexpected(to_catalog_error(e));
 }
 
+// A processing video's progress from its live job's state and progress_pct at columns `at` and
+// `at + 1`, both NULL when it has no live job; nullopt for a video in any other state. A job
+// waiting for its next attempt starts again from nothing, so it reads 0 whatever the last
+// attempt reached. 100 is kept for ready.
+CatalogResult<std::optional<core::TranscodeProgress>>
+decode_progress(const core::VideoRecord& video, const Result& row, int index, int at) {
+    using core::TranscodeProgress;
+    using core::TranscodeStage;
+    if (video.state != core::VideoState::Processing) {
+        return std::nullopt;
+    }
+    const auto state = row.get(index, at);
+    if (!state || *state == "queued") {
+        return TranscodeProgress{};
+    }
+    if (*state != "running") {
+        return std::unexpected(CatalogError::Corrupt);
+    }
+    std::uint64_t percent = 0;
+    if (const auto text = row.get(index, at + 1)) {
+        const auto parsed = parse_uint64(*text);
+        if (!parsed) {
+            return std::unexpected(CatalogError::Corrupt);
+        }
+        percent = std::min<std::uint64_t>(*parsed, 99);
+    }
+    return TranscodeProgress{.stage = TranscodeStage::Transcoding,
+                             .percent = static_cast<std::uint8_t>(percent)};
+}
+
 CatalogResult<core::ports::VideoView> decode_view(const Result& row) {
     auto video = decode_video(row);
     if (!video) {
@@ -360,6 +416,11 @@ CatalogResult<core::ports::VideoView> decode_view(const Result& row) {
     if (!member || !granted) {
         return std::unexpected(CatalogError::Corrupt);
     }
+    const auto progress = decode_progress(*video, row, 0, 11);
+    if (!progress) {
+        return std::unexpected(progress.error());
+    }
+    video->progress = *progress;
     return core::ports::VideoView{.video = std::move(*video),
                                   .viewer = {.room_member = *member, .granted = *granted}};
 }
@@ -444,6 +505,11 @@ CatalogResult<core::ports::VideoPage> decode_videos(const Outcome& outcome, std:
         if (!video || !created) {
             return std::unexpected(CatalogError::Corrupt);
         }
+        const auto progress = decode_progress(*video, *outcome, i, 10);
+        if (!progress) {
+            return std::unexpected(progress.error());
+        }
+        video->progress = *progress;
         page.videos.push_back(
             core::ports::ListedVideo{.video = std::move(*video), .created_at_us = *created});
     }
@@ -548,7 +614,15 @@ public:
         }
         if (!checking_) {
             if (outcome->rows() == 1) {
-                done_(decode_video(*outcome));
+                done_(decode_video(*outcome).and_then(
+                    [&](core::VideoRecord video) -> CatalogResult<core::VideoRecord> {
+                        auto progress = decode_progress(video, *outcome, 0, 9);
+                        if (!progress) {
+                            return std::unexpected(progress.error());
+                        }
+                        video.progress = *progress;
+                        return video;
+                    }));
                 return std::nullopt;
             }
             checking_ = true;

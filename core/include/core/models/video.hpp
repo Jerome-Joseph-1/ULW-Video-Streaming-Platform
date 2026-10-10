@@ -18,6 +18,19 @@ namespace core {
 
 enum class VideoState : std::uint8_t { Init, Uploading, Processing, Ready, Failed };
 
+// Where a processing video's transcode is (ADR-0101): waiting for a worker (a first attempt, or
+// a retry's backoff), or one is on it.
+enum class TranscodeStage : std::uint8_t { Queued, Transcoding };
+
+struct TranscodeProgress {
+    TranscodeStage stage = TranscodeStage::Queued;
+    // 0..99 while transcoding, from the worker's last report; 0 while queued. Only the video
+    // becoming ready completes it.
+    std::uint8_t percent = 0;
+
+    friend bool operator==(const TranscodeProgress&, const TranscodeProgress&) = default;
+};
+
 // A video as the repository stores it. Video::rehydrate decides whether it is consistent.
 struct VideoRecord {
     VideoId id;
@@ -31,6 +44,9 @@ struct VideoRecord {
     // Who besides the owner may see it; private until the owner says otherwise (ADR-0097). The
     // initializer lets designated initializers that predate the field leave it out.
     Visibility visibility{}; // NOLINT(readability-redundant-member-init)
+    // Read with the video from its transcode job, not part of it: set by the reads that answer
+    // clients while the video is processing, nullopt otherwise. Nothing writes it back.
+    std::optional<TranscodeProgress> progress{}; // NOLINT(readability-redundant-member-init)
 };
 
 // A rejected transition leaves every field untouched, so the caller can report the error without

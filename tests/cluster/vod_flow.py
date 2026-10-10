@@ -6,7 +6,8 @@ mock auth-service, as a browser's would through an operator's Gateway:
 
   auth        each signing algorithm, the cookie, key rotation, refusals, and the
               edge stand-in replacing forged x-user-* headers with the token's
-  upload      a clip uploaded chunk by chunk, transcoded by the worker, reaching ready
+  upload      a clip uploaded chunk by chunk, transcoded by the worker, reaching ready, its
+              progress (ADR-0101) well-formed on every poll
   playback    the master and every media playlist through the route, and every init and media
               segment from the object store at the presigned URLs they carry, none from the
               gateway
@@ -255,16 +256,39 @@ def commit_and_wait_ready(token, upload):
     check(status == 200, f"commit: {status} {data!r}")
     deadline = time.monotonic() + READY_TIMEOUT_S
     video = upload["video_id"]
+    seen = []
     while True:
         status, _, data = request("GET", f"/api/v1/videos/{video}", token)
         check(status == 200, f"GET video: {status} {data!r}")
         state = json.loads(data)
+        check("progress" in state, f"no progress field: {state}")
         if state["state"] == "ready":
             check(state["duration_ms"] and state["duration_ms"] > 0, f"ready without duration: {state}")
+            check(state["progress"] is None, f"ready with progress: {state}")
+            print(f"  progress seen while processing: {seen or 'none (ready at the first poll)'}")
             return state
         check(state["state"] != "failed", f"video failed: {state}")
+        check_progress(state)
+        if state["state"] == "processing":
+            seen.append(f"{state['progress']['stage']} {state['progress']['percent']}%")
         check(time.monotonic() < deadline, f"not ready after {READY_TIMEOUT_S} s: {state}")
-        time.sleep(2)
+        time.sleep(1)
+
+
+def check_progress(state):
+    """ADR-0101: an object while processing, null otherwise; a queued job at 0, a running one at
+    0 to 99, never 100 before the video is ready."""
+    progress = state["progress"]
+    if state["state"] != "processing":
+        check(progress is None, f"progress outside processing: {state}")
+        return
+    check(isinstance(progress, dict) and set(progress) == {"stage", "percent"},
+          f"malformed progress: {state}")
+    check(progress["stage"] in ("queued", "transcoding"), f"unknown stage: {state}")
+    percent = progress["percent"]
+    check(isinstance(percent, int) and 0 <= percent <= 99, f"percent out of range: {state}")
+    if progress["stage"] == "queued":
+        check(percent == 0, f"queued job with progress: {state}")
 
 
 def check_edge_stand_in(subject, token):

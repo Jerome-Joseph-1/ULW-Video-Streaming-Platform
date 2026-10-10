@@ -344,8 +344,8 @@ curl -sS "$GW/api/v1/videos/$V" -H "Authorization: Bearer $TOKEN"
 ```
 
 ```
-{"id":"01a0ece4-69d0-781f-822e-f9f2e975cd5f","title":"clip.mp4","state":"processing","version":2,"duration_ms":null}
-{"id":"01a0ece4-69d0-781f-822e-f9f2e975cd5f","title":"clip.mp4","state":"ready","version":3,"duration_ms":12000}
+{"id":"01a0ece4-69d0-781f-822e-f9f2e975cd5f","title":"clip.mp4","state":"processing","version":2,"duration_ms":null,"progress":{"stage":"transcoding","percent":37}}
+{"id":"01a0ece4-69d0-781f-822e-f9f2e975cd5f","title":"clip.mp4","state":"ready","version":3,"duration_ms":12000,"progress":null}
 ```
 
 Play it: see [videos-and-playback.md](videos-and-playback.md) for the playlists this run
