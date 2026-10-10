@@ -28,12 +28,19 @@ env:
   UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
   TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
 
-# Where each job runs: the self-hosted host for pushes, the nightly, manual runs and pull
-# requests from branches of this repository; a hosted runner for pull requests from forks, whose
-# code must never run on that host. Its four runners take up to four jobs at once and keep their
-# state between jobs, so jobs that publish a fixed host port, start deploy/local/compose.yaml's
-# fixed-name containers, or change the host beyond the setup action's sysctls stay on
-# ubuntu-24.04 whatever the event (each says which).
+# Where each job runs (docs/operations/ci-lanes.md, "Where jobs run"): the jobs that need the
+# self-hosted host's kernel (io_uring, locked memory: build-test, tsan, reactor-matrix,
+# autobahn, fuzz) run there for pushes, the nightly, manual runs and pull requests from branches
+# of this repository; a hosted runner takes them for pull requests from forks, whose code must
+# never run on that host. Main's runs (its pushes and the nightly) may take any of the host's
+# runners; every other run takes only those labelled as the repository variable
+# ULW_SHARED_RUNNERS says, a JSON list such as ["self-hosted","ulw-shared"], so a runner left
+# without that label is main's alone and main never queues behind pull requests. Unset, every
+# run may take any runner. Lint, secrets and manifests need nothing the host has and run hosted
+# whatever the event: the repository is public, so hosted minutes cost nothing. The host's
+# runners take up to four jobs at once and keep their state between jobs, so jobs that publish a
+# fixed host port, start deploy/local/compose.yaml's fixed-name containers, or change the host
+# beyond the setup action's sysctls stay on ubuntu-24.04 whatever the event (each says which).
 jobs:
   # Which lane this run is, and on a pull request what it changed (docs/operations/ci-lanes.md).
   # Outside a pull request every output is the full lane's. On a pull request, `code` is false when
@@ -108,7 +115,7 @@ jobs:
     name: build-test (${{ matrix.compiler }}/${{ matrix.preset }}${{ matrix.label && format(', {0}', matrix.label) || '' }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: &trusted-runner ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || (github.ref == 'refs/heads/main' && 'self-hosted' || fromJSON(vars.ULW_SHARED_RUNNERS || '"self-hosted"')) }}
     strategy:
       fail-fast: false
       matrix:
@@ -174,7 +181,7 @@ jobs:
   tsan:
     # The full lane only (docs/operations/ci-lanes.md).
     if: github.event_name != 'pull_request'
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: *trusted-runner
     env:
       CC: clang-19
       CXX: clang++-19
@@ -199,7 +206,7 @@ jobs:
     name: reactor-matrix (${{ matrix.reactor }})
     # The full lane only (docs/operations/ci-lanes.md).
     if: github.event_name != 'pull_request'
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: *trusted-runner
     strategy:
       fail-fast: false
       matrix:
@@ -627,11 +634,13 @@ jobs:
   lint:
     name: boundaries + format + tidy (${{ strategy.job-index }}/${{ strategy.job-total }})
     needs: changes
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
-    # A quarter of the tree took 15-24 min on a hosted runner (runner speed varies) and over 50
-    # on the self-hosted host, where each job has three cores and shares the host with three
-    # others; well past that is a hang.
-    timeout-minutes: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 150 || 60 }}
+    runs-on: ubuntu-24.04
+    # On a hosted runner, whatever the event: a quarter of the tree took 15-24 min there (runner
+    # speed varies), over 50 on the self-hosted host, where each job has three cores and shares
+    # the host with three others, and past 150 once that host's queue backed up
+    # (docs/operations/ci-lanes.md, "Where jobs run"). Lint needs nothing the host has, and the
+    # repository is public, so hosted minutes cost nothing. Well past 60 is a hang.
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -725,7 +734,7 @@ jobs:
     name: autobahn (${{ matrix.reactor }})
     # The full lane only (docs/operations/ci-lanes.md).
     if: github.event_name != 'pull_request'
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: *trusted-runner
     strategy:
       fail-fast: false
       matrix:
@@ -783,7 +792,7 @@ jobs:
     # Seven targets, nproc at a time: two rounds of the run length (30 min nightly) on a hosted
     # runner's four cores, three on the self-hosted host's share of three, plus the build.
     timeout-minutes: 120
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: *trusted-runner
     env:
       CC: clang-19
       CXX: clang++-19
@@ -830,7 +839,7 @@ jobs:
   # Every commit, not just the tip: a secret that was committed and then removed is still one.
   # Allowlist entries are in .gitleaks.toml, each scoped to a rule and a file.
   secrets:
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     env:
       GITLEAKS_VERSION: 8.30.1
       # From gitleaks_8.30.1_checksums.txt in the release, linux_x64 line.
@@ -857,7 +866,7 @@ jobs:
   manifests:
     needs: changes
     if: needs.changes.outputs.deploy == 'true'
-    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
     steps:
       - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
