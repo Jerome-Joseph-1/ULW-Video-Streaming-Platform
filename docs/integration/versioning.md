@@ -41,7 +41,7 @@ agreed: a breaking change to a stable surface is a new major version, an additio
 fix a new patch.
 
 **Cutting one** (the repository's writers): publish-images must have published the commit
-(every push to `main` does, once `ci` succeeds). Then Actions, release, "Run workflow" from
+(every push to `main` is, once its `ci` run succeeds, which starts the publish). Then Actions, release, "Run workflow" from
 `main`, with `version` and, for anything but main's tip, `commit`. The run refuses a commit that
 is not on `main`, whose `ci` run did not succeed or whose images are missing, and a version that
 exists already; it builds nothing.

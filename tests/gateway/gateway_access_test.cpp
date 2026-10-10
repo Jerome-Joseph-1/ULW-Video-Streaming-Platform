@@ -207,7 +207,7 @@ TEST_F(GatewayAccess, AViewerSeesNeitherTheVisibilityNorWhyTheVideoFailed) {
     ASSERT_EQ(viewer->status, 200);
     EXPECT_EQ(viewer->body, R"({"id":")" + std::string(kVideo) +
                                 R"(","title":"trip","state":"failed","version":3,)"
-                                R"("duration_ms":null})");
+                                R"("duration_ms":null,"progress":null})");
     const auto owner = get(video_path(), kAlice);
     ASSERT_TRUE(owner);
     EXPECT_NE(owner->body.find(R"("error_reason":"bad","visibility":"unlisted")"),

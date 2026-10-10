@@ -390,4 +390,74 @@ TEST_F(VodControlTest, AQueueEntryWhoseRowIsGoneIsDropped) {
     EXPECT_EQ(count("SELECT count(*) FROM video_purges WHERE video_id = $1", id), "0");
 }
 
+// ADR-0101: every read that answers clients carries a processing video's progress from its live
+// transcode job; a video in any other state has none, whatever its jobs' rows say.
+TEST_F(VodControlTest, AProcessingVideoCarriesItsJobsProgress) {
+    using core::TranscodeProgress;
+    using core::TranscodeStage;
+    const auto id = add_video("processing");
+    add_job(id, "queued");
+    // A last attempt's percent is not this one's: a queued job reads 0.
+    {
+        auto conn = db->session();
+        ASSERT_TRUE(conn.exec("UPDATE jobs SET progress_pct = 60 WHERE video_id = $1",
+                              Params{}.add_uuid(id.uuid())));
+    }
+    auto seen = view(id, "alice");
+    ASSERT_TRUE(seen);
+    EXPECT_EQ(seen->video.progress, TranscodeProgress{});
+
+    {
+        auto conn = db->session();
+        ASSERT_TRUE(conn.exec("UPDATE jobs SET state = 'running', locked_by = 'worker-1', "
+                              "lease_expires = now() + interval '1 minute', progress_pct = 42 "
+                              "WHERE video_id = $1",
+                              Params{}.add_uuid(id.uuid())));
+    }
+    const TranscodeProgress running{.stage = TranscodeStage::Transcoding, .percent = 42};
+    seen = view(id, "alice");
+    ASSERT_TRUE(seen);
+    EXPECT_EQ(seen->video.progress, running);
+    const auto page = list("alice", std::nullopt, 10);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->videos.size(), 1U);
+    EXPECT_EQ(page->videos[0].video.progress, running);
+    const auto set = set_by_service(id, core::Visibility::unlisted());
+    ASSERT_TRUE(set);
+    EXPECT_EQ(set->progress, running);
+
+    // 100 is the video's readiness, never a running job's.
+    {
+        auto conn = db->session();
+        ASSERT_TRUE(conn.exec("UPDATE jobs SET progress_pct = 100 WHERE video_id = $1",
+                              Params{}.add_uuid(id.uuid())));
+    }
+    seen = view(id, "alice");
+    ASSERT_TRUE(seen);
+    EXPECT_EQ(seen->video.progress,
+              (TranscodeProgress{.stage = TranscodeStage::Transcoding, .percent = 99}));
+}
+
+TEST_F(VodControlTest, AProcessingVideoWithoutALiveJobIsQueuedAndOtherStatesHaveNoProgress) {
+    const auto waiting = add_video("processing");
+    const auto seen = view(waiting, "alice");
+    ASSERT_TRUE(seen);
+    EXPECT_EQ(seen->video.progress, core::TranscodeProgress{});
+
+    for (const std::string_view state : {"ready", "failed", "uploading"}) {
+        const auto id = add_video(state);
+        // A job row left behind, as a finished or failed one is.
+        add_job(id, "running");
+        const auto other = view(id, "alice");
+        ASSERT_TRUE(other) << state;
+        EXPECT_FALSE(other->video.progress) << state;
+    }
+    const auto page = list("alice", std::nullopt, 10);
+    ASSERT_TRUE(page);
+    for (const core::ports::ListedVideo& listed : page->videos) {
+        EXPECT_EQ(listed.video.progress.has_value(),
+                  listed.video.state == core::VideoState::Processing);
+    }
+}
+
 } // namespace

@@ -22,11 +22,12 @@ using core::ports::JobQueueError;
 using core::ports::JobQueueResult;
 
 // SKIP LOCKED: concurrent claimers pass over each other's rows instead of queueing behind
-// them, so each gets a different job.
+// them, so each gets a different job. An attempt starts from no progress, not from where the
+// one before it stopped.
 constexpr Sql kClaim = R"sql(
 UPDATE jobs
    SET state = 'running', locked_by = $1, lease_expires = now() + $2 * interval '1 second',
-       fence = fence + 1, attempts = attempts + 1
+       fence = fence + 1, attempts = attempts + 1, progress_pct = 0
  WHERE id = (SELECT id FROM jobs
               WHERE state = 'queued' AND run_after <= now()
               ORDER BY id

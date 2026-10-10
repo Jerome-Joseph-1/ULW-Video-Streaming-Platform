@@ -20,6 +20,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <exception>
 #include <filesystem>
@@ -129,7 +130,16 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
         }
     };
     probe();
-    l.reactor = std::move(*net::make_reactor(reactor_kind_from_env(), *l.clock, 4096));
+    // Every io_uring ring is charged to the user's locked memory, shared by all of that user's
+    // processes (ci.yml's integration step), so a busy host can run out: the server under test
+    // then falls back to epoll, as the gateway itself does, instead of dereferencing the error.
+    auto choice = net::make_reactor_with_fallback(reactor_kind_from_env(), *l.clock, 4096);
+    if (!choice) {
+        static_cast<void>(std::fprintf(stderr, "gateway harness: no reactor: %s\n",
+                                       std::strerror(choice.error())));
+        std::abort();
+    }
+    l.reactor = std::move(choice->reactor);
     if (options.transport == gateway::Transport::Tls) {
         auto tls = net::make_tls_transports(*l.reactor,
                                             options.tls_files.value_or(TestPki::shared().server()));

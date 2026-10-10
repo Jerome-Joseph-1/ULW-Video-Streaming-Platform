@@ -535,9 +535,9 @@ rules.
 
 The images come prebuilt from GitHub's container registry, public, so no pull secret is
 needed; the nodes need to reach `ghcr.io` and `pkg-containers.githubusercontent.com` over https.
-`.github/workflows/publish-images.yml` in this repository builds the four Dockerfile targets
-for every push to `main`, checks them as the e2e sandbox does (the release binaries' hardening
-and Trivy's image gate; either failing stops it), waits for that commit's `ci` run to succeed,
+`.github/workflows/publish-images.yml` in this repository starts once a push to `main` has
+passed its `ci` run, builds the four Dockerfile targets of that commit, checks them as the e2e
+sandbox does (the release binaries' hardening and Trivy's image gate; either failing stops it),
 and only then pushes:
 
 | Image | Dockerfile target | Runs | `config.env` key |
@@ -557,8 +557,9 @@ carries a build provenance attestation from the run that first pushed it
 Jerome-Joseph-1/ULW-Video-Streaming-Platform`). LiveKit, its egress, Redis and STUNner are
 upstream images, pinned by digest in the manifests.
 
-Not every commit on main is published: a newer push replaces a waiting publish, and a publish
-stops if the commit's `ci` run fails. A commit whose run succeeded is published from Actions,
+Not every commit on main is published: a newer publish replaces a waiting one, and a commit
+whose `ci` run fails is not published (a successful re-run of that run publishes it). A commit
+whose run succeeded is published from Actions,
 publish-images, "Run workflow" (from `main`) with its SHA as `ref`, by the repository's
 maintainers.
 

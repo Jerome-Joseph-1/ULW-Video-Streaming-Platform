@@ -31,8 +31,49 @@ operator's backend; from then on it is gone, a `404` on every endpoint to everyo
 included ([Deleting a video](#deleting-a-video)).
 
 There is no push notification in this version. **Poll `GET /api/v1/videos/{id}`** after the
-commit until `state` is `ready` or `failed`. A 5 s interval is reasonable; how long it takes
-grows with the video's length. Stop polling on `failed`.
+commit until `state` is `ready` or `failed`, and show `progress` while it is `processing`
+([Progress](#progress)). A 5 s interval is reasonable; how long it takes grows with the video's
+length. Stop polling on `ready` or `failed`.
+
+### Progress
+
+<!-- apps/gateway/src/video_access.cpp (video_json), infra/postgres/src/upload_catalog.cpp (kFindVideoFor, decode_progress), apps/worker/src/job_runner.cpp (KeeperProgress, upload), docs/adr/0101-transcode-progress-on-the-video-object.md -->
+
+While a video is `processing`, its object carries how far along the transcode is (ADR-0101):
+
+```json
+{"id":"0199950c-...","title":"clip.mp4","state":"processing","version":2,"duration_ms":null,"progress":{"stage":"transcoding","percent":42}}
+```
+
+| `progress.stage` | Meaning | `progress.percent` |
+|---|---|---|
+| `queued` | Waiting for a worker: the first attempt not started yet, or a retry waiting its turn after a transient failure | `0` |
+| `transcoding` | A worker is on it: encoding, then publishing the renditions | `0` to `99`, rising |
+
+- `progress` is `null` in every other state. `100%` is `state: "ready"`; `percent` never reaches
+  100 while the video cannot play yet.
+- The worker reports about every 10 s, so `percent` moves in steps: encoding takes it to 90,
+  publishing the renditions from 90 to 99.
+- After a transient failure the job is retried: `stage` goes back to `queued` and `percent` to
+  0, then rises again. A progress bar should follow the value, not assume it only grows.
+- Everyone who may see the video sees its progress, and the operator's backend sees it in the
+  [listing](#service-api-visibility-takedown-and-listing).
+
+A minimal poller:
+
+```js
+async function waitUntilPlayable(id, token, onProgress) {
+  for (;;) {
+    const r = await fetch(`/api/v1/videos/${id}`, {headers: {Authorization: `Bearer ${token}`}});
+    if (!r.ok) throw new Error(`status ${r.status}`);
+    const v = await r.json();
+    if (v.state === "ready") return onProgress(100), v;
+    if (v.state === "failed") throw new Error(v.error_reason ?? "transcoding failed");
+    onProgress(v.progress?.percent ?? 0, v.progress?.stage ?? "queued");
+    await new Promise((done) => setTimeout(done, 5000));
+  }
+}
+```
 
 ## Endpoints
 
@@ -50,7 +91,7 @@ response: a lowercase canonical UUID. Anything else (uppercase included) answers
 The video object:
 
 ```json
-{"id":"0199950c-...","title":"clip.mp4","state":"ready","version":2,"duration_ms":6000}
+{"id":"0199950c-...","title":"clip.mp4","state":"ready","version":2,"duration_ms":6000,"progress":null}
 ```
 
 | Field | Type | Meaning |
@@ -60,13 +101,14 @@ The video object:
 | `state` | string | One of the states above |
 | `version` | integer | Rises by one on every state change. Use it to tell two answers apart, not as a count of anything. |
 | `duration_ms` | integer or `null` | Set once `ready` |
+| `progress` | object or `null` | While `processing`, `{"stage": "queued" or "transcoding", "percent": 0 to 99}`; `null` in every other state ([Progress](#progress)) |
 | `error_reason` | string, only when `failed`, owner only | Why, in a short English phrase meant for the video's owner, such as `the file could not be decoded as video`, `transcoding exceeded its time budget` or `upload expired`. Show it or log it; do not parse it, as the wording may change. Absent in every other state, and for anyone but the owner. |
 | `visibility` | string, owner only | Who else may see it: `private`, `unlisted` or `room:<room id>` ([Who can see a video](#who-can-see-a-video)). Absent for anyone but the owner. |
 
 A failed video, as its owner sees it:
 
 ```json
-{"id":"0199950c-...","title":"clip.mp4","state":"failed","version":3,"duration_ms":null,"error_reason":"the file could not be decoded as video","visibility":"private"}
+{"id":"0199950c-...","title":"clip.mp4","state":"failed","version":3,"duration_ms":null,"progress":null,"error_reason":"the file could not be decoded as video","visibility":"private"}
 ```
 
 Anyone else who may see it gets the same object without `error_reason` and `visibility`.
@@ -307,11 +349,12 @@ newest first (by creation, then by id, so the order is stable across pages). Its
 | `after` | The `next` of the previous page, as given. Opaque: do not build one |
 
 ```json
-{"owner":"auth0|123","videos":[{"id":"0199950c-...","title":"clip.mp4","state":"ready","version":2,"duration_ms":6000,"visibility":"unlisted","created_at":1759600000}],"next":"1759600000123456.0199950c-..."}
+{"owner":"auth0|123","videos":[{"id":"0199950c-...","title":"clip.mp4","state":"ready","version":2,"duration_ms":6000,"progress":null,"visibility":"unlisted","created_at":1759600000}],"next":"1759600000123456.0199950c-..."}
 ```
 
-Each video is the [video object](#endpoints) as its owner sees it (`visibility`, and
-`error_reason` when failed), with `created_at` in Unix seconds. `next` is `null` on the last page.
+Each video is the [video object](#endpoints) as its owner sees it (`visibility`, `progress` while
+processing, and `error_reason` when failed), with `created_at` in Unix seconds. A backend that
+shows its users' uploads polls this page for their progress instead of one video at a time. `next` is `null` on the last page.
 A user with no videos, or one who never signed in, has an empty list. Each page is read on its
 own: a video created after the first page is not on the later ones, one deleted meanwhile is
 left out, and none is listed twice.

@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <expected>
 #include <gtest/gtest.h>
 #include <memory>
@@ -224,8 +225,15 @@ protected:
 
     os::SystemClock clock;
     os::SystemRandom random;
-    std::unique_ptr<net::IReactor> reactor =
-        std::move(*net::make_reactor(ulw::test::reactor_kind_from_env(), clock, 64));
+    // Falls back to epoll when no io_uring ring can be had (gateway_harness.cpp says why).
+    std::unique_ptr<net::IReactor> reactor = [this] {
+        auto choice =
+            net::make_reactor_with_fallback(ulw::test::reactor_kind_from_env(), clock, 64);
+        if (!choice) {
+            std::abort();
+        }
+        return std::move(choice->reactor);
+    }();
     infra::catalog::MemoryCatalog catalog{*reactor, clock};
     core::UserId owner = *core::UserId::parse("alice");
     core::VideoId video = core::VideoId::generate(clock, random);

@@ -27,6 +27,25 @@ What to do:
   ignore what you do not know.
 - **Operators:** nothing to change.
 
+## 2026-10-09: a processing video says how far along it is
+
+<!-- apps/gateway/src/video_access.cpp (video_json), infra/postgres/src/upload_catalog.cpp (kFindVideoFor, kListVideos, kSetVisibility, decode_progress), infra/postgres/src/job_queue.cpp (kClaim), apps/worker/src/job_runner.cpp (KeeperProgress), docs/adr/0101-transcode-progress-on-the-video-object.md -->
+
+Additive: the video object gains one field; nothing else changes.
+
+| Before | Now |
+|---|---|
+| A video in `processing` said nothing more until `ready` or `failed` | The video object has `progress`: `{"stage":"queued"\|"transcoding","percent":0..99}` while `processing`, `null` in every other state, on `GET` and `PATCH /api/v1/videos/{id}`, `PATCH /api/v1/service/videos/{id}` and each video of `GET /api/v1/service/videos` ([Progress](videos-and-playback.md#progress)) |
+
+What to do:
+
+- **Clients and backends:** while polling a processing video, show `progress.percent`, and
+  `progress.stage` `queued` as waiting. Treat `ready` as 100%. A retry sets it back to `queued` at
+  0, so follow the value rather than assuming it only grows. A client that reads the object into
+  a strict schema must allow the new field (versioning.md, rule 1).
+- **Operators:** nothing; no migration, setting or grant. Deploy the worker with the gateway for
+  publishing to report its share (90 to 99); an older worker's figure is capped at 99.
+
 ## 2026-10-08: the operator's backend controls VOD; owners delete videos
 
 <!-- apps/gateway/src/connection.cpp (start_create, start_delete, start_service_route), apps/gateway/src/video_access.cpp (video_query, videos_json), infra/auth/src/service_claim.cpp (read_uploader_claim), infra/postgres/src/upload_catalog.cpp (kDeleteVideo, kListVideos), apps/reaper/src/reaper.cpp (purge_videos), migrations/0017_video_purges.sql, docs/adr/0100-the-operators-backend-controls-vod.md -->
