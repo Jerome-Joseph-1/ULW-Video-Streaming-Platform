@@ -43,14 +43,19 @@ using Clock = std::chrono::steady_clock;
 using Answer = std::expected<std::string, DbError>;
 
 // Well above any slice the loop takes when nothing blocks it (a few ms, more under ASan), and
-// well below the 1 s timeouts these tests use: a blocking libpq call would show as 1 s or more.
-constexpr auto kLongestAcceptableSlice = std::chrono::milliseconds(250);
+// below the 1 s timeouts these tests use: a blocking libpq call would show as 1 s or more. The
+// slice is wall time, so it also counts the time the scheduler kept the thread off a CPU: on the
+// self-hosted host (6 cores at load average 12-14, four CI jobs and a deployment beside it) one
+// such pause measured 373 ms, with nothing blocking the loop. 750 ms is twice that and still
+// leaves a 1 s stall above it.
+constexpr auto kLongestAcceptableSlice = std::chrono::milliseconds(750);
 constexpr core::Millis kTimeout{1000};
 constexpr core::Millis kTick{100};
 constexpr auto kObserved = std::chrono::milliseconds(2500);
 // The wheel rounds a deadline up to the tick after next, so a timer re-armed every 100 ms
-// fires every 200 ms: 12 times in 2.5 s. One stall as long as kTimeout would cost 5 of them.
-constexpr int kMinimumTicks = 10;
+// fires every 200 ms: 12 times in 2.5 s. One stall as long as kTimeout would cost 5 of them,
+// leaving 7; a pause of the thread as long as kLongestAcceptableSlice costs at most 4.
+constexpr int kMinimumTicks = 8;
 // The request timeout of the tests that are not about timeouts: none of them asserts on it, so
 // it only has to outlast the slowest answer a loaded host gives. Measured on a 4-core host at
 // load average 8-12 (ci preset, both reactors, ULW_TEST_DATABASE_URL server), from submit() to
