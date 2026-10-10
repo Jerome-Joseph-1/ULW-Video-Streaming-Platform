@@ -18,8 +18,8 @@ enum class E2eeError : std::uint8_t {
     NotFound,
     // The device was deregistered. Its id stays retired while its tombstone is kept.
     Revoked,
-    // The device has no key package left. This is the replenish signal: whoever asked should
-    // tell the device to publish more, and try again after it has.
+    // The device has no key package left, single-use or last-resort. This is the replenish
+    // signal: whoever asked should tell the device to publish more, and try again after it has.
     Exhausted,
     // Publishing the batch would take the device above kMaxKeyPackagesPerDevice, or registering
     // the device would take its user above kMaxDevicesPerUser. Nothing was stored.
@@ -75,6 +75,8 @@ inline constexpr std::size_t kRetiredDevicesKept = 64;
 
 // Checks a batch against the size bounds before anything is stored: Invalid, or nothing.
 [[nodiscard]] E2eeResult<void> check_key_package_batch(std::span<const KeyPackageBytes> batch);
+// The same for one package on its own, a last-resort one.
+[[nodiscard]] E2eeResult<void> check_key_package(const KeyPackageBytes& package);
 
 // An MLS commit exactly as its sender serialised it. Like a key package, never parsed here.
 using CommitBytes = std::vector<std::byte>;
@@ -97,8 +99,30 @@ struct FetchedKeyPackage {
     // The device is at or below kKeyPackageLowWater and should be told to publish more. An
     // early warning only: fetches running side by side each count the packages the others are
     // taking, so a burst can cross the mark without any of them raising it. Exhausted, which
-    // no burst can hide, remains the signal that must be acted on.
+    // no burst can hide, remains the signal that must be acted on; so is a last-resort package.
     bool replenish = false;
+    // The device's last-resort package (RFC 9420 section 16.8, ADR-0102): its single-use ones
+    // had run out. It stays with the device and may be handed out again; `replenish` is set.
+    bool last_resort = false;
+};
+
+// Where a device's last-resort package stands (ADR-0102).
+enum class LastResort : std::uint8_t {
+    // None published since the device was registered.
+    None,
+    // Published and never handed out.
+    Fresh,
+    // Handed out at least once since it was published: the device should publish another,
+    // since every group that took it shares its init key until the device updates its leaf.
+    Used,
+};
+
+// A live device of a user, as the registry lists it.
+struct DeviceEntry {
+    DeviceId device;
+    // The single-use packages it holds.
+    std::size_t key_packages = 0;
+    LastResort last_resort = LastResort::None;
 };
 
 // The devices of each user. Every MLS member is one device (ADR-0016), so every key package
@@ -118,6 +142,9 @@ public:
     // before the device was retired.
     virtual void deregister_device(const UserId& user, const DeviceId& device,
                                    E2eeCallback<void> done) = 0;
+    // The user's live devices, in byte order of their ids: at most kMaxDevicesPerUser. Retired
+    // devices are not listed. A user with none, or one nobody has heard of, has an empty list.
+    virtual void list_devices(const UserId& user, E2eeCallback<std::vector<DeviceEntry>> done) = 0;
 };
 
 // What the server does for MLS (RFC 9420): it hands out key packages and orders commits. It
@@ -130,8 +157,14 @@ public:
     virtual void publish_key_packages(const UserId& user, const DeviceId& device,
                                       std::vector<KeyPackageBytes> batch,
                                       E2eeCallback<std::size_t> done) = 0;
+    // Replaces the device's last-resort package (ADR-0102), which becomes Fresh. Invalid when
+    // empty or above kMaxKeyPackageBytes.
+    virtual void publish_last_resort(const UserId& user, const DeviceId& device,
+                                     KeyPackageBytes package, E2eeCallback<void> done) = 0;
     // Takes one package of `user`'s `device` and deletes it: a package is single use, so of
-    // any number of concurrent fetchers exactly one receives it.
+    // any number of concurrent fetchers exactly one receives it. With none left it hands out the
+    // device's last-resort package, which it keeps and marks Used, and only without one is the
+    // answer Exhausted.
     virtual void fetch_key_package(const UserId& user, const DeviceId& device,
                                    E2eeCallback<FetchedKeyPackage> done) = 0;
     // Records `commit`, which `user`'s `committer` built at `epoch`, as the room's transition out

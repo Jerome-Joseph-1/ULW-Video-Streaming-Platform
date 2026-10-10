@@ -3,6 +3,7 @@
 #include "infra/auth/jwks_verifier.hpp"
 #include "infra/auth/local_verifier.hpp"
 #include "infra/curl/multi.hpp"
+#include "infra/postgres/e2ee_directory.hpp"
 #include "infra/postgres/message_store.hpp"
 #include "infra/postgres/room_store.hpp"
 #include "infra/sfu/livekit/livekit_sfu.hpp"
@@ -92,6 +93,8 @@ struct Services {
     std::unique_ptr<net::OffloadPool> offload;
     std::unique_ptr<infra::postgres::PgRoomStore> store;
     std::unique_ptr<infra::postgres::PgMessageStore> messages;
+    // The key directory (ADR-0102); its answers point into the server's directory service.
+    std::unique_ptr<infra::postgres::PgE2eeDirectory> directory;
     std::unique_ptr<infra::curl::Multi> key_multi;
     std::unique_ptr<chat::KeySetFetcher> key_fetcher;
     std::unique_ptr<core::ports::IJwtVerifier> verifier;
@@ -115,6 +118,7 @@ struct Services {
         offload.reset();
         signals.reset();
         messages.reset();
+        directory.reset();
         server.reset();
         store.reset();
     }
@@ -191,9 +195,25 @@ std::string calls_text(const chat::Config& config) {
     return out;
 }
 
-// The token verifier and, when calls are configured, the SFU; the exit code when either cannot
-// start.
+// The key directory (ADR-0102) on the database the stores use. Two sessions: a claim's fetches
+// queue on them, and claims come once per invitation. False when the URL cannot be used.
+bool make_directory(const chat::Config& config, Services& s) {
+    auto directory = infra::postgres::PgE2eeDirectory::create(
+        *s.reactor, *s.offload, {.conninfo = config.database_url, .connections = 2});
+    if (!directory) {
+        return false;
+    }
+    s.directory = std::move(*directory);
+    return true;
+}
+
+// The key directory, the token verifier and, when calls are configured, the SFU; the exit code
+// when any cannot start.
 std::optional<int> make_clients(const chat::Config& config, Services& s) {
+    if (!make_directory(config, s)) {
+        // libpq's reason quotes the offending part of the string, which may be the password.
+        return fail("ULW_DATABASE_URL", "not a connection string this server can use", kBadConfig);
+    }
     if (auto r = make_verifier(config, s); !r) {
         return fail("auth", r.error());
     }
@@ -362,7 +382,9 @@ int run() {
                    .verifier = *s.verifier,
                    .clock = s.clock,
                    .random = s.random,
-                   .sfu = s.sfu.get()},
+                   .sfu = s.sfu.get(),
+                   .registry = s.directory.get(),
+                   .key_packages = s.directory.get()},
         chat::Access{.cookie = config->auth_cookie, .allowed_origins = config->allowed_origins},
         chat_limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.server);

@@ -380,6 +380,7 @@ void Session::accept_upgrade(const codec::ws::UpgradeResponse& response) {
         client_ = server_.chat().attach(*this, *user_);
         presence_ = server_.presence().attach(*this, *user_);
         bell_ = server_.bell().attach(*this, *user_);
+        directory_ = server_.directory().attach(*this, *user_);
     }
     phase_ = Phase::Open;
     ++server_.counters().upgrades;
@@ -489,8 +490,13 @@ void Session::command(const codec::ws::Frame& frame) {
         return;
     }
     // Set by the upgrade, which is the only way into the Open phase.
-    if (!client_ || !presence_) {
+    if (!client_ || !presence_ || !directory_) {
         close_with(kInternalError);
+        return;
+    }
+    // The key directory's commands go to their own service, not the chat service (ADR-0043).
+    if (auto* d = std::get_if<DirectoryCommand>(&*parsed)) {
+        server_.directory().command(*directory_, std::move(*d));
         return;
     }
     ChatService& chat = server_.chat();
@@ -818,6 +824,9 @@ void Session::close() noexcept {
     }
     if (bell_) {
         server_.bell().detach(*bell_);
+    }
+    if (directory_) {
+        server_.directory().detach(*directory_);
     }
     release_request_hold();
     if (peer_hold_) {

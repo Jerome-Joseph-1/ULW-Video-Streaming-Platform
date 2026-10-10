@@ -109,6 +109,8 @@ pub struct Info {
     pub fingerprint: Option<String>,
     /// For a key package: its KeyPackageRef (RFC 9420, section 5.2), hex.
     pub key_package_ref: Option<String>,
+    /// For a key package: whether it is a last-resort one (RFC 9420, section 16.8).
+    pub last_resort: Option<bool>,
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -229,6 +231,27 @@ impl Client {
     /// the store until a welcome consumes it.
     pub fn key_package(&self) -> Result<Vec<u8>> {
         let bundle = KeyPackage::builder()
+            .build(
+                CIPHERSUITE,
+                &self.provider,
+                &self.signer,
+                self.credential.clone(),
+            )
+            .map_err(|_| Error::Internal)?;
+        serialize(&MlsMessageOut::from(bundle.key_package().clone()))
+    }
+
+    /// A last-resort KeyPackage (RFC 9420, section 16.8; ADR-0102), serialised as an
+    /// MLSMessage. The directory hands it out once the device's single-use packages have run
+    /// out, and may hand it out again, so a welcome that uses it leaves its private init key in
+    /// the store rather than deleting it. Its capabilities list the last-resort extension it
+    /// carries.
+    pub fn last_resort_key_package(&self) -> Result<Vec<u8>> {
+        let capabilities =
+            Capabilities::new(None, None, Some(&[ExtensionType::LastResort]), None, None);
+        let bundle = KeyPackage::builder()
+            .leaf_node_capabilities(capabilities)
+            .mark_as_last_resort()
             .build(
                 CIPHERSUITE,
                 &self.provider,
@@ -567,6 +590,7 @@ pub fn inspect(bytes: &[u8]) -> Result<Info> {
         identity: None,
         fingerprint: None,
         key_package_ref: None,
+        last_resort: None,
     };
     match message.extract() {
         MlsMessageBodyIn::PublicMessage(m) => {
@@ -602,6 +626,7 @@ pub fn inspect(bytes: &[u8]) -> Result<Info> {
                 .hash_ref(&crypto)
                 .map_err(|_| Error::Internal)?
                 .as_slice()));
+            info.last_resort = Some(package.last_resort());
         }
     }
     Ok(info)

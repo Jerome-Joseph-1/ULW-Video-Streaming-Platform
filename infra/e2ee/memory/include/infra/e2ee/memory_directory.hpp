@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <deque>
 #include <functional>
+#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -29,6 +30,12 @@ public:
                          core::ports::E2eeCallback<void> done) override;
     void deregister_device(const core::UserId& user, const core::DeviceId& device,
                            core::ports::E2eeCallback<void> done) override;
+    void
+    list_devices(const core::UserId& user,
+                 core::ports::E2eeCallback<std::vector<core::ports::DeviceEntry>> done) override;
+    void publish_last_resort(const core::UserId& user, const core::DeviceId& device,
+                             core::ports::KeyPackageBytes package,
+                             core::ports::E2eeCallback<void> done) override;
     void publish_key_packages(const core::UserId& user, const core::DeviceId& device,
                               std::vector<core::ports::KeyPackageBytes> batch,
                               core::ports::E2eeCallback<std::size_t> done) override;
@@ -51,6 +58,8 @@ private:
         // Orders retirements, so the oldest tombstones are the ones dropped.
         std::uint64_t retired_seq = 0;
         std::deque<core::ports::KeyPackageBytes> packages;
+        std::optional<core::ports::KeyPackageBytes> last_resort;
+        bool last_resort_used = false;
     };
 
     [[nodiscard]] std::size_t live_devices_of(const core::UserId& user) const;

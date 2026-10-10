@@ -289,3 +289,50 @@ fn bad_input_is_refused_by_name() {
     );
     assert_eq!(alice.join(&sealed, None).err(), Some(Error::Malformed));
 }
+
+// ADR-0102: the key directory hands a device's last-resort package out again once its single-use
+// ones have run out. Two groups that took the same one both welcome the device, and the package
+// stays usable across an export.
+#[test]
+fn a_last_resort_key_package_serves_more_than_one_welcome() {
+    let alice = Client::new(b"alice/01a0eb86-6cca-7dce-84cc-3bb47615f9fd").unwrap();
+    let carol = Client::new(b"carol/01a0eb86-6cca-7dce-84cc-3bb47615f9fe").unwrap();
+    let bob = Client::new(b"bob/01a0eb86-6cca-7dce-84cc-3bb47615f9ff").unwrap();
+    let last = bob.last_resort_key_package().unwrap();
+    let info = inspect(&last).unwrap();
+    assert_eq!(info.wire_format, "key_package");
+    assert_eq!(info.last_resort, Some(true));
+    assert_eq!(
+        inspect(&bob.key_package().unwrap()).unwrap().last_resort,
+        Some(false)
+    );
+
+    let mut first = alice.create_group(ROOM).unwrap();
+    let (_, welcome) = alice.add(&mut first, &[&last]).unwrap();
+    alice.merge_pending_commit(&mut first).unwrap();
+    let mut bobs_first = bob.join(&welcome, None).unwrap();
+
+    // Saved and restored between the two welcomes, as a page reload would.
+    let saved = bob.export_state().unwrap();
+    drop(bobs_first);
+    drop(bob);
+    let bob = Client::import_state(&saved).unwrap();
+    bobs_first = bob.load_group(ROOM).unwrap();
+
+    let other: &[u8] = b"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0e";
+    let mut second = carol.create_group(other).unwrap();
+    let (_, welcome) = carol.add(&mut second, &[&last]).unwrap();
+    carol.merge_pending_commit(&mut second).unwrap();
+    let mut bobs_second = bob.join(&welcome, None).unwrap();
+
+    let sealed = alice.encrypt(&mut first, b"one").unwrap();
+    assert_eq!(
+        bob.process(&mut bobs_first, &sealed).unwrap().plaintext,
+        b"one"
+    );
+    let sealed = carol.encrypt(&mut second, b"two").unwrap();
+    assert_eq!(
+        bob.process(&mut bobs_second, &sealed).unwrap().plaintext,
+        b"two"
+    );
+}

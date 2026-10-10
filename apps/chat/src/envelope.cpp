@@ -393,6 +393,191 @@ std::expected<Command, EnvelopeError> members_of(const core::json::Value& messag
     return list;
 }
 
+// The key directory's commands (ADR-0102) -----------------------------------------------------
+
+// "id", optional: the request id an answer repeats.
+std::expected<std::optional<rt::MessageKey>, EnvelopeError>
+request_id_of(const core::json::Value& message) {
+    if (message.find("id") == nullptr) {
+        return std::nullopt;
+    }
+    const auto text = string_of(message, "id");
+    if (!text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto id = rt::MessageKey::parse(*text);
+    if (!id) {
+        return std::unexpected(EnvelopeError::BadId);
+    }
+    return *id;
+}
+
+std::expected<core::DeviceId, EnvelopeError> device_from(const core::json::Value& value) {
+    const auto text = value.as_string();
+    if (!text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    const auto device = core::DeviceId::parse(*text);
+    if (!device) {
+        return std::unexpected(EnvelopeError::BadDevice);
+    }
+    return *device;
+}
+
+std::expected<core::DeviceId, EnvelopeError> device_of(const core::json::Value& message) {
+    const core::json::Value* device = message.find("device");
+    if (device == nullptr) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    return device_from(*device);
+}
+
+// One key package: base64url of 1 to kMaxKeyPackageBytes bytes.
+std::expected<core::ports::KeyPackageBytes, EnvelopeError>
+package_from(const core::json::Value& value) {
+    const auto text = value.as_string();
+    if (!text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    // Four characters per three bytes: anything longer cannot decode to a package in bounds.
+    if (text->size() > ((core::ports::kMaxKeyPackageBytes + 2) / 3) * 4) {
+        return std::unexpected(EnvelopeError::TooLarge);
+    }
+    auto bytes = infra::auth::decode_base64url_bytes(*text);
+    if (!bytes || bytes->empty()) {
+        return std::unexpected(EnvelopeError::BadBody);
+    }
+    if (bytes->size() > core::ports::kMaxKeyPackageBytes) {
+        return std::unexpected(EnvelopeError::TooLarge);
+    }
+    return std::move(*bytes);
+}
+
+std::expected<Command, EnvelopeError> device_command_of(const core::json::Value& message,
+                                                        bool retire) {
+    if (!only(message, {"type", "device", "id"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto device = device_of(message);
+    if (!device) {
+        return std::unexpected(device.error());
+    }
+    auto id = request_id_of(message);
+    if (!id) {
+        return std::unexpected(id.error());
+    }
+    if (retire) {
+        return DirectoryCommand{RetireDevice{.device = *device, .id = *id}};
+    }
+    return DirectoryCommand{RegisterDevice{.device = *device, .id = *id}};
+}
+
+std::expected<Command, EnvelopeError> publish_of(const core::json::Value& message) {
+    if (!only(message, {"type", "device", "key_packages", "last_resort", "id"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto device = device_of(message);
+    if (!device) {
+        return std::unexpected(device.error());
+    }
+    auto id = request_id_of(message);
+    if (!id) {
+        return std::unexpected(id.error());
+    }
+    PublishKeyPackages publish{.device = *device, .packages = {}, .id = *id};
+    if (const core::json::Value* list = message.find("key_packages")) {
+        const auto* items = list->as_array();
+        if (items == nullptr || items->size() > core::ports::kMaxKeyPackagesPerDevice) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        publish.packages.reserve(items->size());
+        for (const core::json::Value& item : *items) {
+            auto package = package_from(item);
+            if (!package) {
+                return std::unexpected(package.error());
+            }
+            publish.packages.push_back(std::move(*package));
+        }
+    }
+    if (const core::json::Value* last = message.find("last_resort")) {
+        auto package = package_from(*last);
+        if (!package) {
+            return std::unexpected(package.error());
+        }
+        publish.last_resort = std::move(*package);
+    }
+    if (publish.packages.empty() && !publish.last_resort) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    return DirectoryCommand{std::move(publish)};
+}
+
+std::expected<Command, EnvelopeError> devices_of(const core::json::Value& message) {
+    if (!only(message, {"type", "user", "id"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto user = one_user_of(message);
+    if (!user) {
+        return std::unexpected(user.error());
+    }
+    auto id = request_id_of(message);
+    if (!id) {
+        return std::unexpected(id.error());
+    }
+    return DirectoryCommand{ListDevices{.user = *user, .id = *id}};
+}
+
+std::expected<Command, EnvelopeError> claim_of(const core::json::Value& message) {
+    if (!only(message, {"type", "user", "devices", "id"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto user = one_user_of(message);
+    if (!user) {
+        return std::unexpected(user.error());
+    }
+    auto id = request_id_of(message);
+    if (!id) {
+        return std::unexpected(id.error());
+    }
+    ClaimKeyPackages claim{.user = *user, .devices = {}, .id = *id};
+    if (const core::json::Value* list = message.find("devices")) {
+        const auto* items = list->as_array();
+        if (items == nullptr || items->empty() || items->size() > core::ports::kMaxDevicesPerUser) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        for (const core::json::Value& item : *items) {
+            auto device = device_from(item);
+            if (!device) {
+                return std::unexpected(device.error());
+            }
+            // Each device once: a second package of one device would be spent for nothing.
+            if (std::ranges::find(claim.devices, *device) != claim.devices.end()) {
+                return std::unexpected(EnvelopeError::Malformed);
+            }
+            claim.devices.push_back(*device);
+        }
+    }
+    return DirectoryCommand{std::move(claim)};
+}
+
+// One of the key directory's commands, or nullopt for a type that is not one.
+std::optional<std::expected<Command, EnvelopeError>>
+directory_command_of(std::optional<std::string_view> name, const core::json::Value& message) {
+    if (name == "register_device" || name == "retire_device") {
+        return device_command_of(message, name == "retire_device");
+    }
+    if (name == "publish_key_packages") {
+        return publish_of(message);
+    }
+    if (name == "devices") {
+        return devices_of(message);
+    }
+    if (name == "claim_key_packages") {
+        return claim_of(message);
+    }
+    return std::nullopt;
+}
+
 [[nodiscard]] std::string_view kind_name(core::ports::RoomKind kind) noexcept {
     switch (kind) {
     case core::ports::RoomKind::DirectChat:
@@ -542,6 +727,9 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     }
     if (name == "call_expel") {
         return call_move_of(*message, CallSignal::Expel);
+    }
+    if (auto directory = directory_command_of(name, *message)) {
+        return std::move(*directory);
     }
     if (name == "watch" || name == "unwatch") {
         const auto user = user_of(*message);
@@ -851,8 +1039,169 @@ std::string_view reason(EnvelopeError e) noexcept {
         return "bad_device";
     case EnvelopeError::BadCall:
         return "bad_call";
+    case EnvelopeError::TooLarge:
+        return "too_large";
     }
     return "malformed";
+}
+
+namespace {
+
+void append_device(std::string& out, std::string_view key, const core::DeviceId& device) {
+    std::array<char, core::Uuid::kTextLength> text{};
+    device.format_to(text);
+    out += ",\"";
+    out += key;
+    out += R"(":")";
+    out.append(text.data(), text.size());
+    out += '"';
+}
+
+void append_device_list(std::string& out, std::string_view key,
+                        std::span<const core::DeviceId> devices) {
+    out += ",\"";
+    out += key;
+    out += R"(":[)";
+    bool first = true;
+    for (const core::DeviceId& device : devices) {
+        std::array<char, core::Uuid::kTextLength> text{};
+        device.format_to(text);
+        out += first ? "\"" : ",\"";
+        first = false;
+        out.append(text.data(), text.size());
+        out += '"';
+    }
+    out += ']';
+}
+
+void append_request_id(std::string& out, const std::optional<rt::MessageKey>& id) {
+    if (id) {
+        append_id(out, *id);
+    }
+}
+
+void append_bytes(std::string& out, std::span<const std::byte> bytes) {
+    out += '"';
+    // The package's bytes, whatever they are; the encoding reads them as octets.
+    // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+    const std::span<const unsigned char> octets{
+        reinterpret_cast<const unsigned char*>(bytes.data()), bytes.size()};
+    // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+    infra::auth::append_base64url(out, octets);
+    out += '"';
+}
+
+void append_supply(std::string& out, const core::ports::DeviceEntry& entry) {
+    std::format_to(std::back_inserter(out), R"(,"key_packages":{},"last_resort":")",
+                   entry.key_packages);
+    out += last_resort_name(entry.last_resort);
+    out += '"';
+}
+
+} // namespace
+
+std::string_view last_resort_name(core::ports::LastResort state) noexcept {
+    switch (state) {
+    case core::ports::LastResort::None:
+        return "none";
+    case core::ports::LastResort::Fresh:
+        return "fresh";
+    case core::ports::LastResort::Used:
+        return "used";
+    }
+    return "none";
+}
+
+void write_device_supply(std::string& out, std::string_view type,
+                         const core::ports::DeviceEntry& entry,
+                         const std::optional<rt::MessageKey>& id) {
+    out += R"({"type":")";
+    out += type;
+    out += '"';
+    append_device(out, "device", entry.device);
+    append_supply(out, entry);
+    append_request_id(out, id);
+    out += '}';
+}
+
+void write_device_retired(std::string& out, const core::DeviceId& device,
+                          const std::optional<rt::MessageKey>& id) {
+    out += R"({"type":"device_retired")";
+    append_device(out, "device", device);
+    append_request_id(out, id);
+    out += '}';
+}
+
+void write_devices(std::string& out, const core::UserId& user,
+                   std::span<const core::ports::DeviceEntry> devices, bool supply,
+                   const std::optional<rt::MessageKey>& id) {
+    out += R"({"type":"devices")";
+    append_user(out, "user", user);
+    out += R"(,"devices":[)";
+    bool first = true;
+    for (const core::ports::DeviceEntry& entry : devices) {
+        std::array<char, core::Uuid::kTextLength> text{};
+        entry.device.format_to(text);
+        out += first ? R"({"device":")" : R"(,{"device":")";
+        first = false;
+        out.append(text.data(), text.size());
+        out += '"';
+        if (supply) {
+            append_supply(out, entry);
+        }
+        out += '}';
+    }
+    out += ']';
+    append_request_id(out, id);
+    out += '}';
+}
+
+void write_claimed(std::string& out, const core::UserId& user, const ClaimOutcome& outcome,
+                   const std::optional<rt::MessageKey>& id) {
+    out += R"({"type":"key_packages")";
+    append_user(out, "user", user);
+    out += R"(,"key_packages":[)";
+    bool first = true;
+    for (const ClaimedPackage& claimed : outcome.claimed) {
+        std::array<char, core::Uuid::kTextLength> text{};
+        claimed.device.format_to(text);
+        out += first ? R"({"device":")" : R"(,{"device":")";
+        first = false;
+        out.append(text.data(), text.size());
+        out += R"(","key_package":)";
+        append_bytes(out, claimed.package);
+        out += claimed.last_resort ? R"(,"last_resort":true})" : R"(,"last_resort":false})";
+    }
+    out += ']';
+    append_device_list(out, "exhausted", outcome.exhausted);
+    append_device_list(out, "gone", outcome.gone);
+    append_device_list(out, "unavailable", outcome.unavailable);
+    append_request_id(out, id);
+    out += '}';
+}
+
+void write_replenish(std::string& out, const core::DeviceId& device) {
+    out += R"({"type":"replenish")";
+    append_device(out, "device", device);
+    out += '}';
+}
+
+void write_directory_error(std::string& out, std::string_view reason,
+                           const DirectoryErrorContext& context) {
+    out += R"({"type":"error","reason":)";
+    core::json::append_string(out, reason);
+    append_request_id(out, context.id);
+    if (context.device) {
+        append_device(out, "device", *context.device);
+    }
+    if (context.user) {
+        append_user(out, "user", *context.user);
+    }
+    if (context.retry_after) {
+        std::format_to(std::back_inserter(out), R"(,"retry_after_ms":{})",
+                       context.retry_after->count());
+    }
+    out += '}';
 }
 
 std::string_view reason(rt::RouteError e) noexcept {

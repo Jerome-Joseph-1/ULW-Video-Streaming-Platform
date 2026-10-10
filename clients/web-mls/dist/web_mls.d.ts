@@ -62,6 +62,10 @@ export class MessageInfo {
      */
     readonly keyPackageRef: string | undefined;
     /**
+     * Whether a key package is a last-resort one (RFC 9420, section 16.8).
+     */
+    readonly lastResort: boolean | undefined;
+    /**
      * `key_package`, `welcome`, `private_message`, `public_message` or `group_info`.
      */
     readonly wireFormat: string;
@@ -95,9 +99,15 @@ export class MlsClient {
      */
     joinGroup(welcome: Uint8Array, expected_group_id?: Uint8Array | null): MlsGroup;
     /**
-     * A fresh single-use KeyPackage as an MLSMessage: post it to the room for a member to add.
+     * A fresh single-use KeyPackage as an MLSMessage: publish it to the key directory (or,
+     * without one, post it to the room) for a member to add.
      */
     keyPackage(): Uint8Array;
+    /**
+     * A last-resort KeyPackage as an MLSMessage, for the key directory to hand out once the
+     * single-use ones have run out. It may be used by many welcomes, so its private key stays.
+     */
+    lastResortKeyPackage(): Uint8Array;
     /**
      * A group this device is in, from its state; throws `not_a_member` when there is none.
      */
@@ -227,6 +237,7 @@ export interface InitOutput {
     readonly messageinfo_groupId: (a: number) => [number, number];
     readonly messageinfo_identity: (a: number) => [number, number];
     readonly messageinfo_keyPackageRef: (a: number) => [number, number];
+    readonly messageinfo_lastResort: (a: number) => number;
     readonly messageinfo_wireFormat: (a: number) => [number, number];
     readonly mlsclient_appData: (a: number) => [number, number];
     readonly mlsclient_createGroup: (a: number, b: number, c: number) => [number, number, number];
@@ -236,6 +247,7 @@ export interface InitOutput {
     readonly mlsclient_importState: (a: number, b: number) => [number, number, number];
     readonly mlsclient_joinGroup: (a: number, b: number, c: number, d: number, e: number) => [number, number, number];
     readonly mlsclient_keyPackage: (a: number) => [number, number, number, number];
+    readonly mlsclient_lastResortKeyPackage: (a: number) => [number, number, number, number];
     readonly mlsclient_loadGroup: (a: number, b: number, c: number) => [number, number, number];
     readonly mlsclient_new: (a: number, b: number) => [number, number, number];
     readonly mlsclient_set_appData: (a: number, b: number, c: number) => void;
