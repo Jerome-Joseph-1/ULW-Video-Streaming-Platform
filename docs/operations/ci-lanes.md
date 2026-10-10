@@ -99,10 +99,38 @@ concurrency group keeps one run going and at most one waiting.
 6. If main moved while the batch ran (a push that did not come through the loop), the batch is
    rebuilt from the new tip and tested again.
 
-**publish-images.yml is unchanged.** It publishes a commit on main only once ci.yml's run for
-that commit's push to main has succeeded (`event=push&branch=main`). Every squash merge is a
-push to main, and every push to main runs the full lane, so a merged commit still gets the run
-the gate waits for; a `batch/**` run never satisfies it.
+**publish-images.yml** publishes a commit on main only once ci.yml's run for that commit's push
+to main has succeeded (`event=push&branch=main`); that success starts it (see "Where jobs run").
+Every squash merge is a push to main, and every push to main runs the full lane, so a merged
+commit still gets the run the publish needs; a `batch/**` run never satisfies it.
+
+## Where jobs run
+
+<!-- .github/workflows/ci.yml (the runs-on of every job, the "trusted-runner" anchor), .github/workflows/publish-images.yml (on.workflow_run) -->
+
+The self-hosted host is one machine with four runners (`vmi3627724`, `-2`, `-3`, `-4`), so four
+jobs at a time share its cores. On 2026-10-09/10 the full lane of four pull requests and two
+batches queued about 45 jobs on it: a full-tree clang-tidy shard took 2-2.5 h and hit the lint
+job's 150-minute limit, main's own run on the #166 merge started none of its self-hosted jobs in
+five hours, and publish-images, which then ran beside ci and waited for it, gave up twice
+(285 min) with nothing published. Three changes followed:
+
+| Change | Why |
+|---|---|
+| `lint` (the four clang-tidy shards and the quick checks), `secrets` and `manifests` run on a hosted runner, whatever the event | None needs the host: they compile nothing, use no io_uring and lock no memory. The repository is public, so hosted minutes cost nothing. A shard takes 15-24 min there; lint's limit is 60 min again. Forks' pull requests ran them there already |
+| Main's runs (its pushes and the nightly) may take any of the host's runners; every other run only those carrying the labels in the repository variable `ULW_SHARED_RUNNERS` (a JSON list, `["self-hosted","ulw-shared"]`) | A runner without the `ulw-shared` label serves main alone, so main's run, and the publish that waits on it, never queue behind pull requests and batches. With the variable unset every run takes any runner, as before |
+| publish-images starts on ci's success (`workflow_run`, for a run of a push to main) instead of beside it | Nothing waits on ci any more, so a ci run of any length gets its commit published; a successful re-run of a failed run publishes it too. The images now come about 45-60 min after ci, the build no longer overlapping it |
+
+The jobs left on the host are the ones that need its kernel: `build-test`, `tsan`,
+`reactor-matrix`, `autobahn` and `fuzz`. A pull request from a fork still runs them on a hosted
+runner, never on the host.
+
+**Reserving a runner for main** (the repository's admins): on GitHub, Settings, Actions,
+Runners, add the label `ulw-shared` to three of the four runners (each runner's `...` menu,
+"Edit labels"), leaving one without it; then Settings, Secrets and variables, Actions,
+Variables, add `ULW_SHARED_RUNNERS` with the value `["self-hosted","ulw-shared"]`. In that
+order: with the variable set and no runner labelled, pull requests' and batches' jobs wait for a
+runner that never comes. Deleting the variable undoes it.
 
 ## Consequences
 
@@ -117,7 +145,8 @@ the gate waits for; a `batch/**` run never satisfies it.
   action is proved by its batch (or a manual run on its branch), not by its quick lane.
 - Squash-merging a batch of N pushes N commits to main. ci.yml's concurrency keeps one main run
   going and replaces a waiting one, so the first and last commits get full runs and the ones
-  between may be cancelled; publish-images.yml behaves the same way (docs/adr/0085). The last
+  between may be cancelled; publish-images.yml, started by each successful one, keeps one publish
+going and replaces a waiting one in the same way (docs/adr/0085). The last
   commit's tree is the tested batch tree, so the commit that is published and that `main` points
   at is one that ran the full suite.
 - Each `batch/**` push saves its own ccache entries; actions/cache lets a branch restore main's
