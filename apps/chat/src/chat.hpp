@@ -129,7 +129,7 @@ struct Deps {
     // The SFU calls are answered with (ADR-0050); null when calls are not configured, and every
     // call is then answered calls_disabled. Must outlive the server.
     core::ports::ISfu* sfu = nullptr;
-    // The key directory (ADR-0038, ADR-0101); null when none is configured, and every directory
+    // The key directory (ADR-0038, ADR-0102); null when none is configured, and every directory
     // command is then answered unavailable. Must outlive the server, or be destroyed first:
     // answers that come back after the server is gone are dropped.
     core::ports::IDeviceRegistry* registry = nullptr;

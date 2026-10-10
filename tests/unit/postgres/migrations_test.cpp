@@ -114,7 +114,7 @@ TEST(BundledMigrations, ThePurgeQueueMigrationTouchesNoExistingTable) {
     FAIL() << "no video_purges migration";
 }
 
-// 0018 (ADR-0101) only adds the last-resort packages' table: nothing else is altered or scanned.
+// 0018 (ADR-0102) only adds the last-resort packages' table: nothing else is altered or scanned.
 TEST(BundledMigrations, TheLastResortMigrationOnlyCreatesItsTable) {
     for (const auto& m : bundled_migrations()) {
         if (m.name != "e2ee_last_resort") {

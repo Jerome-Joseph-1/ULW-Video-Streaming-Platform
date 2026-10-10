@@ -63,7 +63,7 @@
 //   {"type":"rooms"}   the rooms the user is listed in; "after":"<uuid>", "limit":<1 to 100>
 //   {"type":"members","room":"<uuid>"}   a room's members, for a member; "after":"<sub>",
 //       "limit":<1 to 100>
-// The key directory (ADR-0038, ADR-0101), none of which needs a join first; each takes an
+// The key directory (ADR-0038, ADR-0102), none of which needs a join first; each takes an
 // optional "id" (a message id's syntax) that its answer or error repeats:
 //   {"type":"register_device","device":"<uuid>"}   this user's device, idempotently
 //   {"type":"retire_device","device":"<uuid>"}   for good: its packages go, its id never returns
@@ -227,7 +227,7 @@ struct ListMembers {
     std::size_t limit = kDefaultListLimit;
 };
 
-// The key directory (ADR-0038, ADR-0101): each carries an optional request id, a message id's
+// The key directory (ADR-0038, ADR-0102): each carries an optional request id, a message id's
 // syntax, which its answer and its error repeat so that a client can tell answers apart.
 struct RegisterDevice {
     core::DeviceId device;
@@ -353,7 +353,7 @@ struct ErrorContext {
 };
 void write_error_with(std::string& out, std::string_view reason, const ErrorContext& context);
 
-// The key directory's answers (ADR-0101). `type` is device_registered or
+// The key directory's answers (ADR-0102). `type` is device_registered or
 // key_packages_published: the device's supply after the command.
 void write_device_supply(std::string& out, std::string_view type,
                          const core::ports::DeviceEntry& entry,

@@ -1,4 +1,4 @@
--- Each device's last-resort KeyPackage (RFC 9420 section 16.8, ADR-0101): handed out, and kept,
+-- Each device's last-resort KeyPackage (RFC 9420 section 16.8, ADR-0102): handed out, and kept,
 -- when the device's single-use packages (key_packages, migration 0004) have run out, so that the
 -- device can still be invited while it is offline. One per device; publishing another replaces
 -- it. served_at is set the first time it is handed out and cleared by a replacement: the device

@@ -241,7 +241,7 @@ impl Client {
         serialize(&MlsMessageOut::from(bundle.key_package().clone()))
     }
 
-    /// A last-resort KeyPackage (RFC 9420, section 16.8; ADR-0101), serialised as an
+    /// A last-resort KeyPackage (RFC 9420, section 16.8; ADR-0102), serialised as an
     /// MLSMessage. The directory hands it out once the device's single-use packages have run
     /// out, and may hand it out again, so a welcome that uses it leaves its private init key in
     /// the store rather than deleting it. Its capabilities list the last-resort extension it

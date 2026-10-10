@@ -67,7 +67,7 @@ struct DirectoryClientId {
     friend bool operator==(DirectoryClientId, DirectoryClientId) = default;
 };
 
-// The key directory as clients see it (ADR-0101): each device of a user publishes its MLS
+// The key directory as clients see it (ADR-0102): each device of a user publishes its MLS
 // KeyPackages, and whoever adds that user to a group claims one of each of their devices'. The
 // directory itself (ADR-0038) holds the packages; this decides who may ask what, how often, and
 // writes the answers. A device's packages are published only by its own user, which the

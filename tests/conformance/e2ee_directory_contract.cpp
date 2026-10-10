@@ -203,7 +203,7 @@ TEST_P(DirectoryContract, DeregistrationLeavesTheUsersOtherDevicesAlone) {
     EXPECT_TRUE(fetch(alice, laptop));
 }
 
-// ADR-0101: a device's last-resort package --------------------------------------------------
+// ADR-0102: a device's last-resort package --------------------------------------------------
 
 TEST_P(DirectoryContract, TheLastResortIsHandedOutOnlyOnceTheSingleUsePackagesRunOut) {
     const core::DeviceId device = stocked_device(1);

@@ -525,7 +525,7 @@ A change takes effect at the user's next request on every gateway: nothing is ca
 URLs a playlist handed out before stay valid until they expire (at most 7 days, usually an hour
 or two), as for any viewer.
 
-**Migration 0018 (the key directory's last-resort packages, docs/adr/0101) comes after 0017.**
+**Migration 0018 (the key directory's last-resort packages, docs/adr/0102) comes after 0017.**
 It only creates `last_resort_key_packages`, an empty table whose foreign key holds a lock on
 `devices` for the moment until its commit: no off-peak window. Deploy the gateway, whose init
 container runs it, before chat: until it has run, chat answers most key directory commands
@@ -563,9 +563,9 @@ rules.
 
 The images come prebuilt from GitHub's container registry, public, so no pull secret is
 needed; the nodes need to reach `ghcr.io` and `pkg-containers.githubusercontent.com` over https.
-`.github/workflows/publish-images.yml` in this repository builds the four Dockerfile targets
-for every push to `main`, checks them as the e2e sandbox does (the release binaries' hardening
-and Trivy's image gate; either failing stops it), waits for that commit's `ci` run to succeed,
+`.github/workflows/publish-images.yml` in this repository starts once a push to `main` has
+passed its `ci` run, builds the four Dockerfile targets of that commit, checks them as the e2e
+sandbox does (the release binaries' hardening and Trivy's image gate; either failing stops it),
 and only then pushes:
 
 | Image | Dockerfile target | Runs | `config.env` key |
@@ -585,8 +585,9 @@ carries a build provenance attestation from the run that first pushed it
 Jerome-Joseph-1/ULW-Video-Streaming-Platform`). LiveKit, its egress, Redis and STUNner are
 upstream images, pinned by digest in the manifests.
 
-Not every commit on main is published: a newer push replaces a waiting publish, and a publish
-stops if the commit's `ci` run fails. A commit whose run succeeded is published from Actions,
+Not every commit on main is published: a newer publish replaces a waiting one, and a commit
+whose `ci` run fails is not published (a successful re-run of that run publishes it). A commit
+whose run succeeded is published from Actions,
 publish-images, "Run workflow" (from `main`) with its SHA as `ref`, by the repository's
 maintainers.
 

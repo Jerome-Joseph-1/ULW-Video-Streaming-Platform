@@ -1,6 +1,6 @@
 # 0016. End-to-end encryption for private chat only
 
-Status: Accepted, amended by 0101 (multi-device: every device is its own member, found through the key directory)
+Status: Accepted, amended by 0102 (multi-device: every device is its own member, found through the key directory)
 Date: 2026-09-28
 
 ## Context

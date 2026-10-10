@@ -393,7 +393,7 @@ std::expected<Command, EnvelopeError> members_of(const core::json::Value& messag
     return list;
 }
 
-// The key directory's commands (ADR-0101) -----------------------------------------------------
+// The key directory's commands (ADR-0102) -----------------------------------------------------
 
 // "id", optional: the request id an answer repeats.
 std::expected<std::optional<rt::MessageKey>, EnvelopeError>

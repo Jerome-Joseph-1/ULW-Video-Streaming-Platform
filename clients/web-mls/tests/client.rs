@@ -290,7 +290,7 @@ fn bad_input_is_refused_by_name() {
     assert_eq!(alice.join(&sealed, None).err(), Some(Error::Malformed));
 }
 
-// ADR-0101: the key directory hands a device's last-resort package out again once its single-use
+// ADR-0102: the key directory hands a device's last-resort package out again once its single-use
 // ones have run out. Two groups that took the same one both welcome the device, and the package
 // stays usable across an export.
 #[test]

@@ -270,6 +270,21 @@ TEST_F(JobQueueTest, PermanentFailureFailsTheVideoAtOnce) {
               "not a video file");
 }
 
+// ADR-0101: a retry starts from nothing, not from where the attempt before it stopped.
+TEST_F(JobQueueTest, AClaimStartsTheProgressAgain) {
+    queue_job();
+    const auto first = claim(*queue, "worker-a");
+    ASSERT_TRUE(first);
+    ASSERT_EQ(queue->report_progress(first->lease, 60), true);
+    ASSERT_EQ(queue->fail(first->lease, "object storage unavailable", true), true);
+    make_due();
+    const auto second = claim(*queue, "worker-b");
+    ASSERT_TRUE(second);
+    EXPECT_EQ(scalar(*conn, "SELECT progress_pct FROM jobs WHERE id = $1",
+                     Params{}.add_int(std::to_underlying(second->lease.job))),
+              "0");
+}
+
 TEST_F(JobQueueTest, ProgressOutsideAPercentIsInvalidRatherThanAnOutage) {
     queue_job();
     const auto job = claim(*queue, "worker-a");

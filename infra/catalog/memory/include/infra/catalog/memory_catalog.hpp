@@ -111,6 +111,8 @@ private:
     template <class T> [[nodiscard]] bool refused(core::ports::CatalogCallback<T>& done);
     // The video by that id, unless it does not exist or has been deleted.
     [[nodiscard]] core::VideoRecord* live_video(const core::VideoId& id);
+    [[nodiscard]] static std::optional<core::TranscodeProgress>
+    progress_of(const core::VideoRecord& video);
     void stamp_created(const core::VideoId& id);
 
     net::IReactor& reactor_;

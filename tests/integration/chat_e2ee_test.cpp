@@ -363,7 +363,7 @@ TEST_P(ChatE2eeTest, AThousandMlsMessagesAreStoredAsCiphertextAndReadableNowhere
     }
 }
 
-// ADR-0101: each device of a user is its own member, found through the server's key directory.
+// ADR-0102: each device of a user is its own member, found through the server's key directory.
 // Alice has a phone and a laptop, bob one device, each on its own node. Every device publishes
 // key packages it made itself; alice's phone lists the devices of everyone in the room, claims a
 // package of each device the group lacks, and adds them all in one commit; the welcome reaches

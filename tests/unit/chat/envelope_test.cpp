@@ -755,7 +755,7 @@ TEST(Envelope, MemberListRepliesAreTheDocumentedShapes) {
     EXPECT_EQ(out, R"({"type":"error","reason":"not_admin","room":")" + r + R"("})");
 }
 
-// The key directory (ADR-0101) --------------------------------------------------------------
+// The key directory (ADR-0102) --------------------------------------------------------------
 
 constexpr std::string_view kDevice = "01a0eb86-6cca-7dce-84cc-3bb47615f9fe";
 constexpr std::string_view kOther = "01a0eb86-6cca-7dce-84cc-3bb47615f9ff";

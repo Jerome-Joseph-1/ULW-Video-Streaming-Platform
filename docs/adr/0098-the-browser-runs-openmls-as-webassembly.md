@@ -1,6 +1,6 @@
 # 0098. The browser runs the bridge's OpenMLS as WebAssembly, built in a pinned image
 
-Status: Accepted, amended by 0101 (key packages through the key directory, not the room)
+Status: Accepted, amended by 0102 (key packages through the key directory, not the room)
 Date: 2026-10-04
 
 ## Context

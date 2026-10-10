@@ -108,7 +108,7 @@ await run(async () => {
     await inGroup(alice, 1);
     await bob.click("#announce");
     const bobFingerprint = (await bob.textContent("#me")).split("fingerprint ")[1].replace(/\s/g, "");
-    // Bob's device registered itself in the key directory; alice's page finds it there (ADR-0101).
+    // Bob's device registered itself in the key directory; alice's page finds it there (ADR-0102).
     await approveNext(alice, "bob/", bobFingerprint);
     await inGroup(bob, 2);
     log("bob's browser joined alice's group through the key directory");

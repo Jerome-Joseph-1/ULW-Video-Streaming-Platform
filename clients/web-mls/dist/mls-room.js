@@ -27,7 +27,7 @@
 // in seq order, the caller's own included), and a send the server refused goes to
 // `sendFailed(id, reason)`.
 //
-// With the chat server's key directory (ADR-0101), devices no longer post key packages to the
+// With the chat server's key directory (ADR-0102), devices no longer post key packages to the
 // room. Each device registers itself (`<user>/<device id>` is its credential's identity) and
 // publishes single-use key packages and a last-resort one through an `MlsDirectory`; the
 // device at the first leaf calls `reconcile(users)` with the room's member list, which lists

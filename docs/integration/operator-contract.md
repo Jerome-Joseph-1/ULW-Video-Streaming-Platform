@@ -427,7 +427,7 @@ another kind: alert if it rises while the database is healthy), and `member_even
 (`member` frames this node sent when a list changed, whichever node changed it), and
 `membership_refusals_total{reason="not_allowed"}` (`open_direct`, `create_group` and
 `add_members` refused because `ULW_CHAT_SELF_SERVICE` is off: a client still offering them).
-The key directory (ADR-0101), counted on the node the asking client is on:
+The key directory (ADR-0102), counted on the node the asking client is on:
 `e2ee_devices_registered_total`, `e2ee_devices_retired_total`,
 `e2ee_key_packages_published_total{kind="single_use"}` and `{kind="last_resort"}`,
 `e2ee_device_listings_total`, `e2ee_claims_total`, `e2ee_key_packages_claimed_total{kind="single_use"}`

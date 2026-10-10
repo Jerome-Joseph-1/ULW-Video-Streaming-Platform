@@ -57,8 +57,12 @@ cursor_from_text(std::string_view text) noexcept;
 // The video state's name in the API: init, uploading, processing, ready or failed.
 [[nodiscard]] std::string_view state_name(core::VideoState state) noexcept;
 
+// A transcode stage's name in the API: queued or transcoding.
+[[nodiscard]] std::string_view stage_name(core::TranscodeStage stage) noexcept;
+
 // The video object of GET /api/v1/videos/{id}. Only its owner sees its visibility and why it
-// failed: a viewer learns what they can play, not whom else it is shared with.
+// failed: a viewer learns what they can play, not whom else it is shared with. Everyone who may
+// see it sees its progress, an object while it is processing and null otherwise.
 [[nodiscard]] std::string video_json(const core::VideoRecord& video, core::VideoAccess access);
 
 // {"video_id":..., "grants":[{"user_id":..., "granted_at":<unix seconds>}], "next":<cursor|null>}

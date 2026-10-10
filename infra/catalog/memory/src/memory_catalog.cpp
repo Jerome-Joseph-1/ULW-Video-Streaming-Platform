@@ -206,6 +206,14 @@ void MemoryCatalog::abort_upload(const core::UploadId& id, CatalogCallback<void>
     defer([done = std::move(done), result]() mutable noexcept { done(result); });
 }
 
+// No worker takes this catalog's jobs, so a processing video's job is always waiting for one.
+std::optional<core::TranscodeProgress> MemoryCatalog::progress_of(const core::VideoRecord& video) {
+    if (video.state != core::VideoState::Processing) {
+        return std::nullopt;
+    }
+    return core::TranscodeProgress{};
+}
+
 void MemoryCatalog::find_video_for(const core::VideoId& id, const core::UserId& viewer,
                                    CatalogCallback<core::ports::VideoView> done) {
     if (refused(done)) {
@@ -224,6 +232,7 @@ void MemoryCatalog::find_video_for(const core::VideoId& id, const core::UserId& 
                                       members_.contains({*room, std::string(video.owner.view())}),
                        .granted = granted != grants_.end() &&
                                   granted->second.contains(std::string(viewer.view()))}};
+        result->video.progress = progress_of(video);
     }
     if (find_video_error_) {
         result = std::unexpected(*find_video_error_);
@@ -249,6 +258,7 @@ void MemoryCatalog::set_visibility(const core::VideoId& id,
         } else {
             video->visibility = visibility;
             result = *video;
+            result->progress = progress_of(*video);
         }
     }
     defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
@@ -351,6 +361,7 @@ void MemoryCatalog::list_videos(const core::UserId& owner,
         const auto created = created_.find(id);
         listed.push_back(core::ports::ListedVideo{
             .video = video, .created_at_us = created == created_.end() ? 0 : created->second});
+        listed.back().video.progress = progress_of(video);
     }
     // Newest first, the id breaking ties, as the database orders them.
     const auto key = [](const core::ports::ListedVideo& v) {

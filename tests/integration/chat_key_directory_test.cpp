@@ -1,4 +1,4 @@
-// The key directory as chat_server serves it (ADR-0101), on the three-node cluster: a device
+// The key directory as chat_server serves it (ADR-0102), on the three-node cluster: a device
 // publishes its key packages through one node, and other users claim them through the others,
 // each package once however many claims race for it.
 

@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## 2026-10-09: end-to-end encryption is Stable, with a key directory and every device a member
 
-<!-- apps/chat/src/key_directory.cpp, apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, infra/postgres/src/e2ee_directory.cpp, migrations/0018_e2ee_last_resort.sql, clients/web-mls/js/mls-room.js, docs/integration/e2ee.md, docs/adr/0101-the-key-directory-is-served-and-every-device-is-a-member.md -->
+<!-- apps/chat/src/key_directory.cpp, apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, infra/postgres/src/e2ee_directory.cpp, migrations/0018_e2ee_last_resort.sql, clients/web-mls/js/mls-room.js, docs/integration/e2ee.md, docs/adr/0102-the-key-directory-is-served-and-every-device-is-a-member.md -->
 
 Additive (versioning rule 1): new message `type`s and `error` reasons on the chat socket, a new
 migration, and new metrics. Nothing a client sends today is answered differently.
@@ -26,6 +26,25 @@ What to do:
 - **Operators:** migration 0018 must run after 0017 (RUNBOOK); it only creates an empty table.
   Deploy the gateway (which runs migrations) before chat. Each chat node opens two more database
   sessions (`application_name` `ulw-e2ee`). New `e2ee_*` metrics ([operator-contract.md](operator-contract.md)).
+
+## 2026-10-09: a processing video says how far along it is
+
+<!-- apps/gateway/src/video_access.cpp (video_json), infra/postgres/src/upload_catalog.cpp (kFindVideoFor, kListVideos, kSetVisibility, decode_progress), infra/postgres/src/job_queue.cpp (kClaim), apps/worker/src/job_runner.cpp (KeeperProgress), docs/adr/0101-transcode-progress-on-the-video-object.md -->
+
+Additive: the video object gains one field; nothing else changes.
+
+| Before | Now |
+|---|---|
+| A video in `processing` said nothing more until `ready` or `failed` | The video object has `progress`: `{"stage":"queued"\|"transcoding","percent":0..99}` while `processing`, `null` in every other state, on `GET` and `PATCH /api/v1/videos/{id}`, `PATCH /api/v1/service/videos/{id}` and each video of `GET /api/v1/service/videos` ([Progress](videos-and-playback.md#progress)) |
+
+What to do:
+
+- **Clients and backends:** while polling a processing video, show `progress.percent`, and
+  `progress.stage` `queued` as waiting. Treat `ready` as 100%. A retry sets it back to `queued` at
+  0, so follow the value rather than assuming it only grows. A client that reads the object into
+  a strict schema must allow the new field (versioning.md, rule 1).
+- **Operators:** nothing; no migration, setting or grant. Deploy the worker with the gateway for
+  publishing to report its share (90 to 99); an older worker's figure is capped at 99.
 
 ## 2026-10-08: the operator's backend controls VOD; owners delete videos
 

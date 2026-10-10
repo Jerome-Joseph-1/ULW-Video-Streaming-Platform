@@ -237,7 +237,7 @@ test("one group state per client however many handles, and removal is an event",
     assert.equal(text(utf8("x")), "x");
 });
 
-// --- the key directory (ADR-0101) --------------------------------------------------------------
+// --- the key directory (ADR-0102) --------------------------------------------------------------
 
 // The chat server's key directory as one in-memory service: devices registered per user, single-
 // use packages handed out once, the last resort kept, other users' devices only for users who

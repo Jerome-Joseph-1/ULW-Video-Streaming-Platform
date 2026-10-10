@@ -28,7 +28,7 @@ struct E2eeDirectoryConfig {
 //
 // The single-use guarantee rests on the fetch being one statement that deletes the package it
 // returns, so no reply can carry a package whose row survived; the device's last-resort package
-// (ADR-0101) is the one a fetch keeps, and only a fetch that took no other hands it out.
+// (ADR-0102) is the one a fetch keeps, and only a fetch that took no other hands it out.
 // Deregistration and fetches of the
 // same device are serialised on the device's row lock: a fetch either finishes before the
 // device is retired or sees it retired.

@@ -142,7 +142,7 @@ TEST_F(E2eeRaceTest, ConcurrentFetchersOfTheLastPackageHaveExactlyOneWinner) {
     EXPECT_EQ(packages_left(), "0");
 }
 
-// ADR-0101: with a last-resort package behind the last single-use one, nobody comes away empty,
+// ADR-0102: with a last-resort package behind the last single-use one, nobody comes away empty,
 // and still only one contender gets the single-use package.
 TEST_F(E2eeRaceTest, ConcurrentFetchersOfTheLastPackageFallBackToTheLastResort) {
     stock(1);

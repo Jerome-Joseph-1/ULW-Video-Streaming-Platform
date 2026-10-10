@@ -516,7 +516,7 @@ std::string ChatServer::render_metrics() const {
                        api.refused_connections, service_api_.connections(), api.requests,
                        api.changes, api.reads, api.unauthorized, api.forbidden, api.limited,
                        api.bad_requests, api.refused, api.unavailable) +
-           // The key directory (ADR-0101), on the node the asking client is on.
+           // The key directory (ADR-0102), on the node the asking client is on.
            render_directory_metrics(directory_.counters());
 }
 

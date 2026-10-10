@@ -1,4 +1,4 @@
-# 0101. The key directory is served on the chat socket, a device keeps a last-resort package, and every device is a member
+# 0102. The key directory is served on the chat socket, a device keeps a last-resort package, and every device is a member
 
 Status: Accepted
 Date: 2026-10-09

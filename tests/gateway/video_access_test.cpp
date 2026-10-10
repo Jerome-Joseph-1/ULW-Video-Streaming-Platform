@@ -109,17 +109,48 @@ TEST(VideoJson, TheOwnerSeesTheVisibilityAndWhyItFailed) {
     EXPECT_EQ(gateway::video_json(record(core::VideoState::Failed), core::VideoAccess::Owner),
               R"({"id":")" + std::string(kVideo) +
                   R"(","title":"trip \"one\"","state":"failed","version":4,"duration_ms":null,)"
-                  R"("error_reason":"too long","visibility":"room:)" +
+                  R"("progress":null,"error_reason":"too long","visibility":"room:)" +
                   std::string(kRoom) + R"("})");
 }
 
 TEST(VideoJson, AViewerSeesNeither) {
     EXPECT_EQ(gateway::video_json(record(core::VideoState::Failed), core::VideoAccess::Viewer),
               R"({"id":")" + std::string(kVideo) +
-                  R"(","title":"trip \"one\"","state":"failed","version":4,"duration_ms":null})");
+                  R"(","title":"trip \"one\"","state":"failed","version":4,"duration_ms":null,)"
+                  R"("progress":null})");
     EXPECT_EQ(gateway::video_json(record(core::VideoState::Ready), core::VideoAccess::Viewer),
               R"({"id":")" + std::string(kVideo) +
-                  R"(","title":"trip \"one\"","state":"ready","version":4,"duration_ms":6000})");
+                  R"(","title":"trip \"one\"","state":"ready","version":4,"duration_ms":6000,)"
+                  R"("progress":null})");
+}
+
+// ADR-0101: anyone who may see a processing video sees its stage and percent.
+TEST(VideoJson, AProcessingVideoCarriesItsProgress) {
+    core::VideoRecord video = record(core::VideoState::Processing);
+    video.progress =
+        core::TranscodeProgress{.stage = core::TranscodeStage::Transcoding, .percent = 42};
+    EXPECT_EQ(gateway::video_json(video, core::VideoAccess::Viewer),
+              R"({"id":")" + std::string(kVideo) +
+                  R"(","title":"trip \"one\"","state":"processing","version":4,)"
+                  R"("duration_ms":null,"progress":{"stage":"transcoding","percent":42}})");
+    video.progress = core::TranscodeProgress{};
+    EXPECT_NE(gateway::video_json(video, core::VideoAccess::Owner)
+                  .find(R"("progress":{"stage":"queued","percent":0},"visibility")"),
+              std::string::npos);
+}
+
+// Progress belongs to processing alone: a stale one on a video in any other state is not shown.
+TEST(VideoJson, OnlyAProcessingVideoShowsProgress) {
+    core::VideoRecord video = record(core::VideoState::Ready);
+    video.progress =
+        core::TranscodeProgress{.stage = core::TranscodeStage::Transcoding, .percent = 99};
+    EXPECT_NE(gateway::video_json(video, core::VideoAccess::Viewer).find(R"("progress":null)"),
+              std::string::npos);
+}
+
+TEST(StageName, NamesEveryStage) {
+    EXPECT_EQ(gateway::stage_name(core::TranscodeStage::Queued), "queued");
+    EXPECT_EQ(gateway::stage_name(core::TranscodeStage::Transcoding), "transcoding");
 }
 
 TEST(StateName, NamesEveryState) {
@@ -201,7 +232,7 @@ TEST(VideosJson, ListsEachVideoAsItsOwnerSeesItAndTheCursorWhenMoreFollow) {
     EXPECT_EQ(gateway::videos_json(*core::UserId::parse("alice"), page),
               R"({"owner":"alice","videos":[{"id":")" + std::string(kVideo) +
                   R"(","title":"trip \"one\"","state":"failed","version":4,"duration_ms":null,)"
-                  R"("error_reason":"too long","visibility":"room:)" +
+                  R"("progress":null,"error_reason":"too long","visibility":"room:)" +
                   std::string(kRoom) + R"(","created_at":1759600000}],"next":"1759600000999999.)" +
                   std::string(kVideo) + R"("})");
     page.more = false;

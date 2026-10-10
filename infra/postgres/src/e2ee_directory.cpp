@@ -97,7 +97,7 @@ SELECT (SELECT n FROM held), (SELECT count(*) FROM added))sql";
 // here, and counts packages that concurrent fetches are taking; it is a hint for the replenish
 // signal, not a balance.
 //
-// With no single-use package taken, the device's last-resort package (ADR-0101) is handed out
+// With no single-use package taken, the device's last-resort package (ADR-0102) is handed out
 // instead and kept, marked served. Like the delete, the update is one of this statement's own
 // sub-statements, so a fetcher that skipped the last single-use row because another was taking
 // it is given the last resort rather than nothing.

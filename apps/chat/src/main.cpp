@@ -93,7 +93,7 @@ struct Services {
     std::unique_ptr<net::OffloadPool> offload;
     std::unique_ptr<infra::postgres::PgRoomStore> store;
     std::unique_ptr<infra::postgres::PgMessageStore> messages;
-    // The key directory (ADR-0101); its answers point into the server's directory service.
+    // The key directory (ADR-0102); its answers point into the server's directory service.
     std::unique_ptr<infra::postgres::PgE2eeDirectory> directory;
     std::unique_ptr<infra::curl::Multi> key_multi;
     std::unique_ptr<chat::KeySetFetcher> key_fetcher;
@@ -195,7 +195,7 @@ std::string calls_text(const chat::Config& config) {
     return out;
 }
 
-// The key directory (ADR-0101) on the database the stores use. Two sessions: a claim's fetches
+// The key directory (ADR-0102) on the database the stores use. Two sessions: a claim's fetches
 // queue on them, and claims come once per invitation. False when the URL cannot be used.
 bool make_directory(const chat::Config& config, Services& s) {
     auto directory = infra::postgres::PgE2eeDirectory::create(

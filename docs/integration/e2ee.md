@@ -2,7 +2,7 @@
 
 > **Stable.** The key directory's commands and answers below, and the room convention of the
 > [browser client](#browser-client), are kept under the compatibility rules in
-> [versioning.md](versioning.md) (milestone M22, ADR-0101).
+> [versioning.md](versioning.md) (milestone M22, ADR-0102).
 
 Private 1:1 and small-group chat is end-to-end encrypted with MLS (ADR-0016); a 1:1 chat is an
 MLS group of two. All private keys are generated and held by client devices; the server never
@@ -29,7 +29,7 @@ commit, and never reads one.
 
 ## Key directory
 
-<!-- apps/chat/src/key_directory.hpp, apps/chat/src/key_directory.cpp, apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/session.cpp (command), core/include/core/ports/e2ee.hpp, infra/postgres/src/e2ee_directory.cpp, migrations/0004_e2ee_directory.sql, migrations/0018_e2ee_last_resort.sql, docs/adr/0038-single-use-key-packages-in-postgres.md, docs/adr/0101-the-key-directory-is-served-and-every-device-is-a-member.md -->
+<!-- apps/chat/src/key_directory.hpp, apps/chat/src/key_directory.cpp, apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/session.cpp (command), core/include/core/ports/e2ee.hpp, infra/postgres/src/e2ee_directory.cpp, migrations/0004_e2ee_directory.sql, migrations/0018_e2ee_last_resort.sql, docs/adr/0038-single-use-key-packages-in-postgres.md, docs/adr/0102-the-key-directory-is-served-and-every-device-is-a-member.md -->
 
 The directory is served on the chat WebSocket ([chat.md](chat.md#connecting)): the same socket,
 token and envelope as everything else, with the commands below. None needs a room joined. Each
@@ -119,7 +119,7 @@ at most 64 KiB, which bounds one publish to what fits in it.
 
 ## Multi-device
 
-<!-- clients/web-mls/js/mls-room.js (MlsDirectory, reconcile), docs/adr/0101-the-key-directory-is-served-and-every-device-is-a-member.md -->
+<!-- clients/web-mls/js/mls-room.js (MlsDirectory, reconcile), docs/adr/0102-the-key-directory-is-served-and-every-device-is-a-member.md -->
 
 Every device of a user is its own leaf in each of the user's groups, with its own signature key
 and credential (`<user id>/<device id>`). Nothing is shared between a user's devices, and the

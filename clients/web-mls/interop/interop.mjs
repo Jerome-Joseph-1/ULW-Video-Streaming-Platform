@@ -7,7 +7,7 @@
 // device announces itself and the first adds it, and the native device follows the commit.
 // Room two: the native device starts the group, adds a browser device, and later a second one,
 // whose commit the first browser device follows. Room three: nothing asks through the room; the
-// key directory (ADR-0101) holds every device's packages, and a browser device adds its user's
+// key directory (ADR-0102) holds every device's packages, and a browser device adds its user's
 // second browser device and the native device in one commit. Everyone reads everyone, the bodies
 // stored are the bytes each side made, and a browser device saved to bytes and restored mid-way
 // keeps reading. Exits non-zero on the first failure.
@@ -239,7 +239,7 @@ async function roomTwo(db) {
     }
 }
 
-// --- room three: devices found through the key directory (ADR-0101) ---------------------------
+// --- room three: devices found through the key directory (ADR-0102) ---------------------------
 
 // A browser device with the directory: its identity is `<user>/<device id>`.
 function directoryDevice(socket, room) {

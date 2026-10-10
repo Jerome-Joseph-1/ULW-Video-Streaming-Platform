@@ -101,12 +101,12 @@ struct FetchedKeyPackage {
     // taking, so a burst can cross the mark without any of them raising it. Exhausted, which
     // no burst can hide, remains the signal that must be acted on; so is a last-resort package.
     bool replenish = false;
-    // The device's last-resort package (RFC 9420 section 16.8, ADR-0101): its single-use ones
+    // The device's last-resort package (RFC 9420 section 16.8, ADR-0102): its single-use ones
     // had run out. It stays with the device and may be handed out again; `replenish` is set.
     bool last_resort = false;
 };
 
-// Where a device's last-resort package stands (ADR-0101).
+// Where a device's last-resort package stands (ADR-0102).
 enum class LastResort : std::uint8_t {
     // None published since the device was registered.
     None,
@@ -157,7 +157,7 @@ public:
     virtual void publish_key_packages(const UserId& user, const DeviceId& device,
                                       std::vector<KeyPackageBytes> batch,
                                       E2eeCallback<std::size_t> done) = 0;
-    // Replaces the device's last-resort package (ADR-0101), which becomes Fresh. Invalid when
+    // Replaces the device's last-resort package (ADR-0102), which becomes Fresh. Invalid when
     // empty or above kMaxKeyPackageBytes.
     virtual void publish_last_resort(const UserId& user, const DeviceId& device,
                                      KeyPackageBytes package, E2eeCallback<void> done) = 0;
