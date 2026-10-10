@@ -8,6 +8,7 @@
 
 #include <sys/eventfd.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 
 #include <cstring>
 #include <functional>
@@ -71,15 +72,27 @@ protected:
         ASSERT_TRUE(reactor->listen(std::move(*listener), acceptor));
     }
 
-    // Connects a client and attaches the accepted side to `server`.
-    os::UniqueFd connect(Conn& server) {
+    // Connects a client and attaches the accepted side to `server`. A nonzero `buffer_bytes`
+    // pins the client's receive buffer and the server's send buffer to that size, which also
+    // turns off the kernel's autotuning of them.
+    os::UniqueFd connect(Conn& server, int buffer_bytes = 0) {
         auto client = connect_loopback(port);
+        if (client && buffer_bytes > 0) {
+            EXPECT_EQ(::setsockopt(client.get(), SOL_SOCKET, SO_RCVBUF, &buffer_bytes,
+                                   sizeof buffer_bytes),
+                      0);
+        }
         const std::size_t before = acceptor.accepted.size();
         // Returning an empty client makes the caller's first use of it fail, rather than
         // attaching a connection that was never accepted.
         if (!client || !pump_until(*reactor, [&] { return acceptor.accepted.size() > before; })) {
             ADD_FAILURE() << "loopback connection was not accepted";
             return {};
+        }
+        if (buffer_bytes > 0) {
+            EXPECT_EQ(::setsockopt(acceptor.accepted.back().get(), SOL_SOCKET, SO_SNDBUF,
+                                   &buffer_bytes, sizeof buffer_bytes),
+                      0);
         }
         server.reactor = reactor.get();
         auto id = reactor->attach(std::move(acceptor.accepted.back()), server);
@@ -322,7 +335,9 @@ TEST_P(ReactorTest, NoCallbackFollowsCloseFromInsideACallback) {
 
 TEST_P(ReactorTest, SendQueueToASlowReaderDrainsAndReportsWritable) {
     Conn server;
-    auto client = connect(server);
+    // Loopback's autotuned buffers can grow past 4 MiB on a busy host, and then the whole send
+    // goes into the kernel at once and nothing is left queued. Small fixed buffers keep it queued.
+    auto client = connect(server, static_cast<int>(64 * kKiB));
     const auto data = pattern(4 * kMiB);
     reactor->send(server.id, data);
     pump_for(*reactor, std::chrono::milliseconds(20));
