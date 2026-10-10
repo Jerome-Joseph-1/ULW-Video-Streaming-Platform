@@ -1,0 +1,21 @@
+name: vps-stop
+
+# Stops the production stack on the VPS (compose project ulw-prod in /opt/ulw). `stop` keeps the
+# containers, volumes and data; `docker compose start` (or a redeploy) brings it back.
+on:
+  workflow_dispatch:
+  push:
+    branches: [ops/vps-stop]
+
+permissions: {}
+
+jobs:
+  stop:
+    runs-on: [self-hosted]
+    timeout-minutes: 10
+    permissions: {}
+    steps:
+      - name: Stop the stack
+        run: |
+          sudo /opt/ulw/compose.sh stop
+          sudo /opt/ulw/compose.sh ps -a --format 'table {{.Service}}\t{{.State}}\t{{.Status}}'
