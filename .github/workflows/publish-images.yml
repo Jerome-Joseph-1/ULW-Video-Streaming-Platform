@@ -4,13 +4,16 @@ name: publish-images
 # GitHub's container registry, ghcr.io/jerome-joseph-1/ulw-<service>, tagged with the full
 # commit SHA and `main`, never `latest` (deploy/kubernetes/RUNBOOK.md, step 4).
 #
-# Only a commit on main whose ci run for its push to main succeeded is published. A push to main
-# starts this beside ci: the images are built and checked while ci runs, and nothing is pushed
-# until the API reports that ci run's success for this very commit. Every push to main runs ci's
-# full lane (docs/operations/ci-lanes.md), so each squash merge gets that run; a batch/** branch's
-# run never counts. A manual run publishes a commit already on main (its `ref`, or main's tip),
-# under the same check. Pull requests never run this, so no pull request's code ever runs where the
-# package token is.
+# Only a commit on main whose ci run for its push to main succeeded is published. That run's
+# success starts this (workflow_run): nothing waits on ci, so a ci run that takes longer than a
+# hosted job may live no longer leaves its commit unpublished, as a run started beside ci and
+# waiting for it did twice on 2026-10-09/10 (docs/operations/ci-lanes.md, "Where jobs run"). A
+# successful re-run of a failed ci run starts it too. Every push to main runs ci's full lane, so
+# each squash merge gets that run; a batch/** branch's run, a pull request's and the nightly's
+# never count. A manual run publishes a commit already on main (its `ref`, or main's tip) under
+# the same check, and waits for that commit's ci run if it is still going. This runs main's own
+# definition of the workflow, never a pull request's, so no pull request's code ever runs where
+# the package token is.
 #
 # Each image is built as e2e.yml's sandbox job builds it (deploy/local/e2e-up.sh) and must pass the
 # same gates there before anything is pushed: the release binaries' hardening
@@ -22,7 +25,10 @@ name: publish-images
 # provenance) by the run that pushed it, and printed in the run's summary as <sha>@sha256:<digest>,
 # ready to pin.
 on:
-  push:
+  # Main's definition, whatever branch the ci run was on; the job's condition keeps pushes to main.
+  workflow_run: # zizmor: ignore[dangerous-triggers] runs only main's definition, for a ci run of a push to main, and builds a commit it checks is on main; nothing from the triggering run is used but its head SHA, which is checked
+    workflows: [ci]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
     inputs:
@@ -44,11 +50,18 @@ concurrency:
 jobs:
   publish:
     # Only main's own definition of this workflow, and only in this repository (a fork has no
-    # package of that name to push).
-    if: github.repository == 'Jerome-Joseph-1/ULW-Video-Streaming-Platform' && github.ref == 'refs/heads/main'
+    # package of that name to push); started by ci, only for its successful run of a push to main.
+    if: >-
+      github.repository == 'Jerome-Joseph-1/ULW-Video-Streaming-Platform'
+      && github.ref == 'refs/heads/main'
+      && (github.event_name == 'workflow_dispatch'
+        || (github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push'
+          && github.event.workflow_run.head_branch == 'main'
+          && github.event.workflow_run.head_repository.full_name == github.repository))
     runs-on: ubuntu-24.04
-    # The build and gates take most of an hour; the rest is waiting on ci, which takes four hours
-    # or more on the self-hosted host. 355 is just under a hosted job's six-hour limit.
+    # The build and gates take most of an hour. A run started by ci finds it done; a manual run may
+    # wait for it. 355 is just under a hosted job's six-hour limit.
     timeout-minutes: 355
     permissions:
       contents: read
@@ -64,9 +77,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REF: ${{ inputs.ref }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
-          if [[ $GITHUB_EVENT_NAME == push ]]; then
-            sha=$GITHUB_SHA
+          if [[ $GITHUB_EVENT_NAME == workflow_run ]]; then
+            sha=$RUN_SHA
           else
             ref=${REF:-main}
             if [[ ! $ref =~ ^[A-Za-z0-9._/-]{1,200}$ || $ref == *..* ]]; then
@@ -144,8 +158,9 @@ jobs:
           name: trivy-image
           path: ${{ runner.temp }}/trivy-image
           if-no-files-found: warn
-      # The commit's ci run for its push to main must have succeeded; wait while it runs. The
-      # API reports a re-run's latest attempt, so a successful re-run counts.
+      # The commit's ci run for its push to main must have succeeded; a manual run waits while it
+      # runs, and a run started by that success passes at once. The API reports a re-run's latest
+      # attempt, so a successful re-run counts.
       - name: Wait for ci on this commit
         env:
           GH_TOKEN: ${{ github.token }}
