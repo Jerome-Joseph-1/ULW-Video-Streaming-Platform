@@ -1,4 +1,4 @@
-# 0105. A live stream has a visibility its owner sets, checked before the playlist cache from a short-lived answer per stream and per room member
+# 0105. A live stream's visibility is set by the operator's backend or its owner and enforced here, before the playlist cache, from a short-lived answer per stream and per room member
 
 Status: Accepted
 Date: 2026-10-11
@@ -42,6 +42,7 @@ What had to hold:
 | Make new streams private by default | Safer default | Every existing client that starts a stream and shares its id would stop working: a breaking change to a Stable surface | Rejected |
 | Grants per user for streams, as for videos | Parity with videos | No caller has asked; the service API would need a stream half | Not done here |
 | A visibility given at `POST /api/v1/live` | One request | The create takes no body today; a `PATCH` before `start` does the same and keeps the create unchanged | Rejected |
+| The owner alone sets it | Self-serve | The product's backend could not apply its own policy to a stream, as ADR-0100 lets it for a video | Rejected: the backend sets it, and the owner may too, as for videos |
 | Check the stream's live chat by the same rule | The chat is the stream's | Chat joins a stream's room by its name (ADR-0070) on another service with its own store; a check there is its own change | Not done here |
 
 ## Decision
@@ -53,10 +54,14 @@ What had to hold:
 - **Schema** (migration 0020). `live_streams.visibility` (`text`, default `'unlisted'`) and
   `visibility_room` (`uuid`), with the checks 0016 put on `videos`, added and validated at once:
   the table holds one row per stream ever started, a few an hour.
-- **The owner's API.** `PATCH /api/v1/live/{id}` with `{"visibility": ...}`, the body
-  `PATCH /api/v1/videos/{id}` takes, in any state. Not the owner's stream: `404`. A room that does
-  not list the owner: `403` `not_member`, decided in the same statement as the update. The answer
-  is the stream object, which now carries `visibility` for its owner only.
+- **Who sets it.** Who may watch is the product's policy and the platform only enforces it, as
+  ADR-0100 has it for videos: the operator's backend sets it for any stream with
+  `PATCH /api/v1/service/live/{id}` (the service token, in the `Authorization` header only), and
+  the stream's owner for their own with `PATCH /api/v1/live/{id}`, both with the body
+  `PATCH /api/v1/videos/{id}` takes, in any state. Not the owner's stream: `404`. A room that
+  does not list the stream's owner: `403` `not_member`, whoever asks, decided in the same
+  statement as the update. The answer is the stream object as its owner sees it, which now
+  carries `visibility` (for its owner and the backend only).
 - **Who may watch.** `GET /api/v1/live/{id}/index.m3u8` asks `LiveStreams::known_watch` before
   the playlist cache. It answers from what the process read in the last `watch_fresh` (5 s): the
   stream's row, and for a room-shared stream the viewer's membership. Only when that is not known

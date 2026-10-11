@@ -216,6 +216,8 @@ private:
     // GET /api/v1/live/{stream}/index.m3u8 once who may watch it is known (ADR-0105).
     void on_watch(Watch watch) noexcept;
     void fetch_live(std::string_view stream) noexcept;
+    // PATCH /api/v1/service/live/{id}: the operator's backend sets who may watch a stream.
+    void set_service_stream_visibility() noexcept;
     void on_videos(std::uint64_t request, const core::UserId& owner,
                    core::ports::CatalogResult<core::ports::VideoPage> result) noexcept;
     void on_service_deleted(std::uint64_t request,

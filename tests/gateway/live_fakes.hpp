@@ -163,17 +163,17 @@ public:
         });
     }
 
-    void set_visibility(const core::LiveStreamId& id, const core::UserId& owner,
+    void set_visibility(const core::LiveStreamId& id, const std::optional<core::UserId>& owner,
                         const core::Visibility& visibility,
                         core::ports::LiveCallback<LiveStream> done) override {
         ++calls;
         reply(std::move(done), [&]() -> core::ports::LiveResult<LiveStream> {
             auto found = row(id);
-            if (!found || !(found->owner == owner)) {
+            if (!found || (owner && !(found->owner == *owner))) {
                 return std::unexpected(LiveStoreError::NotFound);
             }
             const std::optional<core::RoomId>& room = visibility.room_id();
-            if (room && !members.contains({room->to_string(), std::string(owner.view())})) {
+            if (room && !members.contains({room->to_string(), std::string(found->owner.view())})) {
                 return std::unexpected(LiveStoreError::NotMember);
             }
             LiveStream& r = rows.at(id.to_string());

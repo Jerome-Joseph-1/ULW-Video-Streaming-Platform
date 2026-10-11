@@ -139,9 +139,10 @@ public:
                      LiveCallback<EndedLiveStream> done) = 0;
     // Up to `limit` unfinished streams, oldest first.
     virtual void unfinished(std::size_t limit, LiveCallback<std::vector<LiveStream>> done) = 0;
-    // Sets who may watch the stream, for its owner, in any state: NotFound when it is not a
-    // stream of theirs; NotMember for a room chat_members does not list them in.
-    virtual void set_visibility(const LiveStreamId& id, const UserId& owner,
+    // Sets who may watch the stream, in any state, for its owner, or for the operator's backend
+    // when `owner` is nullopt (ADR-0105): NotFound when there is no such stream, or it is not
+    // the owner's; NotMember for a room chat_members does not list the stream's owner in.
+    virtual void set_visibility(const LiveStreamId& id, const std::optional<UserId>& owner,
                                 const Visibility& visibility, LiveCallback<LiveStream> done) = 0;
     // Whether chat_members lists both `viewer` and `owner` in `room`: a room shares a stream
     // only while it lists its owner, as it shares a video (ADR-0097).

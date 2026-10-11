@@ -111,11 +111,12 @@ protected:
         return wait(r);
     }
 
+    // An empty owner is the operator's backend.
     LiveResult<LiveStream> set_visibility(const core::LiveStreamId& id, std::string_view owner,
                                           const core::Visibility& visibility) {
         std::optional<LiveResult<LiveStream>> r;
-        store->set_visibility(id, user(owner), visibility,
-                              [&](auto x) noexcept { r = std::move(x); });
+        store->set_visibility(id, owner.empty() ? std::nullopt : std::optional(user(owner)),
+                              visibility, [&](auto x) noexcept { r = std::move(x); });
         return wait(r);
     }
 
@@ -401,6 +402,24 @@ TEST_F(PgLiveStreamsTest, ARoomSharesAStreamOnlyWhileItListsItsOwner) {
     ASSERT_TRUE(conn.exec("DELETE FROM chat_members WHERE room_id = $1 AND user_id = $2",
                           Params{}.add_uuid(room.uuid()).add_text("auth0|alice")));
     EXPECT_EQ(shares_room(room, "auth0|alice", "auth0|bob"), false);
+}
+
+TEST_F(PgLiveStreamsTest, TheOperatorsBackendSetsAnyStreamsVisibilityToARoomOfItsOwner) {
+    const auto made = create("auth0|alice");
+    ASSERT_TRUE(made);
+    const core::LiveStreamId id = made->stream.id;
+    EXPECT_EQ(set_visibility(id, "", core::Visibility{})->visibility, core::Visibility{});
+    const core::RoomId room = core::RoomId::generate(clock, random);
+    add_member(room, "auth0|bob");
+    // The room lists bob, not the stream's owner: refused, as for the owner.
+    EXPECT_EQ(set_visibility(id, "", core::Visibility::room(room)),
+              std::unexpected(LiveStoreError::NotMember));
+    add_member(room, "auth0|alice");
+    EXPECT_EQ(set_visibility(id, "", core::Visibility::room(room))->visibility,
+              core::Visibility::room(room));
+    EXPECT_EQ(set_visibility(core::LiveStreamId::generate(clock, random), "",
+                             core::Visibility::unlisted()),
+              std::unexpected(LiveStoreError::NotFound));
 }
 
 TEST_F(PgLiveStreamsTest, TheSchemaRefusesAVisibilityThatBreaksTheRules) {

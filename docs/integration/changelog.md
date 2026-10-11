@@ -3,23 +3,25 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
-## 2026-10-11: a live stream's owner decides who may watch it
+## 2026-10-11: who may watch a live stream is set, by the operator's backend or its owner
 
-<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_live, act_on_stream, respond_stream), apps/gateway/src/live_streams.cpp, infra/postgres/src/live_streams.cpp, migrations/0020_live_stream_visibility.sql, docs/integration/live.md, docs/adr/0105-a-live-stream-has-a-visibility-its-owner-sets.md -->
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_live, act_on_stream, respond_stream), apps/gateway/src/live_streams.cpp, infra/postgres/src/live_streams.cpp, migrations/0020_live_stream_visibility.sql, docs/integration/live.md, docs/adr/0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md -->
 
 Additive (versioning rule 1): a new route, a new field for the stream's owner, and a migration.
 A stream nobody sets a visibility on is watched exactly as before.
 
 | Before | Now |
 |---|---|
-| Anyone signed in who had a stream's id could watch it, and nothing could restrict that | The owner sets `unlisted` (the default, as before), `private` or `room:<room id>` with `PATCH /api/v1/live/{id}`; the playlist and `GET /api/v1/live/{id}` answer `404` to anyone it does not admit ([Who may watch](live.md#who-may-watch)) |
+| Anyone signed in who had a stream's id could watch it, and nothing could restrict that | The operator's backend (`PATCH /api/v1/service/live/{id}`) or the stream's owner (`PATCH /api/v1/live/{id}`) sets `unlisted` (the default, as before), `private` or `room:<room id>`; the playlist and `GET /api/v1/live/{id}` answer `404` to anyone it does not admit ([Who may watch](live.md#who-may-watch)) |
 | The stream object had no `visibility` | The owner's carries `visibility`; nobody else's does |
 
 What to do:
 
+- **The operator's backend:** apply the product's policy for streams through
+  `PATCH /api/v1/service/live/{id}`, with the token it uses for videos' service API.
 - **Clients:** nothing to keep today's behaviour. To keep a stream to a room or to its
-  broadcaster, `PATCH` it before `start`. Allow the new `visibility` field on the owner's stream
-  object.
+  broadcaster, have it set before `start`. Allow the new `visibility` field on the owner's
+  stream object.
 - **Operators:** migration 0020 must run after 0019 (RUNBOOK); deploy the gateway, which runs
   migrations, as usual.
 

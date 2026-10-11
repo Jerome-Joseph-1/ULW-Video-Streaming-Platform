@@ -553,7 +553,8 @@ void LiveStreams::status(const core::LiveStreamId& id, const core::UserId& viewe
     });
 }
 
-void LiveStreams::set_visibility(const core::LiveStreamId& id, const core::UserId& owner,
+void LiveStreams::set_visibility(const core::LiveStreamId& id,
+                                 const std::optional<core::UserId>& owner,
                                  const core::Visibility& visibility, LiveDone<Stream> done) {
     ++pending_;
     deps_.store.set_visibility(

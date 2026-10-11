@@ -118,14 +118,16 @@ SELECT s.id, s.owner_id, s.state, (extract(epoch FROM s.created_at) * 1000000)::
   FROM live_streams s WHERE s.state <> 'ended'
  ORDER BY s.created_at, s.id LIMIT $1)sql";
 
-// Who may watch the stream, for its owner ($2): the kind ($3) and, for a room's kind only, the
-// room ($4, '' otherwise), which must list the owner. Nothing for a stream not theirs, or a
-// room that does not list them; kFind then tells the two apart.
+// Who may watch the stream, for its owner ($2), or for the operator's backend ($2 = ''): the
+// kind ($3) and, for a room's kind only, the room ($4, '' otherwise), which must list the
+// stream's owner. Nothing for a stream not theirs, or a room that does not list the owner;
+// kFind then tells the two apart.
 constexpr Sql kSetVisibility = R"sql(
 UPDATE live_streams s SET visibility = $3, visibility_room = NULLIF($4, '')::uuid
- WHERE s.id = $1 AND s.owner_id = $2
+ WHERE s.id = $1 AND ($2 = '' OR s.owner_id = $2)
    AND ($4 = '' OR EXISTS (SELECT 1 FROM chat_members m
-                            WHERE m.room_id = NULLIF($4, '')::uuid AND m.user_id = $2))
+                            WHERE m.room_id = NULLIF($4, '')::uuid
+                              AND m.user_id = s.owner_id))
 RETURNING s.id, s.owner_id, s.state, (extract(epoch FROM s.created_at) * 1000000)::bigint,
        (extract(epoch FROM s.live_at) * 1000000)::bigint,
        (extract(epoch FROM s.ended_at) * 1000000)::bigint, s.end_reason, s.srt_passphrase,
@@ -485,17 +487,17 @@ std::string room_text(const core::Visibility& visibility) {
 
 class SetVisibility final : public Operation {
 public:
-    SetVisibility(const core::LiveStreamId& id, const core::UserId& owner,
+    SetVisibility(const core::LiveStreamId& id, const std::optional<core::UserId>& owner,
                   const core::Visibility& visibility, LiveCallback<LiveStream> done)
-        : id_(id), owner_(owner), kind_(visibility.kind_name()), room_(room_text(visibility)),
-          done_(std::move(done)) {}
+        : id_(id), owner_(owner), owner_text_(owner ? std::string(owner->view()) : std::string{}),
+          kind_(visibility.kind_name()), room_(room_text(visibility)), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
         reading_ = false;
         return {.sql = kSetVisibility,
                 .params = Params{}
                               .add_uuid(id_.uuid())
-                              .add_text(owner_.view())
+                              .add_text(owner_text_)
                               .add_text(kind_)
                               .add_text(room_)};
     }
@@ -522,9 +524,9 @@ public:
             done_(row);
             return std::nullopt;
         }
-        // Not theirs reads as no stream; theirs, the room was refused.
-        done_(std::unexpected(row->owner == owner_ ? LiveStoreError::NotMember
-                                                   : LiveStoreError::NotFound));
+        // Not theirs reads as no stream; theirs, or any for the backend, the room was refused.
+        done_(std::unexpected(!owner_ || row->owner == *owner_ ? LiveStoreError::NotMember
+                                                               : LiveStoreError::NotFound));
         return std::nullopt;
     }
 
@@ -532,7 +534,8 @@ public:
 
 private:
     core::LiveStreamId id_;
-    core::UserId owner_;
+    std::optional<core::UserId> owner_;
+    std::string owner_text_;
     std::string kind_;
     std::string room_;
     LiveCallback<LiveStream> done_;
@@ -653,7 +656,8 @@ void PgLiveStreams::end(const core::LiveStreamId& id, LiveEnd reason, core::Wall
     impl_->pool().submit(std::make_unique<EndStream>(id, reason, at, std::move(done)));
 }
 
-void PgLiveStreams::set_visibility(const core::LiveStreamId& id, const core::UserId& owner,
+void PgLiveStreams::set_visibility(const core::LiveStreamId& id,
+                                   const std::optional<core::UserId>& owner,
                                    const core::Visibility& visibility,
                                    LiveCallback<LiveStream> done) {
     impl_->pool().submit(std::make_unique<SetVisibility>(id, owner, visibility, std::move(done)));

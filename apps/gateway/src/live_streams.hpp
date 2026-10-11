@@ -165,9 +165,9 @@ public:
     // The stream, for a viewer who may watch it; NotFound for anyone else.
     void status(const core::LiveStreamId& id, const core::UserId& viewer,
                 LiveDone<core::ports::LiveStream> done);
-    // Sets who may watch the stream, for its owner (ADR-0105). NotMember for a room the owner
-    // is not a member of.
-    void set_visibility(const core::LiveStreamId& id, const core::UserId& owner,
+    // Sets who may watch the stream, for its owner, or for the operator's backend when `owner`
+    // is nullopt (ADR-0105). NotMember for a room the stream's owner is not a member of.
+    void set_visibility(const core::LiveStreamId& id, const std::optional<core::UserId>& owner,
                         const core::Visibility& visibility, LiveDone<core::ports::LiveStream> done);
     // Whether `viewer` may watch the stream named `name` (a playlist's path segment), when that
     // is known from the last watch_fresh; nullopt when it must be asked through watch().

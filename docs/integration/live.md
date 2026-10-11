@@ -18,7 +18,7 @@ closed to new joins once it ends.
 
 ## Starting a stream
 
-<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_stream_route, respond_stream, fail_live), apps/gateway/src/live_streams.cpp, apps/gateway/src/publisher_watch.cpp, apps/gateway/src/webhook_server.cpp, infra/postgres/src/live_streams.cpp, migrations/0011_live_streams.sql, docs/adr/0092-the-stream-service-lives-in-the-gateway.md, migrations/0013_live_streams_publisher_left.sql, docs/adr/0093-livekit-webhooks-on-an-internal-listener.md, migrations/0020_live_stream_visibility.sql, docs/adr/0105-a-live-stream-has-a-visibility-its-owner-sets.md -->
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_stream_route, respond_stream, fail_live), apps/gateway/src/live_streams.cpp, apps/gateway/src/publisher_watch.cpp, apps/gateway/src/webhook_server.cpp, infra/postgres/src/live_streams.cpp, migrations/0011_live_streams.sql, docs/adr/0092-the-stream-service-lives-in-the-gateway.md, migrations/0013_live_streams_publisher_left.sql, docs/adr/0093-livekit-webhooks-on-an-internal-listener.md, migrations/0020_live_stream_visibility.sql, docs/adr/0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md -->
 
 The gateway's stream service starts a stream for the signed-in user, hands its owner publisher
 tickets, takes it live, and ends it. Every request is authenticated like the rest of the API
@@ -35,6 +35,7 @@ it; only they can get its tickets, take it live or end it, and someone else's st
 | `POST /api/v1/live/{id}/end` | The owner | `200` the stream, `ended` | `401`, `404`, `429`, `503`, `500` |
 | `PATCH /api/v1/live/{id}` | The owner | `200` the stream, with its new `visibility` ([Who may watch](#who-may-watch)) | `400`, `401`, `403`, `404`, `413`, `429`, `503`, `500` |
 | `GET /api/v1/live/{id}` | Anyone who may watch it | `200` the stream | `401`, `404`, `429`, `503`, `500` |
+| `PATCH /api/v1/service/live/{id}` | The operator's backend | `200` the stream, as its owner sees it, with its new `visibility` ([Who may watch](#who-may-watch)) | `400`, `401`, `403`, `404`, `413`, `503`, `500` |
 
 The stream, as every one of these answers it (`Cache-Control: no-store`):
 
@@ -245,16 +246,19 @@ https://<bucket host>/live/launch-2026/seg_0_118.m4s?X-Amz-Algorithm=AWS4-HMAC-S
 
 ### Who may watch
 
-<!-- apps/gateway/src/connection.cpp (start_live, on_watch, act_on_stream), apps/gateway/src/live_streams.cpp (watch, known_watch, set_visibility, status), infra/postgres/src/live_streams.cpp (kSetVisibility, kSharesRoom), docs/adr/0105-a-live-stream-has-a-visibility-its-owner-sets.md -->
+<!-- apps/gateway/src/connection.cpp (start_live, on_watch, act_on_stream), apps/gateway/src/live_streams.cpp (watch, known_watch, set_visibility, status), infra/postgres/src/live_streams.cpp (kSetVisibility, kSharesRoom), docs/adr/0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md -->
 
-A stream's owner sets who may watch it with `PATCH /api/v1/live/{id}`, a JSON body
+Who may watch is the product's policy; the platform enforces it. The operator's backend sets it
+for any stream with `PATCH /api/v1/service/live/{id}`, and a stream's owner for their own with
+`PATCH /api/v1/live/{id}`, as both may for a video
+([videos-and-playback.md](videos-and-playback.md#who-can-see-a-video)). Either takes a JSON body
 (`Content-Type: application/json`, at most 4 KiB) of the same form a video takes:
 
 | `visibility` | Who may watch, besides the owner |
 |---|---|
 | `"unlisted"` | Anyone signed in who has the stream's id. Every stream starts so, as every stream was before it had a visibility |
 | `"private"` | Nobody |
-| `"room:<room id>"` | The members of that chat room, direct or group, as chat lists them, while the room lists the owner too. The owner must be a member when setting it (`403` `not_member` otherwise) |
+| `"room:<room id>"` | The members of that chat room, direct or group, as chat lists them, while the room lists the owner too. The stream's owner must be a member when it is set, whoever sets it (`403` `not_member` otherwise) |
 
 It may be set in any state; set it before `start` to keep a stream from anyone else from its
 first segment. It applies to the playlist and to `GET /api/v1/live/{id}`: anyone it does not
@@ -262,9 +266,13 @@ admit gets `404`, as for a stream that does not exist. It says nothing of the re
 is a video with a visibility of its own, private until its owner shares it
 ([When a stream ends](#when-a-stream-ends)).
 
-Refusals carry `{"error":"<code>"}`: `400` `bad_visibility` (not one of the three forms; an
-empty body is `400` with no body), `403` `not_member`, and `404` with no body for a stream not
-the caller's.
+Both answer the stream object as its owner sees it, with `visibility`. Refusals carry
+`{"error":"<code>"}`: `400` `bad_visibility` (not one of the three forms; an empty body is `400`
+with no body), `403` `not_member`, and on the owner's route `404` with no body for a stream not
+the caller's. The backend's route takes the same token as the
+[service API for videos](videos-and-playback.md#service-api-grants), in the `Authorization`
+header only (`403` `forbidden` for anything else), and answers `404` `not_found` for no such
+stream.
 
 A change takes effect at once for requests to the gateway process that made it, and within
 5 s for the others: each process takes who may watch a stream as known for 5 s, so that a
@@ -272,7 +280,7 @@ stream's viewers, reloading its playlist every couple of seconds, cost one read 
 5 s interval between them, and each member of a room one read of their membership. A member
 taken off the room stops getting the playlist within those 5 s; segment URLs already handed
 out stay valid until they expire (one hour), as for a video. The stream's live chat is not
-covered: it is joined by the stream's id as before ([ADR-0105](../adr/0105-a-live-stream-has-a-visibility-its-owner-sets.md)).
+covered: it is joined by the stream's id as before ([ADR-0105](../adr/0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md)).
 
 ## When a stream ends
 

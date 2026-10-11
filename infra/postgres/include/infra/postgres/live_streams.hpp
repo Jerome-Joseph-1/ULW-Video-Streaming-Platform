@@ -53,7 +53,7 @@ public:
              core::ports::LiveCallback<core::ports::EndedLiveStream> done) override;
     void unfinished(std::size_t limit,
                     core::ports::LiveCallback<std::vector<core::ports::LiveStream>> done) override;
-    void set_visibility(const core::LiveStreamId& id, const core::UserId& owner,
+    void set_visibility(const core::LiveStreamId& id, const std::optional<core::UserId>& owner,
                         const core::Visibility& visibility,
                         core::ports::LiveCallback<core::ports::LiveStream> done) override;
     void shares_room(const core::RoomId& room, const core::UserId& owner,

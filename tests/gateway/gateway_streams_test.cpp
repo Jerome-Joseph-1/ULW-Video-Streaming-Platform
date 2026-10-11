@@ -352,6 +352,46 @@ TEST_F(GatewayStreamVisibility, OnlyTheOwnerSetsItAndOnlyToOneOfTheThreeForms) {
     EXPECT_EQ(patch(id, R"({"visibility":"private"})").status, 200);
 }
 
+TEST_F(GatewayStreamVisibility, TheOperatorsBackendSetsWhoMayWatchAnyStream) {
+    const std::string id = live_with_playlist();
+    const auto service_patch = [&](const std::string& stream, std::string_view body,
+                                   std::string_view token = "service.backend") {
+        HttpClient c(gw.endpoint());
+        auto r = c.request("PATCH", "/api/v1/service/live/" + stream, token,
+                           std::as_bytes(std::span(body)), {{"Content-Type", "application/json"}});
+        EXPECT_TRUE(r);
+        return r.value_or(HttpResponse{});
+    };
+    const HttpResponse hidden = service_patch(id, R"({"visibility":"private"})");
+    ASSERT_EQ(hidden.status, 200) << hidden.body;
+    EXPECT_EQ(text_at(json_of(hidden), "visibility"), "private") << "seen as its owner sees it";
+    EXPECT_EQ(seen_by(id, kBob), std::make_pair(404, 404));
+    EXPECT_EQ(seen_by(id, kAlice), std::make_pair(200, 200));
+    // A room must list the stream's owner, not the backend.
+    const std::string room = R"({"visibility":"room:)" + std::string(kRoom) + R"("})";
+    const HttpResponse refused = service_patch(id, room);
+    EXPECT_EQ(refused.status, 403);
+    EXPECT_EQ(refused.body, R"({"error":"not_member"})");
+    member("alice");
+    member("bob");
+    ASSERT_EQ(service_patch(id, room).status, 200);
+    EXPECT_EQ(seen_by(id, kBob), std::make_pair(200, 200));
+    // Only the backend's bearer token; a missing stream and a bad body as the video routes say.
+    for (const std::string_view token : {kAlice, kBob}) {
+        const HttpResponse r = service_patch(id, R"({"visibility":"unlisted"})", token);
+        EXPECT_EQ(r.status, 403) << token;
+        EXPECT_EQ(r.body, R"({"error":"forbidden"})");
+    }
+    const HttpResponse missing =
+        service_patch("0192f3a4-0000-7000-8000-000000000001", R"({"visibility":"private"})");
+    EXPECT_EQ(missing.status, 404);
+    EXPECT_EQ(missing.body, R"({"error":"not_found"})");
+    EXPECT_EQ(service_patch("not-a-stream", R"({"visibility":"private"})").status, 404);
+    const HttpResponse bad = service_patch(id, R"({"visibility":"public"})");
+    EXPECT_EQ(bad.status, 400);
+    EXPECT_EQ(bad.body, R"({"error":"bad_visibility"})");
+}
+
 TEST_F(GatewayStreamVisibility, ManyPlaylistReloadsCostOneRowReadPerFreshnessInterval) {
     const std::string id = live_with_playlist();
     member("alice");

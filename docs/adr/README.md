@@ -108,4 +108,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0102](0102-the-key-directory-is-served-and-every-device-is-a-member.md) | The key directory is served on the chat socket, a device keeps a last-resort package, and every device is its own member | Accepted |
 | [0103](0103-the-worker-publishes-from-a-pool-on-kept-connections.md) | The worker publishes segments from a bounded pool of threads, each keeping one connection to the store | Accepted |
 | [0104](0104-ci-runs-on-hosted-runners-and-soaks-relay.md) | CI runs on hosted runners only, and a soak longer than a hosted job runs as a relay of segments judged together | Accepted |
-| [0105](0105-a-live-stream-has-a-visibility-its-owner-sets.md) | A live stream has a visibility its owner sets, checked before the playlist cache from a short-lived answer per stream and per room member | Accepted |
+| [0105](0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md) | A live stream's visibility is set by the operator's backend or its owner and enforced here, before the playlist cache, from a short-lived answer per stream and per room member | Accepted |
