@@ -130,4 +130,34 @@ TEST(BundledMigrations, TheLastResortMigrationOnlyCreatesItsTable) {
     FAIL() << "no e2ee_last_resort migration";
 }
 
+// 0019 only validates checks every row holds by construction, each under the SHARE UPDATE
+// EXCLUSIVE lock VALIDATE CONSTRAINT takes, which lets reads and writes go on: no statement of
+// any other kind, and not the two 0015 checks old rows might break.
+TEST(BundledMigrations, TheValidationMigrationOnlyValidates) {
+    for (const auto& m : bundled_migrations()) {
+        if (m.name != "validate_checks") {
+            continue;
+        }
+        const std::string_view sql{m.sql};
+        std::size_t statements = 0;
+        for (std::size_t at = sql.find("\nALTER TABLE"); at != std::string_view::npos;
+             at = sql.find("\nALTER TABLE", at + 1)) {
+            ++statements;
+            const std::string_view line = sql.substr(at + 1, sql.find('\n', at + 1) - at - 1);
+            EXPECT_NE(line.find(" VALIDATE CONSTRAINT "), std::string_view::npos) << line;
+        }
+        EXPECT_EQ(statements, 6U);
+        for (const std::string_view other : {"\nCREATE", "\nDROP", "\nUPDATE", "\nDELETE",
+                                             "\nINSERT", "ADD CONSTRAINT", "ADD COLUMN"}) {
+            EXPECT_EQ(sql.find(other), std::string_view::npos) << other;
+        }
+        for (const std::string_view risky : {"VALIDATE CONSTRAINT chat_members_user_id",
+                                             "VALIDATE CONSTRAINT chat_rooms_named_kind"}) {
+            EXPECT_EQ(sql.find(risky), std::string_view::npos) << risky;
+        }
+        return;
+    }
+    FAIL() << "no validate_checks migration";
+}
+
 } // namespace

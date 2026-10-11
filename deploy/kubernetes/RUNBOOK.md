@@ -468,9 +468,9 @@ EXCLUSIVE locks, which do stop reads, are held only for the moments until the co
 change or join that waits past the chat service's request timeout is answered `unavailable`,
 and the client retries it.
 
-Follow-ups once 0015 is everywhere: a later migration validates its `NOT VALID` checks
-(`chat_members_role`, `chat_members_user_id`, `chat_rooms_named_kind`) with `VALIDATE
-CONSTRAINT`, which scans under a lock that lets reads and writes go on; and, once no chat node
+Follow-ups once 0015 is everywhere: migration 0019 validates `chat_members_role`, and the two
+other checks (`chat_members_user_id`, `chat_rooms_named_kind`) are validated by hand (0019 below
+says how); and, once no chat node
 older than 0015 runs, drops 0009's triggers (`chat_member_removed`, `chat_member_moved` on
 `chat_members`), which until then send every removal a second time on the old channel.
 
@@ -483,9 +483,8 @@ foreign key's SHARE ROW EXCLUSIVE lock holds an upload's progress write or a wor
 back for that moment, and the ALTER's ACCESS EXCLUSIVE lock every read of `videos`, playback
 included, only from the ALTER to the commit. Every video it finds becomes `private`, as before.
 The gateway now reads `chat_members` on each video request to decide who may see a video shared
-with a room; nothing else changes about chat's tables. Follow-up once 0016 is everywhere: a
-later migration validates `videos_visibility` and `videos_visibility_room` with
-`VALIDATE CONSTRAINT`.
+with a room; nothing else changes about chat's tables. Migration 0019 validates
+`videos_visibility` and `videos_visibility_room`.
 
 **Migration 0017 (deleted videos, docs/adr/0100) comes after 0016.** It only creates
 `video_purges`, an empty table with no foreign key, and its index: nothing else is locked or
@@ -551,6 +550,33 @@ UPDATE devices SET revoked_at = now() WHERE id = '<device uuid>' AND revoked_at 
 DELETE FROM key_packages WHERE device_id = '<device uuid>';
 DELETE FROM last_resort_key_packages WHERE device_id = '<device uuid>';
 COMMIT;
+```
+
+**Migration 0019 (validating checks) comes after 0018.** It validates six checks that 0012 to
+0016 added `NOT VALID` and that every row holds by construction: `chat_rooms_only_live_closes`,
+`live_streams_end_reason`, `room_state_media_generation`, `chat_members_role`,
+`videos_visibility` and `videos_visibility_room`. Each `VALIDATE CONSTRAINT` scans its table
+under a SHARE UPDATE EXCLUSIVE lock, which lets reads and writes go on, so it needs no off-peak
+window; only a manual `VACUUM` or another schema change waits for it.
+
+Two of 0015's checks are left for you, because a row written before 0015 by hand could break
+them, and a failing `VALIDATE` would stop the gateway's init container. Find such rows first:
+
+```sql
+SELECT room_id, user_id FROM chat_members
+ WHERE NOT (length(user_id) <= 128 AND user_id !~ '\s');
+SELECT room_id, kind FROM chat_rooms
+ WHERE NOT (get_byte(uuid_send(room_id), 6) >> 4 <> 8
+            OR get_byte(uuid_send(room_id), 0) NOT IN (3, 4)
+            OR (get_byte(uuid_send(room_id), 0) = 3 AND kind = 'direct_chat')
+            OR (get_byte(uuid_send(room_id), 0) = 4 AND kind = 'group_chat'));
+```
+
+Fix or delete what they return, then validate both, as the gateway's role, at any time:
+
+```sql
+ALTER TABLE chat_members VALIDATE CONSTRAINT chat_members_user_id;
+ALTER TABLE chat_rooms VALIDATE CONSTRAINT chat_rooms_named_kind;
 ```
 
 The NetworkPolicies allow ports, not addresses, because Postgres and the store often run outside
