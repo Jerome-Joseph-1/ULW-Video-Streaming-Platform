@@ -3,6 +3,26 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-09: the worker publishes long videos in minutes, not tens of minutes
+
+<!-- apps/worker/src/job_runner.cpp (publish, upload_all), apps/worker/src/config.cpp (ULW_PUBLISH_CONCURRENCY), infra/curl/src/http.cpp (Session), infra/storage/s3/src/s3_transfer.cpp (upload_session), deploy/kubernetes/base/video-worker/deployment.yaml, docs/adr/0103-the-worker-publishes-from-a-pool-on-kept-connections.md -->
+
+Operators only; nothing a client sends or receives changes. A video becomes `ready` sooner after
+its encode: the worker uploads its segments several at once, each upload thread keeping one
+connection to the store.
+
+| Before | Now |
+|---|---|
+| Segments uploaded one at a time, each on a new TCP and TLS connection: about 40 min to publish a 2 h video to R2 | `ULW_PUBLISH_CONCURRENCY` (1 to 32, default 8) segments at once, each thread on one connection for the whole publish; playlists and the master still last ([operator-contract.md](operator-contract.md#environment-by-name)) |
+| No record of how long publishing took | Each job logs `publishing` (`files`, `concurrency`) and `published` (`files`, `bytes`, `wall_ms`, `mib_per_s`) |
+
+What to do:
+
+- **Operators:** nothing to keep the new default. The base worker Deployment sets
+  `ULW_PUBLISH_CONCURRENCY: "8"`; set it to `1` for the previous one-at-a-time upload, or higher
+  for a fast uplink to a distant store (RUNBOOK 4b). Expect up to that many concurrent PUTs per
+  worker against your bucket.
+
 ## 2026-10-09: end-to-end encryption is Stable, with a key directory and every device a member
 
 <!-- apps/chat/src/key_directory.cpp, apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, infra/postgres/src/e2ee_directory.cpp, migrations/0018_e2ee_last_resort.sql, clients/web-mls/js/mls-room.js, docs/integration/e2ee.md, docs/adr/0102-the-key-directory-is-served-and-every-device-is-a-member.md -->

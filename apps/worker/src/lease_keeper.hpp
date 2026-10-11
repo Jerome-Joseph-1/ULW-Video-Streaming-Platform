@@ -43,6 +43,9 @@ public:
 
     // Written on the next progress tick if it changed.
     void report(std::uint8_t percent) noexcept;
+    // report(), unless a higher percent is already reported: for reports from several threads
+    // at once, whose order is not their progress's.
+    void raise(std::uint8_t percent) noexcept;
     [[nodiscard]] bool lost() const noexcept { return lost_.load(); }
 
 private:

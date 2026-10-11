@@ -254,7 +254,10 @@ int run(std::span<const std::string_view> args) {
                               .free_space = worker::free_space,
                               .log = log,
                               .heartbeat = &heartbeat},
-                             {.scratch = config->scratch, .node = config->node, .lease = {}});
+                             {.scratch = config->scratch,
+                              .node = config->node,
+                              .lease = {},
+                              .publish_concurrency = config->publish_concurrency});
 
     std::stop_source shutdown;
     const std::jthread signal_thread(
@@ -265,6 +268,7 @@ int run(std::span<const std::string_view> args) {
                          {"storage", to_string(config->storage)},
                          {"scratch", config->scratch.string()},
                          {"threads", config->ffmpeg_threads},
+                         {"publish_concurrency", config->publish_concurrency},
                          {"sandbox", sandbox.string()}});
     if (const std::optional<ops::Notifier>& manager = *notifier; manager) {
         manager->ready();

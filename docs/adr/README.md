@@ -106,3 +106,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0100](0100-the-operators-backend-controls-vod.md) | The operator's backend controls VOD: who uploads by a claim of the user's token, a video deleted at once in the catalog and purged by the reaper, and a service API to share, take down and list | Accepted |
 | [0101](0101-transcode-progress-on-the-video-object.md) | A processing video's transcode progress is a field of the video object, read from its job on every request | Accepted |
 | [0102](0102-the-key-directory-is-served-and-every-device-is-a-member.md) | The key directory is served on the chat socket, a device keeps a last-resort package, and every device is its own member | Accepted |
+| [0103](0103-the-worker-publishes-from-a-pool-on-kept-connections.md) | The worker publishes segments from a bounded pool of threads, each keeping one connection to the store | Accepted |

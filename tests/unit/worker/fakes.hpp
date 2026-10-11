@@ -5,6 +5,7 @@
 #include "core/ports/transcoder.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -18,6 +19,7 @@
 #include <span>
 #include <stop_token>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -124,22 +126,37 @@ private:
     std::map<std::string, core::ports::JobQueueError> refusals_;
 };
 
+// Safe from several threads at once, as the worker's publish pool uses it.
 class FakeTransfer final : public core::ports::IObjectTransfer {
 public:
     explicit FakeTransfer(Journal& journal) : journal_(journal) {}
 
-    // Runs after each upload, with the key it wrote.
+    // Runs after each upload, with the key it wrote, on the uploading thread.
     std::function<void(const std::string&)> after_upload;
+    // Each upload takes at least this long, so that concurrent ones overlap.
+    std::chrono::milliseconds hold{0};
+    // An upload of this key fails with `fail_with`, and stores nothing.
+    std::optional<std::string> fail_key;
+    core::ports::StorageError fail_with = core::ports::StorageError::Transient;
 
     // What size() reports for an object that exists, in place of its real size: a source too
     // large for any scratch filesystem without storing one.
     std::optional<std::uint64_t> reported_size;
 
-    void put(const std::string& key, std::string bytes) { objects_[key] = std::move(bytes); }
-    [[nodiscard]] const std::map<std::string, std::string>& objects() const { return objects_; }
+    void put(const std::string& key, std::string bytes) {
+        const std::scoped_lock lock(mutex_);
+        objects_[key] = std::move(bytes);
+    }
+    [[nodiscard]] std::map<std::string, std::string> objects() const {
+        const std::scoped_lock lock(mutex_);
+        return objects_;
+    }
+    // The most uploads that were running at one moment.
+    [[nodiscard]] int peak_in_flight() const { return peak_.load(); }
 
     std::expected<std::uint64_t, core::ports::StorageError>
     size(const core::StorageKey& key) override {
+        const std::scoped_lock lock(mutex_);
         const auto it = objects_.find(key.str());
         if (it == objects_.end()) {
             return std::unexpected(core::ports::StorageError::NotFound);
@@ -148,6 +165,7 @@ public:
     }
     std::expected<std::uint64_t, core::ports::StorageError>
     download(const core::StorageKey& key, const std::filesystem::path& destination) override {
+        const std::scoped_lock lock(mutex_);
         const auto it = objects_.find(key.str());
         if (it == objects_.end()) {
             return std::unexpected(core::ports::StorageError::NotFound);
@@ -158,10 +176,24 @@ public:
     std::expected<void, core::ports::StorageError> upload(const std::filesystem::path& source,
                                                           const core::StorageKey& key,
                                                           const core::ContentType& type) override {
+        const int now = in_flight_.fetch_add(1) + 1;
+        int peak = peak_.load();
+        while (peak < now && !peak_.compare_exchange_weak(peak, now)) {
+        }
+        std::this_thread::sleep_for(hold);
+        if (fail_key && *fail_key == key.str()) {
+            in_flight_.fetch_sub(1);
+            journal_.add("upload failed " + key.str());
+            return std::unexpected(fail_with);
+        }
         std::string bytes(std::filesystem::file_size(source), '\0');
         std::ifstream(source, std::ios::binary)
             .read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
-        objects_[key.str()] = std::move(bytes);
+        {
+            const std::scoped_lock lock(mutex_);
+            objects_[key.str()] = std::move(bytes);
+        }
+        in_flight_.fetch_sub(1);
         journal_.add("upload " + key.str() + " " + std::string(type.view()));
         if (after_upload) {
             after_upload(key.str());
@@ -171,7 +203,7 @@ public:
     std::expected<void, core::ports::StorageError>
     upload_new(const std::filesystem::path& source, const core::StorageKey& key,
                const core::ContentType& type) override {
-        if (objects_.contains(key.str())) {
+        if (objects().contains(key.str())) {
             return std::unexpected(core::ports::StorageError::AlreadyExists);
         }
         return upload(source, key, type);
@@ -179,7 +211,10 @@ public:
 
 private:
     Journal& journal_;
+    mutable std::mutex mutex_;
     std::map<std::string, std::string> objects_;
+    std::atomic<int> in_flight_{0};
+    std::atomic<int> peak_{0};
 };
 
 // Writes what ffmpeg would for the ladder it is given; each call to run() first takes the
