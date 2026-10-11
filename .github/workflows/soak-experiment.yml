@@ -275,6 +275,9 @@ jobs:
           samples=()
           for i in $(seq 1 "$expected"); do
             dir="$RUNNER_TEMP/segments/soak-$KIND-$GITHUB_RUN_ID-segment-$i"
+            # download-artifact puts a lone match straight into its path, not a directory of
+            # its name.
+            if [[ ! -d $dir ]] && (( expected == 1 )); then dir="$RUNNER_TEMP/segments"; fi
             if [[ -f $dir/samples.csv && -f $dir/result.json ]]; then
               samples+=("$dir/samples.csv")
             else
