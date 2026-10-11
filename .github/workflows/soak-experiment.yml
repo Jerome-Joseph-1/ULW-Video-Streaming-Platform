@@ -287,7 +287,10 @@ jobs:
             args+=(--clients "$CLIENTS")
           fi
           status=0
-          python3 -I "$SCRIPT" "${args[@]}" | tee "$RUNNER_TEMP/verdict.txt" || status=${PIPESTATUS[0]}
+          # Into a file, not through tee: without pipefail a pipeline's status is tee's, and the
+          # verdict would be lost.
+          python3 -I "$SCRIPT" "${args[@]}" >"$RUNNER_TEMP/verdict.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/verdict.txt"
           { echo "### $KIND: ${#samples[@]} of $expected segment(s)"; echo '```'
             cat "$RUNNER_TEMP/verdict.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           if (( ${#samples[@]} < expected )); then
