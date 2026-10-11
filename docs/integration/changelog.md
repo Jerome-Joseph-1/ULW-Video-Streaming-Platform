@@ -14,6 +14,7 @@ A stream nobody sets a visibility on is watched exactly as before.
 |---|---|
 | Anyone signed in who had a stream's id could watch it, and nothing could restrict that | The operator's backend (`PATCH /api/v1/service/live/{id}`) or the stream's owner (`PATCH /api/v1/live/{id}`) sets `unlisted` (the default, as before), `private` or `room:<room id>`; the playlist and `GET /api/v1/live/{id}` answer `404` to anyone it does not admit ([Who may watch](live.md#who-may-watch)) |
 | The stream object had no `visibility` | The owner's carries `visibility`; nobody else's does |
+| A stream's live chat admitted anyone signed in | It admits whoever may watch the stream, and answers anyone else `not_live`, as for a stream not on air ([chat.md](chat.md#a-streams-live-chat)) |
 
 What to do:
 

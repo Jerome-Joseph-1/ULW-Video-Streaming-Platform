@@ -279,8 +279,11 @@ A change takes effect at once for requests to the gateway process that made it, 
 stream's viewers, reloading its playlist every couple of seconds, cost one read of the stream a
 5 s interval between them, and each member of a room one read of their membership. A member
 taken off the room stops getting the playlist within those 5 s; segment URLs already handed
-out stay valid until they expire (one hour), as for a video. The stream's live chat is not
-covered: it is joined by the stream's id as before ([ADR-0105](../adr/0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md)).
+out stay valid until they expire (one hour), as for a video.
+
+The stream's live chat follows the same visibility ([chat.md](chat.md#a-streams-live-chat)): a
+join is refused `not_live`, as for a stream not on air, to anyone it does not admit. Each join
+reads it afresh; someone already in the chat stays when it changes, until they leave.
 
 ## When a stream ends
 

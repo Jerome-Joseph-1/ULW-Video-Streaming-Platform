@@ -68,10 +68,26 @@ inline constexpr Sql kRemoveMember = "DELETE FROM chat_members WHERE room_id = $
 // be recorded (Recording::Skipped): the kind comes back null, and the join is answered by the
 // kind it asked for.
 // A stream's chat that has closed (closed_at, migration 0012) reads as a closed room with no
-// members: its kind is still recorded, so nothing is written, and a join is refused.
+// members: its kind is still recorded, so nothing is written, and a join is refused. So does an
+// open one to a user the stream's visibility does not admit (ADR-0105), so that they are
+// answered as for a stream that is not on air: the stream's row is found by its chat room
+// (live_streams_chat_room, migration 0020), and a chat with no such row, a stream run outside
+// the stream service, admits anyone as before.
 inline constexpr Sql kAdmits = R"sql(
-WITH recorded AS (
-    SELECT CASE WHEN closed_at IS NULL THEN kind ELSE 'group_chat' END AS kind
+WITH refused AS (
+    SELECT 1 FROM live_streams s
+     WHERE live_chat_room(s.id::text) = $1 AND s.owner_id <> $2
+       AND (s.visibility = 'private'
+            OR (s.visibility = 'room'
+                AND NOT (EXISTS (SELECT 1 FROM chat_members m
+                                  WHERE m.room_id = s.visibility_room AND m.user_id = $2)
+                         AND EXISTS (SELECT 1 FROM chat_members m
+                                      WHERE m.room_id = s.visibility_room
+                                        AND m.user_id = s.owner_id))))),
+recorded AS (
+    SELECT CASE WHEN closed_at IS NULL
+                     AND (kind <> 'stream_live_chat' OR NOT EXISTS (SELECT 1 FROM refused))
+                THEN kind ELSE 'group_chat' END AS kind
       FROM chat_rooms WHERE room_id = $1),
 created AS (
     INSERT INTO chat_rooms (room_id, kind)

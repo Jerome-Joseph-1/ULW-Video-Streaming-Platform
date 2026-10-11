@@ -43,11 +43,12 @@ What had to hold:
 | Grants per user for streams, as for videos | Parity with videos | No caller has asked; the service API would need a stream half | Not done here |
 | A visibility given at `POST /api/v1/live` | One request | The create takes no body today; a `PATCH` before `start` does the same and keeps the create unchanged | Rejected |
 | The owner alone sets it | Self-serve | The product's backend could not apply its own policy to a stream, as ADR-0100 lets it for a video | Rejected: the backend sets it, and the owner may too, as for videos |
-| Check the stream's live chat by the same rule | The chat is the stream's | Chat joins a stream's room by its name (ADR-0070) on another service with its own store; a check there is its own change | Not done here |
+| Leave the stream's live chat open to anyone signed in | Chat is another service | A private stream's chat would show who is watching and what they say to anyone with the id | Rejected |
+| Check the stream's live chat in the join's own statement (`kAdmits`): find the stream by its chat room and apply the rule; refuse as for a stream not on air | One read a join already makes; no new error, nothing new on the wire; chat's code unchanged | A socket already in the chat stays when the visibility changes, until it leaves, as a member taken off a group chat does until it reconnects (ADR-0054) | Accepted |
 
 ## Decision
 
-- **Model.** A stream carries a `core::Visibility`, `unlisted` unless its owner sets another
+- **Model.** A stream carries a `core::Visibility`, `unlisted` unless set otherwise
   (`core::ports::LiveStream::visibility`). One rule, `core::ports::may_watch(stream, viewer,
   room_member)`: the owner always; anyone while unlisted; while shared with a room, those
   `chat_members` lists in it together with the owner; nobody else while private.
@@ -85,7 +86,9 @@ What had to hold:
   database sessions carry that at the platform's caps (two streams at once by default).
 - A revocation takes up to 5 s on other processes, and segment URLs a playlist handed out stay
   valid for their hour, as ADR-0097 accepted for videos.
-- **Not covered: the stream's live chat.** It is joined by the stream's name (ADR-0070), so a
-  private or room-shared stream's chat is still open to anyone signed in who has the id. A
-  follow-up applies the stream's visibility to joins of its chat room.
+- **The stream's live chat follows it.** A join of a stream's chat room (ADR-0070) finds the
+  stream by its room, through an index on `live_chat_room(id::text)` (migration 0020), in the
+  statement that already admits the join, and refuses anyone the rule refuses with `not_live`,
+  as for a stream not on air. It is read at each join, not cached; someone already in the chat
+  when the visibility changes stays until they leave.
 - Streams started outside the service stay open to every signed-in viewer.

@@ -5,7 +5,7 @@
 --
 -- Applied after 0019: the migrator refuses a version older than the newest applied.
 --
--- One ALTER, catalog changes only: a column with a constant default and one without rewrite
+-- One ALTER, catalog changes only, then one small index: a column with a constant default and one without rewrite
 -- nothing. The checks are added and validated here, unlike 0016's on videos: validating scans
 -- live_streams under the ALTER's ACCESS EXCLUSIVE lock, and the table holds one row per stream
 -- ever started, a few an hour at the platform's caps (LiveSettings), so the scan takes
@@ -17,3 +17,9 @@ ALTER TABLE live_streams
         CHECK (visibility IN ('private', 'room', 'unlisted')),
     ADD CONSTRAINT live_streams_visibility_room
         CHECK ((visibility = 'room') = (visibility_room IS NOT NULL));
+
+-- A chat join finds the stream behind a live chat room by the room (message_sql::kAdmits), to
+-- apply its visibility to the join: an index on the room each stream's chat has (migration
+-- 0008's live_chat_room, which is IMMUTABLE). Built under the ALTER's lock, over the same few
+-- rows.
+CREATE INDEX live_streams_chat_room ON live_streams (live_chat_room(id::text));
