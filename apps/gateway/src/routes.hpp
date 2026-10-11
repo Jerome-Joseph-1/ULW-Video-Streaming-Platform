@@ -14,6 +14,7 @@ enum class RouteId : std::uint8_t {
     UploadOffset,
     CancelUpload,
     CommitUpload,
+    ListVideos,
     GetVideo,
     UpdateVideo,
     DeleteVideo,
@@ -36,7 +37,7 @@ enum class RouteId : std::uint8_t {
     Metrics,
 };
 
-inline constexpr std::array<http::Route<RouteId>, 27> kRoutes{{
+inline constexpr std::array<http::Route<RouteId>, 28> kRoutes{{
     {.method = http::Method::Post, .pattern = "/api/v1/uploads", .id = RouteId::CreateUpload},
     {.method = http::Method::Patch, .pattern = "/api/v1/uploads/{id}", .id = RouteId::AppendChunk},
     {.method = http::Method::Head, .pattern = "/api/v1/uploads/{id}", .id = RouteId::UploadOffset},
@@ -46,6 +47,8 @@ inline constexpr std::array<http::Route<RouteId>, 27> kRoutes{{
     {.method = http::Method::Post,
      .pattern = "/api/v1/uploads/{id}/commit",
      .id = RouteId::CommitUpload},
+    // The caller's own videos, newest first, a page at a time.
+    {.method = http::Method::Get, .pattern = "/api/v1/videos", .id = RouteId::ListVideos},
     {.method = http::Method::Get, .pattern = "/api/v1/videos/{id}", .id = RouteId::GetVideo},
     // Who may see a video (ADR-0097): its owner sets its visibility, the operator's backend
     // grants it to users.
@@ -114,6 +117,8 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "cancel_upload";
     case RouteId::CommitUpload:
         return "commit_upload";
+    case RouteId::ListVideos:
+        return "list_videos";
     case RouteId::GetVideo:
         return "get_video";
     case RouteId::UpdateVideo:
@@ -169,6 +174,7 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::UploadOffset:
     case RouteId::CancelUpload:
     case RouteId::CommitUpload:
+    case RouteId::ListVideos:
     case RouteId::GetVideo:
     case RouteId::UpdateVideo:
     case RouteId::DeleteVideo:

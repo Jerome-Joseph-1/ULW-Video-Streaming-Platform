@@ -31,7 +31,7 @@ struct GrantQuery {
 // given twice, is nullopt.
 [[nodiscard]] std::optional<GrantQuery> grant_query(std::string_view target) noexcept;
 
-// The page sizes GET /api/v1/service/videos answers (ADR-0100).
+// The page sizes GET /api/v1/service/videos (ADR-0100) and GET /api/v1/videos answer.
 inline constexpr std::size_t kDefaultVideoPage = 50;
 inline constexpr std::size_t kMaxVideoPage = 200;
 
@@ -45,6 +45,16 @@ struct VideoQuery {
 // `next` gave) and `limit` (1 to kMaxVideoPage) from a request target's query. An unknown
 // parameter is ignored; a missing owner, a malformed value, or one given twice is nullopt.
 [[nodiscard]] std::optional<VideoQuery> video_query(std::string_view target) noexcept;
+
+struct OwnVideoQuery {
+    std::optional<core::ports::VideoCursor> after;
+    std::size_t limit = kDefaultVideoPage;
+};
+
+// GET /api/v1/videos: `after` and `limit` as above, both optional. The caller's own videos are
+// listed, so an `owner` parameter is refused (nullopt), as is a malformed value or one given
+// twice; an unknown parameter is ignored.
+[[nodiscard]] std::optional<OwnVideoQuery> own_video_query(std::string_view target) noexcept;
 
 // The cursor `next` carries: "<created_at in Unix microseconds>.<video id>". Opaque to clients.
 [[nodiscard]] std::string cursor_text(const core::ports::VideoCursor& cursor);

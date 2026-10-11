@@ -117,16 +117,23 @@ std::optional<GrantQuery> grant_query(std::string_view target) noexcept {
     return query;
 }
 
-std::optional<VideoQuery> video_query(std::string_view target) noexcept {
-    const std::size_t mark = target.find('?');
-    if (mark == std::string_view::npos) {
-        return std::nullopt;
-    }
-    std::string_view rest = target.substr(mark + 1);
-    rest = rest.substr(0, rest.find('#'));
+namespace {
+
+// A listing's query as written: `owner`, `after` and `limit`, each at most once and well formed.
+struct ListingQuery {
     std::optional<core::UserId> owner;
     std::optional<core::ports::VideoCursor> after;
     std::optional<std::size_t> limit;
+};
+
+std::optional<ListingQuery> listing_query(std::string_view target) noexcept {
+    ListingQuery query;
+    const std::size_t mark = target.find('?');
+    if (mark == std::string_view::npos) {
+        return query;
+    }
+    std::string_view rest = target.substr(mark + 1);
+    rest = rest.substr(0, rest.find('#'));
     while (!rest.empty()) {
         const std::size_t amp = rest.find('&');
         const std::string_view pair = rest.substr(0, amp);
@@ -137,28 +144,45 @@ std::optional<VideoQuery> video_query(std::string_view target) noexcept {
             eq == std::string_view::npos ? std::string_view{} : pair.substr(eq + 1);
         if (name == "owner") {
             auto user = user_from_segment(value);
-            if (owner || !user) {
+            if (query.owner || !user) {
                 return std::nullopt;
             }
-            owner = *user;
+            query.owner = *user;
         } else if (name == "after") {
             auto cursor = cursor_from_text(value);
-            if (after || !cursor) {
+            if (query.after || !cursor) {
                 return std::nullopt;
             }
-            after = *cursor;
+            query.after = *cursor;
         } else if (name == "limit") {
             const auto n = core::parse_integer<std::size_t>(value);
-            if (limit || !n || *n == 0 || *n > kMaxVideoPage) {
+            if (query.limit || !n || *n == 0 || *n > kMaxVideoPage) {
                 return std::nullopt;
             }
-            limit = n;
+            query.limit = n;
         }
     }
-    if (!owner) {
+    return query;
+}
+
+} // namespace
+
+std::optional<VideoQuery> video_query(std::string_view target) noexcept {
+    const auto query = listing_query(target);
+    if (!query || !query->owner) {
         return std::nullopt;
     }
-    return VideoQuery{.owner = *owner, .after = after, .limit = limit.value_or(kDefaultVideoPage)};
+    return VideoQuery{.owner = *query->owner,
+                      .after = query->after,
+                      .limit = query->limit.value_or(kDefaultVideoPage)};
+}
+
+std::optional<OwnVideoQuery> own_video_query(std::string_view target) noexcept {
+    const auto query = listing_query(target);
+    if (!query || query->owner) {
+        return std::nullopt;
+    }
+    return OwnVideoQuery{.after = query->after, .limit = query->limit.value_or(kDefaultVideoPage)};
 }
 
 std::string cursor_text(const core::ports::VideoCursor& cursor) {

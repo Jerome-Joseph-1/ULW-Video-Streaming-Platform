@@ -117,6 +117,8 @@ private:
         // GET /api/v1/service/videos: its query, nullopt when malformed or without an owner
         // (answered, as the grants' is, once the caller is known to be the service).
         std::optional<VideoQuery> video_query;
+        // GET /api/v1/videos: its query, nullopt when malformed.
+        std::optional<OwnVideoQuery> own_video_query;
         std::optional<PendingCreate> create;
         std::optional<core::ports::Claims> claims;
         // A live stream's status, held while the playlist says whether it has ended.
@@ -209,6 +211,8 @@ private:
                    core::ports::CatalogResult<core::ports::GrantPage> result) noexcept;
     void on_grant_changed(std::uint64_t request, core::ports::CatalogResult<void> result) noexcept;
     // The operator's backend's listing and takedown (ADR-0100).
+    // GET /api/v1/videos: lists the caller's own videos.
+    void start_own_listing() noexcept;
     void on_videos(std::uint64_t request, const core::UserId& owner,
                    core::ports::CatalogResult<core::ports::VideoPage> result) noexcept;
     void on_service_deleted(std::uint64_t request,
