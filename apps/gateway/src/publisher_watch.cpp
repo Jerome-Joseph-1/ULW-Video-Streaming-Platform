@@ -329,6 +329,7 @@ void PublisherWatch::start(Followed& stream) noexcept {
                 case LiveFailure::Full:
                 case LiveFailure::RateLimited:
                 case LiveFailure::Internal:
+                case LiveFailure::NotMember:
                     ++counters_.start_failures;
                     log_.warn("live stream not started from a webhook",
                               {{"stream", key}, {"error", to_string(r.error())}});
@@ -393,6 +394,7 @@ void PublisherWatch::check(Followed& stream) noexcept {
             case LiveFailure::Full:
             case LiveFailure::RateLimited:
             case LiveFailure::Internal:
+            case LiveFailure::NotMember:
                 ++counters_.check_failures;
                 if (!s->current && s->check_attempts < settings_.attempts && !s->waiting()) {
                     s->arm(Followed::Wait::RetryCheck, settings_.retry);

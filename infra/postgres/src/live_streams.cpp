@@ -28,8 +28,9 @@ using core::ports::LiveStoreError;
 using core::ports::LiveStream;
 
 // Every statement answers the same columns, in the same order: timestamps as integer
-// microseconds since the epoch (exact, and free of DateStyle and TimeZone), and last the
-// recording's video from live_recordings, whose key is the stream id's text.
+// microseconds since the epoch (exact, and free of DateStyle and TimeZone), the recording's
+// video from live_recordings, whose key is the stream id's text, and last who may watch it
+// (migration 0020).
 // Every stream is created under this one transaction-scoped advisory lock, taken in a statement
 // of its own before the insert: the insert's count of unfinished and recent streams then reads a
 // snapshot taken after the previous creator committed, so concurrent creates cannot pass the
@@ -51,7 +52,7 @@ ON CONFLICT (owner_id) WHERE state <> 'ended' DO NOTHING
 RETURNING s.id, s.owner_id, s.state, (extract(epoch FROM s.created_at) * 1000000)::bigint,
        (extract(epoch FROM s.live_at) * 1000000)::bigint,
        (extract(epoch FROM s.ended_at) * 1000000)::bigint, s.end_reason, s.srt_passphrase,
-       NULL::uuid)sql";
+       NULL::uuid, s.visibility, s.visibility_room)sql";
 
 // Why a create stored nothing when the owner had no unfinished stream: their hourly count.
 constexpr Sql kRecentByOwner = R"sql(
@@ -74,14 +75,16 @@ constexpr Sql kCurrent = R"sql(
 SELECT s.id, s.owner_id, s.state, (extract(epoch FROM s.created_at) * 1000000)::bigint,
        (extract(epoch FROM s.live_at) * 1000000)::bigint,
        (extract(epoch FROM s.ended_at) * 1000000)::bigint, s.end_reason, s.srt_passphrase,
-       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text)
+       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text), s.visibility,
+       s.visibility_room
   FROM live_streams s WHERE s.owner_id = $1 AND s.state <> 'ended')sql";
 
 constexpr Sql kFind = R"sql(
 SELECT s.id, s.owner_id, s.state, (extract(epoch FROM s.created_at) * 1000000)::bigint,
        (extract(epoch FROM s.live_at) * 1000000)::bigint,
        (extract(epoch FROM s.ended_at) * 1000000)::bigint, s.end_reason, s.srt_passphrase,
-       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text)
+       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text), s.visibility,
+       s.visibility_room
   FROM live_streams s WHERE s.id = $1)sql";
 
 constexpr Sql kMarkLive = R"sql(
@@ -92,7 +95,8 @@ UPDATE live_streams s
 RETURNING s.id, s.owner_id, s.state, (extract(epoch FROM s.created_at) * 1000000)::bigint,
        (extract(epoch FROM s.live_at) * 1000000)::bigint,
        (extract(epoch FROM s.ended_at) * 1000000)::bigint, s.end_reason, s.srt_passphrase,
-       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text))sql";
+       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text), s.visibility,
+       s.visibility_room)sql";
 
 constexpr Sql kEnd = R"sql(
 UPDATE live_streams s
@@ -102,15 +106,37 @@ UPDATE live_streams s
 RETURNING s.id, s.owner_id, s.state, (extract(epoch FROM s.created_at) * 1000000)::bigint,
        (extract(epoch FROM s.live_at) * 1000000)::bigint,
        (extract(epoch FROM s.ended_at) * 1000000)::bigint, s.end_reason, s.srt_passphrase,
-       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text))sql";
+       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text), s.visibility,
+       s.visibility_room)sql";
 
 constexpr Sql kUnfinished = R"sql(
 SELECT s.id, s.owner_id, s.state, (extract(epoch FROM s.created_at) * 1000000)::bigint,
        (extract(epoch FROM s.live_at) * 1000000)::bigint,
        (extract(epoch FROM s.ended_at) * 1000000)::bigint, s.end_reason, s.srt_passphrase,
-       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text)
+       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text), s.visibility,
+       s.visibility_room
   FROM live_streams s WHERE s.state <> 'ended'
  ORDER BY s.created_at, s.id LIMIT $1)sql";
+
+// Who may watch the stream, for its owner ($2): the kind ($3) and, for a room's kind only, the
+// room ($4, '' otherwise), which must list the owner. Nothing for a stream not theirs, or a
+// room that does not list them; kFind then tells the two apart.
+constexpr Sql kSetVisibility = R"sql(
+UPDATE live_streams s SET visibility = $3, visibility_room = NULLIF($4, '')::uuid
+ WHERE s.id = $1 AND s.owner_id = $2
+   AND ($4 = '' OR EXISTS (SELECT 1 FROM chat_members m
+                            WHERE m.room_id = NULLIF($4, '')::uuid AND m.user_id = $2))
+RETURNING s.id, s.owner_id, s.state, (extract(epoch FROM s.created_at) * 1000000)::bigint,
+       (extract(epoch FROM s.live_at) * 1000000)::bigint,
+       (extract(epoch FROM s.ended_at) * 1000000)::bigint, s.end_reason, s.srt_passphrase,
+       (SELECT r.video_id FROM live_recordings r WHERE r.stream_id = s.id::text), s.visibility,
+       s.visibility_room)sql";
+
+// Whether the room lists both the viewer ($3) and the stream's owner ($2): two lookups by
+// chat_members' primary key.
+constexpr Sql kSharesRoom = R"sql(
+SELECT EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $3)
+   AND EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
 
 LiveStoreError to_live_error(DbError e) noexcept {
     switch (e) {
@@ -186,8 +212,12 @@ LiveResult<LiveStream> decode_row(const Result& rows, int row) {
     const auto passphrase = rows.get(row, 7);
     const auto recording_text = rows.get(row, 8);
     const auto recording = recording_text ? domain_at<core::VideoId>(rows, row, 8) : std::nullopt;
+    const auto visibility_kind = rows.get(row, 9);
+    const auto visibility =
+        visibility_kind ? core::Visibility::from_columns(*visibility_kind, rows.get(row, 10))
+                        : std::unexpected(core::DomainError::InvalidVisibility);
     if (!id || !owner || !state || !created || !live_at || !ended_at || (reason_text && !reason) ||
-        !passphrase || (recording_text && !recording) ||
+        !passphrase || (recording_text && !recording) || !visibility ||
         (*state == LiveState::Ended) != ended_at->has_value()) {
         return std::unexpected(LiveStoreError::Corrupt);
     }
@@ -199,7 +229,8 @@ LiveResult<LiveStream> decode_row(const Result& rows, int row) {
                       .live_at = *live_at,
                       .ended_at = *ended_at,
                       .ended_by = reason,
-                      .recording = recording};
+                      .recording = recording,
+                      .visibility = *visibility};
 }
 
 LiveResult<std::vector<LiveStream>> decode_rows(const Result& rows) {
@@ -443,6 +474,108 @@ private:
     Stage stage_ = Stage::Begin;
 };
 
+// Who may watch a stream, set for its owner: the update, then, when it changed nothing, the row
+// read back to tell a stream not theirs from a room that does not list them. It owns every
+// text its statements name: Params borrows them, and a statement runs after the call returns.
+// A visibility's room column as the statement takes it: '' for every kind but a room's.
+std::string room_text(const core::Visibility& visibility) {
+    const std::optional<core::RoomId>& room = visibility.room_id();
+    return room.has_value() ? room->to_string() : std::string{};
+}
+
+class SetVisibility final : public Operation {
+public:
+    SetVisibility(const core::LiveStreamId& id, const core::UserId& owner,
+                  const core::Visibility& visibility, LiveCallback<LiveStream> done)
+        : id_(id), owner_(owner), kind_(visibility.kind_name()), room_(room_text(visibility)),
+          done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        reading_ = false;
+        return {.sql = kSetVisibility,
+                .params = Params{}
+                              .add_uuid(id_.uuid())
+                              .add_text(owner_.view())
+                              .add_text(kind_)
+                              .add_text(room_)};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(to_live_error(outcome.error())));
+            return std::nullopt;
+        }
+        if (!reading_) {
+            if (outcome->rows() > 0) {
+                done_(decode_row(*outcome, 0));
+                return std::nullopt;
+            }
+            reading_ = true;
+            return Statement{.sql = kFind, .params = Params{}.add_uuid(id_.uuid())};
+        }
+        if (outcome->rows() == 0) {
+            done_(std::unexpected(LiveStoreError::NotFound));
+            return std::nullopt;
+        }
+        const auto row = decode_row(*outcome, 0);
+        if (!row) {
+            done_(row);
+            return std::nullopt;
+        }
+        // Not theirs reads as no stream; theirs, the room was refused.
+        done_(std::unexpected(row->owner == owner_ ? LiveStoreError::NotMember
+                                                   : LiveStoreError::NotFound));
+        return std::nullopt;
+    }
+
+    void abandon(DbError error) noexcept override { done_(std::unexpected(to_live_error(error))); }
+
+private:
+    core::LiveStreamId id_;
+    core::UserId owner_;
+    std::string kind_;
+    std::string room_;
+    LiveCallback<LiveStream> done_;
+    bool reading_ = false;
+};
+
+// Whether a room lists both a viewer and a stream's owner. Owns its texts, as above.
+class SharesRoom final : public Operation {
+public:
+    SharesRoom(const core::RoomId& room, const core::UserId& owner, const core::UserId& viewer,
+               LiveCallback<bool> done)
+        : room_(room), owner_(owner), viewer_(viewer), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return {
+            .sql = kSharesRoom,
+            .params =
+                Params{}.add_uuid(room_.uuid()).add_text(owner_.view()).add_text(viewer_.view())};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(to_live_error(outcome.error())));
+            return std::nullopt;
+        }
+        const auto shared = outcome->get(0, 0);
+        if (!shared || (*shared != "t" && *shared != "f")) {
+            done_(std::unexpected(LiveStoreError::Corrupt));
+            return std::nullopt;
+        }
+        done_(*shared == "t");
+        return std::nullopt;
+    }
+
+    void abandon(DbError error) noexcept override { done_(std::unexpected(to_live_error(error))); }
+
+private:
+    core::RoomId room_;
+    core::UserId owner_;
+    core::UserId viewer_;
+    LiveCallback<bool> done_;
+};
+
 } // namespace
 
 class PgLiveStreams::Impl {
@@ -518,6 +651,17 @@ void PgLiveStreams::mark_live(const core::LiveStreamId& id, core::WallTime at,
 void PgLiveStreams::end(const core::LiveStreamId& id, LiveEnd reason, core::WallTime at,
                         LiveCallback<EndedLiveStream> done) {
     impl_->pool().submit(std::make_unique<EndStream>(id, reason, at, std::move(done)));
+}
+
+void PgLiveStreams::set_visibility(const core::LiveStreamId& id, const core::UserId& owner,
+                                   const core::Visibility& visibility,
+                                   LiveCallback<LiveStream> done) {
+    impl_->pool().submit(std::make_unique<SetVisibility>(id, owner, visibility, std::move(done)));
+}
+
+void PgLiveStreams::shares_room(const core::RoomId& room, const core::UserId& owner,
+                                const core::UserId& viewer, LiveCallback<bool> done) {
+    impl_->pool().submit(std::make_unique<SharesRoom>(room, owner, viewer, std::move(done)));
 }
 
 void PgLiveStreams::unfinished(std::size_t limit, LiveCallback<std::vector<LiveStream>> done) {

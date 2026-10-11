@@ -123,7 +123,7 @@ std::string_view method_name(http::Method m) noexcept {
     // A second layer for the routes that read a body as JSON: even from an allowed page, a
     // body is believed only under the type no other page can send without a preflight.
     const bool json_body = route == RouteId::CreateUpload || route == RouteId::UpdateVideo ||
-                           route == RouteId::UpdateServiceVideo;
+                           route == RouteId::UpdateServiceVideo || route == RouteId::UpdateStream;
     return !json_body || declares_json(head.headers);
 }
 
@@ -329,6 +329,7 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     case RouteId::CreateUpload:
     case RouteId::UpdateVideo:
     case RouteId::UpdateServiceVideo:
+    case RouteId::UpdateStream:
         if (head.content_length == 0) {
             return http::HeadVerdict::reject(Status::BadRequest);
         }
@@ -493,7 +494,7 @@ http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept
     last_activity_ = now();
     last_progress_ = last_activity_;
     if (req_.route == RouteId::CreateUpload || req_.route == RouteId::UpdateVideo ||
-        req_.route == RouteId::UpdateServiceVideo) {
+        req_.route == RouteId::UpdateServiceVideo || req_.route == RouteId::UpdateStream) {
         std::ranges::transform(bytes, std::back_inserter(req_.body),
                                [](std::byte b) { return static_cast<char>(b); });
         return http::BodyVerdict::Continue;
@@ -554,9 +555,11 @@ void Connection::advance() noexcept {
             start_create();
         }
         return;
-    // A visibility, the owner's or the operator's backend's (ADR-0097, ADR-0100).
+    // A visibility, the owner's or the operator's backend's (ADR-0097, ADR-0100), or a
+    // stream's owner's (ADR-0105).
     case RouteId::UpdateVideo:
     case RouteId::UpdateServiceVideo:
+    case RouteId::UpdateStream:
         if (req_.message_complete && !req_.started) {
             req_.started = true;
             start_patch();
@@ -602,6 +605,8 @@ void Connection::advance() noexcept {
 void Connection::start_patch() noexcept {
     if (req_.route == RouteId::UpdateServiceVideo) {
         start_service_route();
+    } else if (req_.route == RouteId::UpdateStream) {
+        start_stream_route();
     } else {
         start_update();
     }
@@ -1009,6 +1014,7 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     case RouteId::LivePlaylist:
     case RouteId::CreateStream:
     case RouteId::StreamStatus:
+    case RouteId::UpdateStream:
     case RouteId::StreamTicket:
     case RouteId::StartStream:
     case RouteId::EndStream:
@@ -1428,15 +1434,54 @@ void Connection::on_deleted(std::uint64_t request, const core::VideoId& video,
         });
 }
 
-// Any signed-in viewer may watch any stream: a live stream is a broadcast, and nothing on the
-// platform records who may see one (ADR-0059). An id the packager could never have used is
-// answered like a stream that has not started.
+// Who may watch a stream the stream service started is its visibility's to say (ADR-0105),
+// decided before the playlist cache is asked, so the cache stays one copy per stream for every
+// viewer (ADR-0059). One run outside the service is a broadcast to any signed-in viewer. An id
+// the packager could never have used, and a stream the viewer may not watch, are answered like
+// a stream that has not started.
 void Connection::start_live() noexcept {
     const std::string_view stream = req_.params[0];
     if (!valid_stream_id(stream)) {
         fail(Status::NotFound);
         return;
     }
+    LiveStreams* live = deps().live_streams;
+    const core::ports::Claims* claims = get(req_.claims);
+    if (live == nullptr) {
+        fetch_live(stream);
+        return;
+    }
+    if (claims == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (const auto known = live->known_watch(stream, claims->subject)) {
+        on_watch(*known);
+        return;
+    }
+    ++pending_;
+    live->watch(stream, claims->subject, [this](std::expected<Watch, LiveFailure> watch) noexcept {
+        --pending_;
+        if (phase_ != Phase::Request) {
+            return;
+        }
+        if (!watch) {
+            fail_live(watch.error());
+            return;
+        }
+        on_watch(*watch);
+    });
+}
+
+void Connection::on_watch(Watch watch) noexcept {
+    if (watch == Watch::Refused) {
+        fail(Status::NotFound);
+        return;
+    }
+    fetch_live(req_.params[0]);
+}
+
+void Connection::fetch_live(std::string_view stream) noexcept {
     ++pending_;
     gw().live().get(stream, *this);
 }
@@ -1565,9 +1610,19 @@ void Connection::act_on_stream(LiveStreams& live, const core::LiveStreamId& id,
             }
             respond_stream(Status::Ok, *r, nullptr);
         };
+    if (req_.route == RouteId::UpdateStream) {
+        const auto visibility = visibility_from_body(req_.body);
+        if (!visibility) {
+            fail_with(Status::BadRequest, "bad_visibility");
+            return;
+        }
+        ++pending_;
+        live.set_visibility(id, user, *visibility, answer_stream);
+        return;
+    }
     ++pending_;
     if (req_.route == RouteId::StreamStatus) {
-        live.status(id, answer_stream);
+        live.status(id, user, answer_stream);
     } else if (req_.route == RouteId::StartStream) {
         live.go_live(id, user, answer_stream);
     } else if (req_.route == RouteId::EndStream) {
@@ -1633,6 +1688,8 @@ void Connection::respond_stream(http::Status status, const core::ports::LiveStre
         } else {
             json += "null";
         }
+        // Who may watch it is the owner's to know and set (ADR-0105), as for a video.
+        json += R"(,"visibility":")" + stream.visibility.to_string() + '"';
     }
     if (ticket != nullptr) {
         json += R"(,"publish":)";
@@ -1668,6 +1725,9 @@ void Connection::fail_live(LiveFailure failure) noexcept {
         return;
     case LiveFailure::Internal:
         fail(Status::InternalServerError);
+        return;
+    case LiveFailure::NotMember:
+        fail_with(Status::Forbidden, "not_member");
         return;
     }
     fail(Status::InternalServerError);

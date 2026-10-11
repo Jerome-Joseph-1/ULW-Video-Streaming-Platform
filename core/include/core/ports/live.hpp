@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "core/models/visibility.hpp"
 #include "core/util/time.hpp"
 
 #include <cstddef>
@@ -56,7 +57,17 @@ struct LiveStream {
     std::optional<LiveEnd> ended_by;
     // The video the packager queued the ended stream's recording as (ADR-0055), once it has.
     std::optional<VideoId> recording;
+    // Who besides its owner may watch it (ADR-0105): unlisted, as every stream was before
+    // streams had one, unless the owner chose otherwise. It says nothing of the recording,
+    // which is a video with a visibility of its own.
+    Visibility visibility = Visibility::unlisted();
 };
+
+// Who may watch a stream, live or ended: its owner always; anyone signed in while it is
+// unlisted; while it is shared with a room, those `room_member` says chat_members lists in the
+// room together with the owner; nobody else while it is private.
+[[nodiscard]] bool may_watch(const LiveStream& stream, const UserId& viewer,
+                             bool room_member) noexcept;
 
 enum class LiveStoreError : std::uint8_t {
     NotFound,
@@ -68,6 +79,8 @@ enum class LiveStoreError : std::uint8_t {
     Unavailable,
     // A stored row violates an invariant.
     Corrupt,
+    // A room the stream's owner is not a member of: it would share the stream with nobody.
+    NotMember,
 };
 
 [[nodiscard]] std::string_view to_string(LiveStoreError e) noexcept;
@@ -126,6 +139,14 @@ public:
                      LiveCallback<EndedLiveStream> done) = 0;
     // Up to `limit` unfinished streams, oldest first.
     virtual void unfinished(std::size_t limit, LiveCallback<std::vector<LiveStream>> done) = 0;
+    // Sets who may watch the stream, for its owner, in any state: NotFound when it is not a
+    // stream of theirs; NotMember for a room chat_members does not list them in.
+    virtual void set_visibility(const LiveStreamId& id, const UserId& owner,
+                                const Visibility& visibility, LiveCallback<LiveStream> done) = 0;
+    // Whether chat_members lists both `viewer` and `owner` in `room`: a room shares a stream
+    // only while it lists its owner, as it shares a video (ADR-0097).
+    virtual void shares_room(const RoomId& room, const UserId& owner, const UserId& viewer,
+                             LiveCallback<bool> done) = 0;
 };
 
 // What one stream's packager is given when it starts (ADR-0083): the stream, the owner its

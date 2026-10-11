@@ -23,6 +23,7 @@ enum class RouteId : std::uint8_t {
     LivePlaylist,
     CreateStream,
     StreamStatus,
+    UpdateStream,
     StreamTicket,
     StartStream,
     EndStream,
@@ -37,7 +38,7 @@ enum class RouteId : std::uint8_t {
     Metrics,
 };
 
-inline constexpr std::array<http::Route<RouteId>, 28> kRoutes{{
+inline constexpr std::array<http::Route<RouteId>, 29> kRoutes{{
     {.method = http::Method::Post, .pattern = "/api/v1/uploads", .id = RouteId::CreateUpload},
     {.method = http::Method::Patch, .pattern = "/api/v1/uploads/{id}", .id = RouteId::AppendChunk},
     {.method = http::Method::Head, .pattern = "/api/v1/uploads/{id}", .id = RouteId::UploadOffset},
@@ -67,6 +68,8 @@ inline constexpr std::array<http::Route<RouteId>, 28> kRoutes{{
     // The stream service (ADR-0092).
     {.method = http::Method::Post, .pattern = "/api/v1/live", .id = RouteId::CreateStream},
     {.method = http::Method::Get, .pattern = "/api/v1/live/{id}", .id = RouteId::StreamStatus},
+    // Who may watch a stream: its owner sets it (ADR-0105).
+    {.method = http::Method::Patch, .pattern = "/api/v1/live/{id}", .id = RouteId::UpdateStream},
     {.method = http::Method::Post,
      .pattern = "/api/v1/live/{id}/ticket",
      .id = RouteId::StreamTicket},
@@ -135,6 +138,8 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "create_stream";
     case RouteId::StreamStatus:
         return "stream_status";
+    case RouteId::UpdateStream:
+        return "update_stream";
     case RouteId::StreamTicket:
         return "stream_ticket";
     case RouteId::StartStream:
@@ -183,6 +188,7 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::LivePlaylist:
     case RouteId::CreateStream:
     case RouteId::StreamStatus:
+    case RouteId::UpdateStream:
     case RouteId::StreamTicket:
     case RouteId::StartStream:
     case RouteId::EndStream:

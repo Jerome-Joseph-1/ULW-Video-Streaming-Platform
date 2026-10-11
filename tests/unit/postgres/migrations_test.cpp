@@ -160,4 +160,25 @@ TEST(BundledMigrations, TheValidationMigrationOnlyValidates) {
     FAIL() << "no validate_checks migration";
 }
 
+// 0020 (ADR-0105) alters live_streams alone, in one statement: nothing else is locked.
+TEST(BundledMigrations, TheStreamVisibilityMigrationAltersOnlyLiveStreams) {
+    for (const auto& m : bundled_migrations()) {
+        if (m.name != "live_stream_visibility") {
+            continue;
+        }
+        const std::string_view sql{m.sql};
+        const auto alter = sql.find("\nALTER TABLE live_streams");
+        ASSERT_NE(alter, std::string_view::npos);
+        EXPECT_EQ(sql.find("\nALTER", alter + 1), std::string_view::npos) << "one ALTER, one lock";
+        for (const std::string_view other :
+             {"\nCREATE", "\nUPDATE", "\nDROP", " ON videos", "REFERENCES"}) {
+            EXPECT_EQ(sql.find(other), std::string_view::npos) << other;
+        }
+        EXPECT_NE(sql.find("DEFAULT 'unlisted'"), std::string_view::npos)
+            << "a stream nobody set a visibility on is watched as before";
+        return;
+    }
+    FAIL() << "no live_stream_visibility migration";
+}
+
 } // namespace
