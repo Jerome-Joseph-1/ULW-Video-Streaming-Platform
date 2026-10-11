@@ -22,9 +22,9 @@ struct LiveStreamsConfig {
     core::Millis request_timeout{5000};
 };
 
-// ILiveStreamStore on Postgres (live_streams, migration 0011), driven by the reactor: no call
-// ever blocks the loop. The offload pool resolves host names and must be stopped before this is
-// destroyed; calls still outstanding then are dropped without their callbacks.
+// ILiveStreamStore on Postgres (live_streams, migrations 0011 and 0020), driven by the reactor: no
+// call ever blocks the loop. The offload pool resolves host names and must be stopped before this
+// is destroyed; calls still outstanding then are dropped without their callbacks.
 class PgLiveStreams final : public core::ports::ILiveStreamStore {
     class Impl;
     struct Token {
@@ -53,6 +53,11 @@ public:
              core::ports::LiveCallback<core::ports::EndedLiveStream> done) override;
     void unfinished(std::size_t limit,
                     core::ports::LiveCallback<std::vector<core::ports::LiveStream>> done) override;
+    void set_visibility(const core::LiveStreamId& id, const std::optional<core::UserId>& owner,
+                        const core::Visibility& visibility,
+                        core::ports::LiveCallback<core::ports::LiveStream> done) override;
+    void shares_room(const core::RoomId& room, const core::UserId& owner,
+                     const core::UserId& viewer, core::ports::LiveCallback<bool> done) override;
 
 private:
     std::unique_ptr<Impl> impl_;

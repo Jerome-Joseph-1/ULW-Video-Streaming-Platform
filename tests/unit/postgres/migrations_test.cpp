@@ -160,4 +160,30 @@ TEST(BundledMigrations, TheValidationMigrationOnlyValidates) {
     FAIL() << "no validate_checks migration";
 }
 
+// 0020 (ADR-0105) alters live_streams alone, in one statement, then indexes it: nothing else is
+// locked.
+TEST(BundledMigrations, TheStreamVisibilityMigrationAltersOnlyLiveStreams) {
+    for (const auto& m : bundled_migrations()) {
+        if (m.name != "live_stream_visibility") {
+            continue;
+        }
+        const std::string_view sql{m.sql};
+        const auto alter = sql.find("\nALTER TABLE live_streams");
+        ASSERT_NE(alter, std::string_view::npos);
+        EXPECT_EQ(sql.find("\nALTER", alter + 1), std::string_view::npos) << "one ALTER, one lock";
+        const auto index = sql.find("\nCREATE INDEX live_streams_chat_room ON live_streams");
+        ASSERT_NE(index, std::string_view::npos);
+        EXPECT_LT(alter, index);
+        EXPECT_EQ(sql.find("\nCREATE", index + 1), std::string_view::npos);
+        for (const std::string_view other :
+             {"\nCREATE TABLE", "\nUPDATE", "\nDROP", " ON videos", " ON chat_", "REFERENCES"}) {
+            EXPECT_EQ(sql.find(other), std::string_view::npos) << other;
+        }
+        EXPECT_NE(sql.find("DEFAULT 'unlisted'"), std::string_view::npos)
+            << "a stream nobody set a visibility on is watched as before";
+        return;
+    }
+    FAIL() << "no live_stream_visibility migration";
+}
+
 } // namespace

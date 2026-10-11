@@ -129,9 +129,11 @@ room is in use (a room nothing used may be forgotten, below):
   forgotten, at the latest within a few reaper passes; the next join of it records it again, as
   the kind that join names, which may be the other closed kind. A stream's live chat is never
   forgotten.
-- **A stream's live chat** admits anyone. Only the server opens one, and only a stream's room
-  can be one; a client cannot. It is joined by the stream's name (see
-  [A stream's live chat](#a-streams-live-chat)), and refused with `not_live` until it is open.
+- **A stream's live chat** admits whoever may watch the stream ([live.md](live.md#who-may-watch)),
+  by default anyone signed in. Only the server opens one, and only a stream's room can be one; a
+  client cannot. It is joined by the stream's name (see
+  [A stream's live chat](#a-streams-live-chat)), and refused with `not_live` until it is open,
+  and to anyone the stream's visibility does not admit.
 
 Members change their lists with the commands below ([Changing member lists](#changing-member-lists));
 operators may still change them in the database (RUNBOOK). A member removed from the list,
@@ -257,8 +259,11 @@ As `user-1`:
   `room` is refused with `bad_room`: a live chat is joined only by its stream.
 - **Open once the stream's chat is opened.** The server side records a stream's room live
   before viewers join (RUNBOOK, "Chat rooms"). Until then a stream join is refused with
-  `not_live`; retry when the stream is on air. Once open it admits anyone signed in, until the
-  stream ends: then it closes to new joins (`not_live` again), while sockets already in it stay
+  `not_live`; retry when the stream is on air. Once open it admits whoever may watch the
+  stream ([live.md](live.md#who-may-watch)), by default anyone signed in, and answers anyone
+  else `not_live`, as for a stream not on air; the stream's visibility is read at each join, and
+  a socket already in the chat stays when it changes, until it leaves. When the stream ends the
+  chat closes to new joins (`not_live` again), while sockets already in it stay
   until they leave (ADR-0092).
 - **Always lossy.** Every viewer is lossy, whatever its `delivery`, and is never closed for being
   behind. A viewer more than 64 KiB behind is sent nothing new until its connection has caught
@@ -298,7 +303,7 @@ As `user-1`:
 | `bad_call` | A `call_decline`, `call_cancel`, `call_end`, `call_leave` or `call_expel` whose `call` is not a canonical lowercase UUID | Fix the client |
 | `not_callable`, `call_failed`, `calls_disabled`, `no_call`, `ring_limited`, `expelled`, `call_full` | A call was refused; see [calls.md](calls.md#errors) | As there |
 | `not_member` | The room has a member list without you; also sent unasked when you are removed from a room you are in, which you then no longer receive. For a member-list command: you are not on the room's list | Do not retry |
-| `not_live` | A `stream` join of a stream whose chat the server has not opened | Retry once the stream is on air |
+| `not_live` | A `stream` join of a stream whose chat the server has not opened, or one whose visibility does not admit the user | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |
 | `not_joined` | `send` or `history` for a room this connection has not joined | Join first |
 | `too_many_rooms` | This connection already holds 64 rooms | Use another connection, or leave some rooms by reconnecting |

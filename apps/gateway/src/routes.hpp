@@ -23,6 +23,7 @@ enum class RouteId : std::uint8_t {
     LivePlaylist,
     CreateStream,
     StreamStatus,
+    UpdateStream,
     StreamTicket,
     StartStream,
     EndStream,
@@ -32,12 +33,13 @@ enum class RouteId : std::uint8_t {
     ListServiceVideos,
     UpdateServiceVideo,
     DeleteServiceVideo,
+    UpdateServiceStream,
     Healthz,
     Readyz,
     Metrics,
 };
 
-inline constexpr std::array<http::Route<RouteId>, 28> kRoutes{{
+inline constexpr std::array<http::Route<RouteId>, 30> kRoutes{{
     {.method = http::Method::Post, .pattern = "/api/v1/uploads", .id = RouteId::CreateUpload},
     {.method = http::Method::Patch, .pattern = "/api/v1/uploads/{id}", .id = RouteId::AppendChunk},
     {.method = http::Method::Head, .pattern = "/api/v1/uploads/{id}", .id = RouteId::UploadOffset},
@@ -67,6 +69,8 @@ inline constexpr std::array<http::Route<RouteId>, 28> kRoutes{{
     // The stream service (ADR-0092).
     {.method = http::Method::Post, .pattern = "/api/v1/live", .id = RouteId::CreateStream},
     {.method = http::Method::Get, .pattern = "/api/v1/live/{id}", .id = RouteId::StreamStatus},
+    // Who may watch a stream: its owner sets it (ADR-0105).
+    {.method = http::Method::Patch, .pattern = "/api/v1/live/{id}", .id = RouteId::UpdateStream},
     {.method = http::Method::Post,
      .pattern = "/api/v1/live/{id}/ticket",
      .id = RouteId::StreamTicket},
@@ -94,6 +98,10 @@ inline constexpr std::array<http::Route<RouteId>, 28> kRoutes{{
     {.method = http::Method::Delete,
      .pattern = "/api/v1/service/videos/{id}",
      .id = RouteId::DeleteServiceVideo},
+    // The operator's backend sets who may watch any stream (ADR-0105).
+    {.method = http::Method::Patch,
+     .pattern = "/api/v1/service/live/{id}",
+     .id = RouteId::UpdateServiceStream},
     {.method = http::Method::Get, .pattern = "/api/v1/healthz", .id = RouteId::Healthz},
     {.method = http::Method::Get, .pattern = "/api/v1/readyz", .id = RouteId::Readyz},
     // The names a kubelet or a load balancer probes by default, outside the API prefix.
@@ -135,6 +143,8 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "create_stream";
     case RouteId::StreamStatus:
         return "stream_status";
+    case RouteId::UpdateStream:
+        return "update_stream";
     case RouteId::StreamTicket:
         return "stream_ticket";
     case RouteId::StartStream:
@@ -153,6 +163,8 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "update_service_video";
     case RouteId::DeleteServiceVideo:
         return "delete_service_video";
+    case RouteId::UpdateServiceStream:
+        return "update_service_stream";
     case RouteId::Healthz:
         return "healthz";
     case RouteId::Readyz:
@@ -183,6 +195,7 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::LivePlaylist:
     case RouteId::CreateStream:
     case RouteId::StreamStatus:
+    case RouteId::UpdateStream:
     case RouteId::StreamTicket:
     case RouteId::StartStream:
     case RouteId::EndStream:
@@ -192,6 +205,7 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::ListServiceVideos:
     case RouteId::UpdateServiceVideo:
     case RouteId::DeleteServiceVideo:
+    case RouteId::UpdateServiceStream:
         return true;
     }
     return true;

@@ -62,7 +62,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0056](0056-presence-over-the-room-plane.md) | Presence over the room plane, with a grace and a lease | Accepted, amended by 0096 |
 | [0057](0057-the-probe-window-follows-the-configuration.md) | The packager's probe window follows its configuration | Accepted |
 | [0058](0058-group-calls-interfaces-now-implementation-deferred.md) | Group calls: interfaces now, implementation deferred | Accepted, implemented by 0095 |
-| [0059](0059-live-playlists-through-a-single-flight-cache.md) | Live playlists are served from a single-flight cache, to any signed-in viewer | Accepted |
+| [0059](0059-live-playlists-through-a-single-flight-cache.md) | Live playlists are served from a single-flight cache, to any signed-in viewer | Accepted, who may watch amended by 0105 |
 | [0060](0060-pump-staging-is-appended-to-and-bounded.md) | Pump staging is appended to, bounded, and overflow is 413 | Accepted |
 | [0061](0061-cmake-3-28-presets-v6-and-the-ci-test-preset.md) | CMake 3.28, presets version 6, and a `ci` test preset | Accepted |
 | [0062](0062-ulw-sanitize-is-the-one-sanitizer-target.md) | `ulw_sanitize` is the one sanitizer interface target | Accepted |
@@ -108,3 +108,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0102](0102-the-key-directory-is-served-and-every-device-is-a-member.md) | The key directory is served on the chat socket, a device keeps a last-resort package, and every device is its own member | Accepted |
 | [0103](0103-the-worker-publishes-from-a-pool-on-kept-connections.md) | The worker publishes segments from a bounded pool of threads, each keeping one connection to the store | Accepted |
 | [0104](0104-ci-runs-on-hosted-runners-and-soaks-relay.md) | CI runs on hosted runners only, and a soak longer than a hosted job runs as a relay of segments judged together | Accepted |
+| [0105](0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md) | A live stream's visibility is set by the operator's backend or its owner and enforced here, before the playlist cache, from a short-lived answer per stream and per room member | Accepted |

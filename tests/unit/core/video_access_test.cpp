@@ -3,6 +3,7 @@
 #include "core/models/video.hpp"
 #include "core/models/video_access.hpp"
 #include "core/models/visibility.hpp"
+#include "core/ports/live.hpp"
 
 #include <array>
 #include <gtest/gtest.h>
@@ -142,6 +143,30 @@ TEST(VideoAccess, AnUploadInProgressStaysTheUploadersWhateverElseHolds) {
                       VideoAccess::None);
         }
     }
+}
+
+// A live stream's audience (ADR-0105): the video rule's forms, for a stream in any state.
+TEST(MayWatch, TheOwnerAlwaysAndOthersAsTheVisibilitySays) {
+    core::ports::LiveStream stream{.id = *core::LiveStreamId::parse(kRoom),
+                                   .owner = user("alice"),
+                                   .state = core::ports::LiveState::Live,
+                                   .passphrase = {},
+                                   .created_at = {},
+                                   .live_at = std::nullopt,
+                                   .ended_at = std::nullopt,
+                                   .ended_by = std::nullopt,
+                                   .recording = std::nullopt};
+    EXPECT_EQ(stream.visibility, Visibility::unlisted()) << "every stream starts unlisted";
+    EXPECT_TRUE(core::ports::may_watch(stream, user("bob"), false));
+    stream.visibility = Visibility{};
+    EXPECT_TRUE(core::ports::may_watch(stream, user("alice"), false));
+    EXPECT_FALSE(core::ports::may_watch(stream, user("bob"), true)) << "private: nobody else";
+    stream.visibility = Visibility::room(room());
+    EXPECT_TRUE(core::ports::may_watch(stream, user("bob"), true));
+    EXPECT_FALSE(core::ports::may_watch(stream, user("bob"), false));
+    EXPECT_TRUE(core::ports::may_watch(stream, user("alice"), false));
+    stream.state = core::ports::LiveState::Ended;
+    EXPECT_FALSE(core::ports::may_watch(stream, user("carol"), false));
 }
 
 } // namespace

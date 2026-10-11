@@ -69,6 +69,8 @@ std::string_view to_string(LiveFailure f) noexcept {
         return "unavailable";
     case LiveFailure::Internal:
         return "internal";
+    case LiveFailure::NotMember:
+        return "not a member";
     }
     return "internal";
 }
@@ -127,6 +129,8 @@ LiveFailure LiveStreams::store_failure(LiveStoreError e) noexcept {
     case LiveStoreError::Corrupt:
         ++counters_.store_failures;
         return LiveFailure::Internal;
+    case LiveStoreError::NotMember:
+        return LiveFailure::NotMember;
     }
     return LiveFailure::Internal;
 }
@@ -506,6 +510,236 @@ void LiveStreams::status(const core::LiveStreamId& id, LiveDone<Stream> done) {
             }
             done(std::move(*found));
         });
+}
+
+// A fresh read, not the watch cache: the status says where the stream stands now. A viewer who
+// may not watch it learns nothing of it, not even that it exists.
+void LiveStreams::status(const core::LiveStreamId& id, const core::UserId& viewer,
+                         LiveDone<Stream> done) {
+    ++pending_;
+    deps_.store.find(id, [this, viewer, done = std::move(done)](
+                             core::ports::LiveResult<Stream> found) mutable noexcept {
+        if (!found) {
+            --pending_;
+            done(std::unexpected(store_failure(found.error())));
+            return;
+        }
+        remember(found->id, *found);
+        Stream stream = std::move(*found);
+        if (stream.owner == viewer || stream.visibility.kind() != core::VisibilityKind::Room) {
+            --pending_;
+            if (!core::ports::may_watch(stream, viewer, false)) {
+                done(std::unexpected(LiveFailure::NotFound));
+                return;
+            }
+            done(std::move(stream));
+            return;
+        }
+        Stream held = stream;
+        membership(stream, viewer,
+                   [this, stream = std::move(held), viewer, done = std::move(done)](
+                       std::expected<bool, LiveFailure> member) mutable noexcept {
+                       --pending_;
+                       if (!member) {
+                           done(std::unexpected(member.error()));
+                           return;
+                       }
+                       if (!core::ports::may_watch(stream, viewer, *member)) {
+                           done(std::unexpected(LiveFailure::NotFound));
+                           return;
+                       }
+                       done(std::move(stream));
+                   });
+    });
+}
+
+void LiveStreams::set_visibility(const core::LiveStreamId& id,
+                                 const std::optional<core::UserId>& owner,
+                                 const core::Visibility& visibility, LiveDone<Stream> done) {
+    ++pending_;
+    deps_.store.set_visibility(
+        id, owner, visibility,
+        [this, id, done = std::move(done)](core::ports::LiveResult<Stream> set) mutable noexcept {
+            --pending_;
+            if (!set) {
+                done(std::unexpected(store_failure(set.error())));
+                return;
+            }
+            // This process's viewers see the change at their next request; other processes'
+            // within watch_fresh.
+            forget(id);
+            remember(id, *set);
+            deps_.log.info(
+                "live stream visibility set",
+                {{"stream", id.to_string()}, {"visibility", set->visibility.to_string()}});
+            done(std::move(*set));
+        });
+}
+
+std::optional<Watch> LiveStreams::decide(const Row& row, const core::UserId& viewer) {
+    if (!row) {
+        return Watch::Unrecorded;
+    }
+    const Stream& stream = *row;
+    if (stream.owner == viewer || stream.visibility.kind() != core::VisibilityKind::Room) {
+        return core::ports::may_watch(stream, viewer, false) ? Watch::Allowed : Watch::Refused;
+    }
+    const auto known = members_.find({stream.id.to_string(), std::string(viewer.view())});
+    if (known == members_.end() || deps_.clock.now() >= known->second.fresh_until) {
+        return std::nullopt;
+    }
+    return core::ports::may_watch(stream, viewer, known->second.member) ? Watch::Allowed
+                                                                        : Watch::Refused;
+}
+
+std::optional<Watch> LiveStreams::known_watch(std::string_view name, const core::UserId& viewer) {
+    const auto id = core::LiveStreamId::parse(name);
+    // Not a name the service gives a stream: one run outside it.
+    if (!id) {
+        return Watch::Unrecorded;
+    }
+    const auto it = watched_.find(id->to_string());
+    if (it == watched_.end() || deps_.clock.now() >= it->second.fresh_until) {
+        return std::nullopt;
+    }
+    return decide(it->second.row, viewer);
+}
+
+void LiveStreams::watch(std::string_view name, const core::UserId& viewer, LiveDone<Watch> done) {
+    ++pending_;
+    const auto id = core::LiveStreamId::parse(name);
+    // What known_watch would have answered: still later, as every answer here is.
+    if (!id) {
+        after(core::Millis{0}, [this, done = std::move(done)]() mutable noexcept {
+            --pending_;
+            done(Watch::Unrecorded);
+        });
+        return;
+    }
+    watched_row(*id, [this, viewer, done = std::move(done)](
+                         std::expected<Row, LiveFailure> row) mutable noexcept {
+        if (!row) {
+            --pending_;
+            done(std::unexpected(row.error()));
+            return;
+        }
+        if (const auto known = decide(*row, viewer)) {
+            --pending_;
+            done(*known);
+            return;
+        }
+        const Stream stream = **row;
+        membership(stream, viewer,
+                   [this, stream, viewer, done = std::move(done)](
+                       std::expected<bool, LiveFailure> member) mutable noexcept {
+                       --pending_;
+                       if (!member) {
+                           done(std::unexpected(member.error()));
+                           return;
+                       }
+                       done(core::ports::may_watch(stream, viewer, *member) ? Watch::Allowed
+                                                                            : Watch::Refused);
+                   });
+    });
+}
+
+void LiveStreams::watched_row(const core::LiveStreamId& id, RowDone done) {
+    std::string key = id.to_string();
+    if (const auto it = watched_.find(key);
+        it != watched_.end() && deps_.clock.now() < it->second.fresh_until) {
+        // Known already: answered on a later turn all the same.
+        after(core::Millis{0}, [row = it->second.row, done = std::move(done)]() mutable noexcept {
+            done(std::move(row));
+        });
+        return;
+    }
+    auto [waiting, first] = reading_rows_.try_emplace(key);
+    waiting->second.push_back(std::move(done));
+    if (!first) {
+        return;
+    }
+    deps_.store.find(id, [this, id, key = std::move(key)](
+                             core::ports::LiveResult<Stream> found) mutable noexcept {
+        std::expected<Row, LiveFailure> answer;
+        if (found) {
+            answer = Row{std::move(*found)};
+        } else if (found.error() == core::ports::LiveStoreError::NotFound) {
+            answer = Row{};
+        } else {
+            answer = std::unexpected(store_failure(found.error()));
+        }
+        if (answer) {
+            remember(id, *answer);
+        }
+        auto node = reading_rows_.extract(key);
+        if (node.empty()) {
+            return;
+        }
+        for (RowDone& waiter : node.mapped()) {
+            waiter(answer);
+        }
+    });
+}
+
+void LiveStreams::membership(const Stream& stream, const core::UserId& viewer, MemberDone done) {
+    const std::optional<core::RoomId>& room = stream.visibility.room_id();
+    if (!room) {
+        after(core::Millis{0}, [done = std::move(done)]() mutable noexcept { done(false); });
+        return;
+    }
+    std::pair<std::string, std::string> key{stream.id.to_string(), std::string(viewer.view())};
+    auto [waiting, first] = reading_members_.try_emplace(key);
+    waiting->second.push_back(std::move(done));
+    if (!first) {
+        return;
+    }
+    deps_.store.shares_room(
+        *room, stream.owner, viewer,
+        [this, key = std::move(key)](core::ports::LiveResult<bool> shared) mutable noexcept {
+            std::expected<bool, LiveFailure> answer =
+                shared ? std::expected<bool, LiveFailure>(*shared)
+                       : std::unexpected(store_failure(shared.error()));
+            if (answer) {
+                if (members_.size() >= settings_.watch_viewers && !members_.contains(key)) {
+                    const core::MonoTime now = deps_.clock.now();
+                    std::erase_if(members_,
+                                  [now](const auto& m) { return now >= m.second.fresh_until; });
+                    if (members_.size() >= settings_.watch_viewers) {
+                        members_.erase(members_.begin());
+                    }
+                }
+                members_.insert_or_assign(
+                    key, Membership{.member = *answer,
+                                    .fresh_until = deps_.clock.now() + settings_.watch_fresh});
+            }
+            auto node = reading_members_.extract(key);
+            if (node.empty()) {
+                return;
+            }
+            for (MemberDone& waiter : node.mapped()) {
+                waiter(answer);
+            }
+        });
+}
+
+void LiveStreams::remember(const core::LiveStreamId& id, Row row) {
+    std::string key = id.to_string();
+    if (watched_.size() >= settings_.watch_streams && !watched_.contains(key)) {
+        const core::MonoTime now = deps_.clock.now();
+        std::erase_if(watched_, [now](const auto& w) { return now >= w.second.fresh_until; });
+        if (watched_.size() >= settings_.watch_streams) {
+            watched_.erase(watched_.begin());
+        }
+    }
+    watched_.insert_or_assign(std::move(key),
+                              Remembered{.row = std::move(row),
+                                         .fresh_until = deps_.clock.now() + settings_.watch_fresh});
+}
+
+void LiveStreams::forget(const core::LiveStreamId& id) {
+    const std::string key = id.to_string();
+    watched_.erase(key);
+    std::erase_if(members_, [&key](const auto& m) { return m.first.first == key; });
 }
 
 void LiveStreams::publisher_left(const core::LiveStreamId& id, LiveDone<Departure> done) {

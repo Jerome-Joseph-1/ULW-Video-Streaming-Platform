@@ -163,10 +163,43 @@ public:
         });
     }
 
+    void set_visibility(const core::LiveStreamId& id, const std::optional<core::UserId>& owner,
+                        const core::Visibility& visibility,
+                        core::ports::LiveCallback<LiveStream> done) override {
+        ++calls;
+        reply(std::move(done), [&]() -> core::ports::LiveResult<LiveStream> {
+            auto found = row(id);
+            if (!found || (owner && !(found->owner == *owner))) {
+                return std::unexpected(LiveStoreError::NotFound);
+            }
+            const std::optional<core::RoomId>& room = visibility.room_id();
+            if (room && !members.contains({room->to_string(), std::string(found->owner.view())})) {
+                return std::unexpected(LiveStoreError::NotMember);
+            }
+            LiveStream& r = rows.at(id.to_string());
+            r.visibility = visibility;
+            return r;
+        });
+    }
+
+    void shares_room(const core::RoomId& room, const core::UserId& owner,
+                     const core::UserId& viewer, core::ports::LiveCallback<bool> done) override {
+        ++calls;
+        ++membership_reads;
+        reply(std::move(done), [&]() -> core::ports::LiveResult<bool> {
+            const std::string r = room.to_string();
+            return members.contains({r, std::string(viewer.view())}) &&
+                   members.contains({r, std::string(owner.view())});
+        });
+    }
+
     // Every call fails with this while it is set.
     std::optional<LiveStoreError> fail;
     std::map<std::string, LiveStream> rows;
+    // chat_members: (room id, user id).
+    std::set<std::pair<std::string, std::string>> members;
     std::size_t calls = 0;
+    std::size_t membership_reads = 0;
 
 private:
     [[nodiscard]] core::ports::LiveResult<LiveStream> row(const core::LiveStreamId& id) const {

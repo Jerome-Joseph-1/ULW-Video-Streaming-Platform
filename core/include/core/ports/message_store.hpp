@@ -318,7 +318,9 @@ public:
     virtual void members(const RoomId& room, std::optional<UserId> after, std::size_t limit,
                          MessageCallback<std::vector<UserId>> done) = 0;
     // Whether `user` may be in the room, by the room's kind: a direct or group chat admits only
-    // its members, even while it has none; a stream's live chat admits anyone. A join never widens
+    // its members, even while it has none; a stream's live chat admits whoever the stream's
+    // visibility admits (ADR-0105), anyone for a stream it has no record of, and answers anyone
+    // else NotLive, as for a stream not on air. A join never widens
     // who may be in a room: it records only a closed kind, on a room that has none recorded, and
     // otherwise takes the recorded kind. It answers NotLive, and records nothing, when it asks for
     // the open kind of a room that is not recorded as open; only record_live opens a room. With
