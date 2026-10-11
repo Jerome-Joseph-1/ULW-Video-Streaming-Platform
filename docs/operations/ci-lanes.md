@@ -106,31 +106,23 @@ commit still gets the run the publish needs; a `batch/**` run never satisfies it
 
 ## Where jobs run
 
-<!-- .github/workflows/ci.yml (the runs-on of every job, the "trusted-runner" anchor), .github/workflows/publish-images.yml (on.workflow_run) -->
+<!-- .github/workflows/ci.yml (the runs-on of every job), .github/workflows/publish-images.yml (on.workflow_run) -->
 
-The self-hosted host is one machine with four runners (`vmi3627724`, `-2`, `-3`, `-4`), so four
-jobs at a time share its cores. On 2026-10-09/10 the full lane of four pull requests and two
-batches queued about 45 jobs on it: a full-tree clang-tidy shard took 2-2.5 h and hit the lint
-job's 150-minute limit, main's own run on the #166 merge started none of its self-hosted jobs in
-five hours, and publish-images, which then ran beside ci and waited for it, gave up twice
-(285 min) with nothing published. Three changes followed:
+Every job runs on a GitHub-hosted `ubuntu-24.04` runner, a fresh machine per job, whatever the
+event (ADR-0104). The repository is public, so hosted minutes cost nothing. The jobs that need
+io_uring (`build-test`, `tsan`, `reactor-matrix`, `autobahn`) get it from the runner's kernel;
+`reactor-matrix` runs `tools/io_uring_probe.c` first, so a kernel that cannot serve the reactor
+is named as the cause.
+
+Until 2026-10-11 those jobs ran on one self-hosted machine with four runners. On 2026-10-09/10
+the full lane of four pull requests and two batches queued about 45 jobs on it: a full-tree
+clang-tidy shard took 2-2.5 h, main's run on the #166 merge started none of its jobs in five
+hours, and publish-images, which then ran beside ci and waited for it, gave up twice. The
+machine was removed; of the changes made then, one stays:
 
 | Change | Why |
 |---|---|
-| `lint` (the four clang-tidy shards and the quick checks), `secrets` and `manifests` run on a hosted runner, whatever the event | None needs the host: they compile nothing, use no io_uring and lock no memory. The repository is public, so hosted minutes cost nothing. A shard takes 15-24 min there; lint's limit is 60 min again. Forks' pull requests ran them there already |
-| Main's runs (its pushes and the nightly) may take any of the host's runners; every other run only those carrying the labels in the repository variable `ULW_SHARED_RUNNERS` (a JSON list, `["self-hosted","ulw-shared"]`) | A runner without the `ulw-shared` label serves main alone, so main's run, and the publish that waits on it, never queue behind pull requests and batches. With the variable unset every run takes any runner, as before |
-| publish-images starts on ci's success (`workflow_run`, for a run of a push to main) instead of beside it | Nothing waits on ci any more, so a ci run of any length gets its commit published; a successful re-run of a failed run publishes it too. The images now come about 45-60 min after ci, the build no longer overlapping it |
-
-The jobs left on the host are the ones that need its kernel: `build-test`, `tsan`,
-`reactor-matrix`, `autobahn` and `fuzz`. A pull request from a fork still runs them on a hosted
-runner, never on the host.
-
-**Reserving a runner for main** (the repository's admins): on GitHub, Settings, Actions,
-Runners, add the label `ulw-shared` to three of the four runners (each runner's `...` menu,
-"Edit labels"), leaving one without it; then Settings, Secrets and variables, Actions,
-Variables, add `ULW_SHARED_RUNNERS` with the value `["self-hosted","ulw-shared"]`. In that
-order: with the variable set and no runner labelled, pull requests' and batches' jobs wait for a
-runner that never comes. Deleting the variable undoes it.
+| publish-images starts on ci's success (`workflow_run`, for a run of a push to main) instead of beside it | Nothing waits on ci, so a ci run of any length gets its commit published; a successful re-run of a failed run publishes it too |
 
 ## Consequences
 

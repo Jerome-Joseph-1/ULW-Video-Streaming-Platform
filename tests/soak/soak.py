@@ -8,6 +8,7 @@ stayed flat.
 
     tests/soak/soak.py --build build/ci --hours 6 --out /some/dir
     tests/soak/soak.py --rejudge /some/dir/samples.csv      # a finished run, again
+    tests/soak/soak.py --rejudge a/samples.csv b/samples.csv   # a relay's segments, together
 
 The binaries are copied into <out>/bin first, so a rebuild of the tree does not change what a
 run in progress is measuring. Exit status: 0 flat, 1 not flat, 2 the run itself failed or is
@@ -854,17 +855,28 @@ def proc_sample(pid):
     return rss, fds
 
 
+def fit_within(series):
+    """Least-squares slope per hour shared by several series of (hours, value) points, each with
+    an intercept of its own, and its standard error. A segment of a relay soak (ADR-0104) is a
+    process of its own, whose level starts wherever its allocator puts it; a leak adds the same
+    amount an hour of work in every one of them, which is the slope they share. One series is
+    the plain fit."""
+    series = [s for s in series if s]
+    n = sum(len(s) for s in series)
+    means = [(sum(x for x, _ in s) / len(s), sum(y for _, y in s) / len(s)) for s in series]
+    sxx = sum((x - mx) ** 2 for s, (mx, _) in zip(series, means) for x, _ in s)
+    dof = n - len(series) - 1
+    if sxx == 0 or dof < 1:
+        return 0.0, float("inf")
+    slope = sum((x - mx) * (y - my) for s, (mx, my) in zip(series, means) for x, y in s) / sxx
+    residual = sum((y - my - slope * (x - mx)) ** 2
+                   for s, (mx, my) in zip(series, means) for x, y in s)
+    return slope, math.sqrt(residual / dof / sxx)
+
+
 def fit(points):
     """Least-squares slope per hour of (hours, value) points, and its standard error."""
-    n = len(points)
-    mx = sum(x for x, _ in points) / n
-    my = sum(y for _, y in points) / n
-    sxx = sum((x - mx) ** 2 for x, _ in points)
-    if sxx == 0 or n < 3:
-        return 0.0, float("inf")
-    slope = sum((x - mx) * (y - my) for x, y in points) / sxx
-    residual = sum((y - (my + slope * (x - mx))) ** 2 for x, y in points)
-    return slope, math.sqrt(residual / (n - 2) / sxx)
+    return fit_within([points])
 
 
 def per_hour(window, key):
@@ -872,38 +884,90 @@ def per_hour(window, key):
     return (window[-1][key] - window[0][key]) / hours if hours > 0 else 0.0
 
 
+def span_hours(window):
+    return (window[-1]["elapsed_min"] - window[0]["elapsed_min"]) / 60 if window else 0.0
+
+
+def rate(windows, key):
+    """Units of `key` an hour over several windows together; each segment's counters start
+    again at zero, so each contributes its own rise."""
+    hours = sum(span_hours(w) for w in windows)
+    return sum(w[-1][key] - w[0][key] for w in windows if w) / hours if hours > 0 else 0.0
+
+
+def segments(rows, warmup=WARMUP_MINUTES):
+    """(warm-up rows, judged rows) of each segment in `rows`, in the order they first appear.
+    Rows from --rejudge's files carry the segment they came from, one per process lifetime;
+    rows without one are a single segment. Each segment has a warm-up of its own: a fresh
+    process grows to its working size again."""
+    order = {}
+    for r in rows:
+        order.setdefault(r.get("segment", 0), []).append(r)
+    return [([r for r in part if r["elapsed_min"] < warmup],
+             [r for r in part if r["elapsed_min"] >= warmup]) for part in order.values()]
+
+
 def split(rows):
     return ([r for r in rows if r["elapsed_min"] < WARMUP_MINUTES],
             [r for r in rows if r["elapsed_min"] >= WARMUP_MINUTES])
 
 
+def window_line(windows, warmup):
+    """The judged window, and its segments when there is more than one."""
+    count = sum(len(w) for w in windows)
+    hours = sum(span_hours(w) for w in windows)
+    line = f"window: {count} samples over {hours:.2f} h after a {warmup} min warm-up"
+    if len(windows) > 1:
+        line += (f", in {len(windows)} segments of up to "
+                 f"{max(span_hours(w) for w in windows):.2f} h each")
+    return line
+
+
+def fd_check(parts, windows, key, in_flight):
+    """The descriptors' verdict, as judge() states it, over one segment or several: the fitted
+    rise over the longest any one process was judged, against what may be in flight or the
+    widest range a warm-up showed. Returns (ok, report line)."""
+    fds = [[(r["elapsed_min"] / 60, r[key]) for r in w] for w in windows]
+    fd_slope, fd_se = fit_within(fds)
+    fd_rise = (fd_slope + Z95 * fd_se) * max(span_hours(w) for w in windows)
+    warm_range = max((max(v) - min(v) for v in ([r[key] for r in warm] for warm, _ in parts)
+                      if v), default=0)
+    bound = max(in_flight, warm_range)
+    values = [v for s in fds for _, v in s]
+    ok = fd_rise < bound
+    return ok, (f"first {fds[0][0][1]}, last {fds[-1][-1][1]}, min {min(values)}, max "
+                f"{max(values)}, rise over the window at most {fd_rise:+.2f}, bound {bound}: "
+                f"{'flat' if ok else 'NOT FLAT'}")
+
+
 def judge(rows, clients):
-    """Returns (passed, report lines) for the samples in `rows`."""
-    warm, window = split(rows)
-    if len(window) < 10:
+    """Returns (passed, report lines) for the samples in `rows`, of one run or of a relay's
+    segments (segments())."""
+    parts = segments(rows)
+    windows = [w for _, w in parts if w]
+    if sum(len(w) for w in windows) < 10:
         return False, ["too few samples after the warm-up to judge"]
     report = []
     passed = True
-    hours = (window[-1]["elapsed_min"] - window[0]["elapsed_min"]) / 60
-    rates = {"request": per_hour(window, "requests"),
-             "chunk request": per_hour(window, "chunks") if "chunks" in window[0] else None,
-             "upload session": per_hour(window, "upload_sessions"),
-             "job": per_hour(window, "uploads_committed")}
-    report.append(f"window: {len(window)} samples over {hours:.2f} h after a "
-                  f"{WARMUP_MINUTES} min warm-up; per hour: " +
+    rates = {"request": rate(windows, "requests"),
+             "chunk request": (rate(windows, "chunks")
+                               if all("chunks" in w[0] for w in windows) else None),
+             "upload session": rate(windows, "upload_sessions"),
+             "job": rate(windows, "uploads_committed")}
+    report.append(window_line(windows, WARMUP_MINUTES) + "; per hour: " +
                   ", ".join(f"{v:.0f} {k}s" for k, v in rates.items() if v is not None))
     units = {"gateway": [("request", PRODUCTION_REQUESTS_PER_S),
                          ("chunk request", PRODUCTION_REQUESTS_PER_S),
                          ("upload session", PRODUCTION_UPLOADS_PER_S)],
              "worker": [("job", PRODUCTION_JOBS_PER_S)]}
     for proc in ["gateway", "worker"]:
-        rss = [(r["elapsed_min"] / 60, r[f"{proc}_rss_kb"] * 1024) for r in window]
-        peak = max(v for _, v in rss)
-        slope, se = fit(rss)
+        rss = [[(r["elapsed_min"] / 60, r[f"{proc}_rss_kb"] * 1024) for r in w] for w in windows]
+        peak = max(v for s in rss for _, v in s)
+        slope, se = fit_within(rss)
         upper = slope + Z95 * se
-        report.append(f"{proc} rss: first {rss[0][1] / MIB:.1f} MiB, last {rss[-1][1] / MIB:.1f} "
-                      f"MiB, peak {peak / MIB:.1f} MiB, slope {slope / 1e3:+.1f} KB/h, 95% "
-                      f"upper end {upper / 1e3:+.1f} KB/h")
+        report.append(f"{proc} rss: first {rss[0][0][1] / MIB:.1f} MiB, last "
+                      f"{rss[-1][-1][1] / MIB:.1f} MiB, peak {peak / MIB:.1f} MiB, slope "
+                      f"{slope / 1e3:+.1f} KB/h, 95% upper end {upper / 1e3:+.1f} KB/h")
         for unit, production in units[proc]:
             bound = (MEMORY_HIGH[proc] - peak) / (production * MONTH_SECONDS)
             if rates[unit] is None:
@@ -919,19 +983,11 @@ def judge(rows, clients):
             passed = passed and ok
             report.append(f"  per {unit}: at most {leak:.3f} B, bound {bound:.3f} B: "
                           f"{'flat' if ok else 'NOT SHOWN FLAT'}")
-        fds = [(r["elapsed_min"] / 60, r[f"{proc}_fds"]) for r in window]
-        fd_slope, fd_se = fit(fds)
-        fd_rise = (fd_slope + Z95 * fd_se) * hours
-        warm_fds = [r[f"{proc}_fds"] for r in warm] or [0]
         in_flight = (2 * (clients + 1) + SLOW_MAX + UPLOAD_SLOTS + 1 if proc == "gateway"
                      else WORKER_FD_NOISE)
-        fd_bound = max(in_flight, max(warm_fds) - min(warm_fds))
-        fd_ok = fd_rise < fd_bound
+        fd_ok, fd_line = fd_check(parts, windows, f"{proc}_fds", in_flight)
         passed = passed and fd_ok
-        report.append(f"{proc} fds: first {fds[0][1]}, last {fds[-1][1]}, min "
-                      f"{min(v for _, v in fds)}, max {max(v for _, v in fds)}, rise over the "
-                      f"window at most {fd_rise:+.2f}, bound {fd_bound}: "
-                      f"{'flat' if fd_ok else 'NOT FLAT'}")
+        report.append(f"{proc} fds: {fd_line}")
     return passed, report
 
 
@@ -1098,23 +1154,52 @@ def load_samples(path):
     return rows
 
 
-def rejudge(path, clients):
-    rows = load_samples(path)
+def load_segments(paths, loader=None):
+    """The rows of each samples.csv in `paths`, each file a segment of its own (segments()),
+    and the soundness its run recorded beside it: (rows, [(path, problem)]) for every segment
+    whose result.json says it failed, left a load path unexercised or exited uncleanly, or
+    that has none when several are judged together."""
+    rows, unsound = [], []
+    for index, path in enumerate(paths):
+        rows += [{**r, "segment": index} for r in (loader or load_samples)(path)]
+        result = Path(path).parent / "result.json"
+        if result.exists():
+            recorded = json.loads(result.read_text())
+            if not recorded.get("sound"):
+                unsound.append((path, recorded.get("why") or "not sound"))
+        elif len(paths) > 1:
+            unsound.append((path, "no result.json beside it"))
+    return rows, unsound
+
+
+def rejudge(paths, clients):
+    """Judges one run again, or the segments of a relay soak together (ADR-0104). Exit status
+    as a run's: 0 flat, 1 not flat, 2 a segment's run itself failed or was invalid."""
+    rows, unsound = load_segments(paths)
     new, new_report = judge(rows, clients)
-    old, old_report = judge_hourly(rows, clients)
-    print(f"{path}: {len(rows)} samples, judged for {clients} clients")
+    print(f"{', '.join(paths)}: {len(rows)} samples in {len(paths)} segment(s), "
+          f"judged for {clients} clients")
     print("per-unit criterion (current):")
     print("\n".join("  " + line for line in new_report))
     print(f"  verdict: {'PASS' if new else 'FAIL'}")
-    print("hourly criterion (replaced):")
-    print("\n".join("  " + line for line in old_report))
-    print(f"  verdict: {'PASS' if old else 'FAIL'}")
-    print("\n".join(shape_report(rows)))
-    # The run's own record of its deliberate faults and the gateway's log, when beside it.
-    here = Path(path).parent
-    if (here / "windows.json").exists() and (here / "gateway.log").exists():
-        windows = json.loads((here / "windows.json").read_text())
-        print("\n".join(errors_report(None, windows, here / "gateway.log")))
+    if len(paths) == 1:
+        old, old_report = judge_hourly(rows, clients)
+        print("hourly criterion (replaced):")
+        print("\n".join("  " + line for line in old_report))
+        print(f"  verdict: {'PASS' if old else 'FAIL'}")
+    for index, path in enumerate(paths):
+        if len(paths) > 1:
+            print(f"segment {index}, {path}:")
+        print("\n".join(shape_report([r for r in rows if r["segment"] == index])))
+        # The run's own record of its deliberate faults and the gateway's log, when beside it.
+        here = Path(path).parent
+        if (here / "windows.json").exists() and (here / "gateway.log").exists():
+            windows = json.loads((here / "windows.json").read_text())
+            print("\n".join(errors_report(None, windows, here / "gateway.log")))
+    for path, why in unsound:
+        print(f"INVALID: segment {path}: {why}; the verdict above is not evidence either way")
+    if unsound:
+        return 2
     return 0 if new else 1
 
 
@@ -1128,7 +1213,8 @@ def main():
     parser.add_argument("--pause", type=float, default=0.3,
                         help="mean seconds between one client's actions")
     parser.add_argument("--interval", type=float, default=60.0, help="seconds between samples")
-    parser.add_argument("--rejudge", metavar="SAMPLES_CSV")
+    parser.add_argument("--rejudge", metavar="SAMPLES_CSV", nargs="+",
+                        help="judge a finished run again, or a relay soak's segments together")
     args = parser.parse_args()
     if args.rejudge:
         return rejudge(args.rejudge, args.clients)
@@ -1248,6 +1334,12 @@ def main():
         summary.append("INVALID: load path never exercised: " + ", ".join(missing) +
                        "; the verdict above is not evidence either way")
     (out / "summary.txt").write_text("\n".join(summary) + "\n")
+    # For judging this run with others (--rejudge, ADR-0104): whether it is evidence at all,
+    # apart from what its samples say.
+    why = failure or ("load path never exercised: " + ", ".join(missing) if missing else None) \
+        or (None if all(v == 0 for v in codes.values()) else f"exit codes after SIGTERM: {codes}")
+    (out / "result.json").write_text(json.dumps({"flat": passed, "sound": why is None,
+                                                 "why": why}) + "\n")
     print("\n".join(summary), flush=True)
     if failure or missing:
         return 2

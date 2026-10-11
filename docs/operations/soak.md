@@ -57,70 +57,36 @@ way. At cleanup the soak empties and deletes its MinIO bucket, as it drops its d
 
 ## On a runner
 
-`.github/workflows/soak-experiment.yml` runs either soak, or both (on two hosted runners at once, or one after the
-other on the self-hosted one), at any ref. Dispatch it from the Actions tab, or with
-`gh workflow run soak-experiment.yml --ref <branch> -f runner=self-hosted -f kind=chat -f hours=6`;
-`runner` is `hosted` (GitHub's) or `self-hosted` (the project's own host), `kind` is `chat`,
-`gateway` or `both`, `hours` from 0.5 to 4.9 on a hosted runner and to 22 on the self-hosted
-one (its job token lives 24 h), and `clients` empty for the scripts' own (64 and 8) or up to 1024. It builds the `ci`
-preset at that ref, runs against a Postgres on the same image as `deploy/local/compose.yaml` and
-that file's MinIO, and uploads `samples.csv`, the summary and the logs as an artifact whatever
-the verdict, for `--rejudge` or a closer look. A hosted job ends at 6 h, build included, so the
-6 h acceptance soak runs on the self-hosted runner.
+`.github/workflows/soak-experiment.yml` runs either soak, or both, at any ref, on GitHub-hosted
+runners. Dispatch it from the Actions tab, or with
+`gh workflow run soak-experiment.yml --ref <branch> -f kind=chat -f hours=6`. Inputs: `kind` is
+`chat`, `gateway` or `both`; `hours` is the load in total, 0.5 to 60; `segment-hours` is the
+longest one job soaks, 0.5 to 5.25; `parallel` is how many segments run at once, 1 to 10; and
+`clients` is empty for the scripts' own (64 and 8) or up to 1024.
 
-The soak runs as root on either: the services are undumpable (`ops::disable_core_dumps`), so
-only root reads the `/proc/<pid>/fd` it samples. On the self-hosted host the setup action
-installs what a hosted image has and the host lacks (cmake, docker compose, rustup 1.29.1 by
-digest), and the job leaves nothing root-owned in its workspace and stops what it started: its
-processes are found by their executable's path in its own runner's directories, never by name,
-since the host's other runners run the same programs for CI. Postgres is published on loopback
-only: a published port would bypass the host's firewall. One soak runs on the host at a time,
-and the two legs of `both` run one after the other there (`max-parallel`), since they share
-15432, compose project `local` and its `ulw-minio`. The workflow's concurrency group is per
-runner kind, so it also serialises hosted runs: a second dispatch for the same kind waits for
-the first, and a third replaces the one still pending, which is then cancelled.
+A hosted job ends at 6 h, so a longer soak runs as a relay (ADR-0104). `build` builds the `ci`
+preset once. `hours` is split into the fewest segments no longer than `segment-hours`, all of
+one length. Each segment runs on a runner of its own, with a Postgres on the same image as
+`deploy/local/compose.yaml` and, for the gateway, that file's MinIO. It starts the binaries
+fresh, soaks them and uploads `samples.csv`, `result.json`, the summary and the logs whatever
+the verdict. `judge` then runs `--rejudge` over every segment's `samples.csv` together. The fit
+shares one slope across all segments and gives each its own intercept, since a fresh process
+starts at its own level. Its exit status is the run's verdict: 0 flat, 1 not flat, 2 a segment
+missing or unsound, which makes the samples no evidence either way. With one segment the verdict
+is exactly a single run's. No process lives longer than one segment, so a fault that comes with
+age rather than with work is out of a relay's reach.
 
-### The self-hosted host
+The 6 h acceptance soak is `hours=6`: two segments of 3 h, side by side with `parallel` 2 or
+more, about 3.5 h in all. Each segment uses one of the account's 20 concurrent hosted jobs;
+`parallel` defaults to 4 so that CI keeps most of them.
 
-The host is not dedicated to the soak: `ci.yml` runs its trusted jobs there as well (pushes to
-`main`, the nightly, manual runs, and pull requests from branches of this repository; never a
-fork's), up to four at once beside a soak, which shares the host's cores with them. Jobs that
-publish a fixed host port or start `deploy/local/compose.yaml`'s fixed-name containers stay on
-hosted runners. What the workflows rely on:
+The soak runs as root: the services are undumpable (`ops::disable_core_dumps`), so only root
+reads the `/proc/<pid>/fd` it samples. Postgres is published on loopback only.
 
-- Ubuntu 24.04 on a virtual machine (not a container), with the `universe` archive enabled,
-  Docker, git 2.18 or later, curl, python3 and iproute2 (`ss`).
-- Four runner instances for this repository, each with the label `self-hosted`, all running as
-  the user `github-runner`, which is in the `docker` group and has password-less sudo for `ALL`
-  (the jobs pass environment to sudo).
-- `/home/github-runner/.cargo/bin` first on each runner's PATH, in its `.path` file (restart the
-  runner after editing it). The setup action installs rustup there if it is missing and fails if
-  another `rustup` comes first.
-- A kernel whose io_uring gives the reactor everything `tools/io_uring_probe.c` checks, at the
-  reactor's ring sizes, to the runner's user under the runner service's limits. The setup
-  action runs the probe first and stops the job there, naming the cause, rather than letting
-  every io_uring test fail on its own. Ubuntu 24.04's 6.8 kernel (6.8.0-146-generic) answers
-  every provided buffer ring registration with EINVAL, so the host runs the HWE kernel:
-  `sudo apt-get install --install-recommends linux-generic-hwe-24.04`, reboot, and check that
-  `uname -r` no longer starts with 6.8.
-- `LimitMEMLOCK=infinity` for every runner service, under `[Service]` in a drop-in such as
-  `/etc/systemd/system/actions.runner.<name>.service.d/memlock.conf`, then
-  `sudo systemctl daemon-reload` and a restart of each runner while it is idle. The HWE kernel
-  charges each reactor's ring (about 400 KiB) to the locked memory of the user that made it,
-  and the four runners are one user: under the default 8 MiB, concurrent jobs' io_uring tests
-  failed with ENOMEM. The setup action stops a job whose runner's limit is not unlimited.
-- The setup action's two sysctls, `kernel.apparmor_restrict_unprivileged_userns=0` (the worker's
-  sandbox) and `vm.mmap_rnd_bits=28` (the sanitizers), which every job sets again; to keep them
-  across reboots, put them in a file under `/etc/sysctl.d/`. Both weaken the host's defaults,
-  one more reason it holds nothing else.
-- Under Settings, Actions, General, "Require approval for all external contributors" for fork
-  pull requests. The workflows send a fork's pull request to a hosted runner, but the fork can
-  edit the workflow and its `runs-on`; only the approval keeps its code off the host.
-- Room on disk for each runner's workspace and build tree, the toolchains and Docker's images,
-  pruned from time to time.
-
-Anyone who can push a branch to this repository, or dispatch a workflow at any ref, runs that
-ref's code as root on the host, so it holds nothing else.
+To judge segments by hand, download the run's artifacts and pass every segment's samples:
+`tests/soak/soak.py --rejudge seg-1/samples.csv seg-2/samples.csv`. A segment whose
+`result.json` says it was not sound, or that has none when several are judged, makes the
+verdict invalid (exit 2).
 
 ## Runs
 
