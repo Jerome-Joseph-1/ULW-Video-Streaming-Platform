@@ -3,6 +3,22 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-11: a user lists their own videos
+
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_own_listing), apps/gateway/src/video_access.cpp (own_video_query), docs/integration/videos-and-playback.md -->
+
+Additive (versioning rule 1): a new route. Nothing a client sends today is answered
+differently.
+
+| Before | Now |
+|---|---|
+| A client could fetch a video only by its id; only the operator's backend could list a user's videos | `GET /api/v1/videos` lists the caller's own videos, newest first, a page at a time, as the service listing does for them ([Your videos](videos-and-playback.md#your-videos)) |
+
+What to do:
+
+- **Clients:** nothing. A "my uploads" screen can read this one page instead of keeping its own
+  list of video ids, and see every upload's progress in one request.
+
 ## 2026-10-09: the worker publishes long videos in minutes, not tens of minutes
 
 <!-- apps/worker/src/job_runner.cpp (publish, upload_all), apps/worker/src/config.cpp (ULW_PUBLISH_CONCURRENCY), infra/curl/src/http.cpp (Session), infra/storage/s3/src/s3_transfer.cpp (upload_session), deploy/kubernetes/base/video-worker/deployment.yaml, docs/adr/0103-the-worker-publishes-from-a-pool-on-kept-connections.md -->

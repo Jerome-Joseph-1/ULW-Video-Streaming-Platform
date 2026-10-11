@@ -356,6 +356,12 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
             return http::HeadVerdict::reject(Status::BadRequest);
         }
         break;
+    case RouteId::ListVideos:
+        req_.own_video_query = own_video_query(head.target);
+        if (head.content_length != 0) {
+            return http::HeadVerdict::reject(Status::BadRequest);
+        }
+        break;
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
     case RouteId::LivePlaylist:
@@ -581,6 +587,7 @@ void Connection::advance() noexcept {
     case RouteId::GrantAccess:
     case RouteId::RevokeAccess:
     case RouteId::DeleteVideo:
+    case RouteId::ListVideos:
     case RouteId::ListServiceVideos:
     case RouteId::DeleteServiceVideo:
         if (req_.message_complete && !req_.started) {
@@ -614,6 +621,8 @@ void Connection::start_bodiless() noexcept {
         start_service_route();
     } else if (req_.route == RouteId::DeleteVideo) {
         start_delete();
+    } else if (req_.route == RouteId::ListVideos) {
+        start_own_listing();
     } else {
         start_lookup();
     }
@@ -985,6 +994,7 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
         submit(ControlOp::Discard);
         return;
     case RouteId::CreateUpload:
+    case RouteId::ListVideos:
     case RouteId::GetVideo:
     case RouteId::UpdateVideo:
     case RouteId::DeleteVideo:
@@ -1305,9 +1315,31 @@ void Connection::on_videos(std::uint64_t request, const core::UserId& owner,
         fail_access(result.error(), "forbidden");
         return;
     }
-    // A user's videos are the operator's business, not a cache's.
+    // A user's videos are theirs and the operator's business, not a cache's.
     respond({.status = Status::Ok, .content_type = "application/json", .cache_control = "no-store"},
             videos_json(owner, *result));
+}
+
+// GET /api/v1/videos: the caller's own videos, every state, as the service's listing gives them
+// for that owner (ADR-0100). A video shared with the caller is not theirs and is not listed.
+void Connection::start_own_listing() noexcept {
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    const OwnVideoQuery* query = get(req_.own_video_query);
+    if (query == nullptr) {
+        fail_with(Status::BadRequest, "bad_query");
+        return;
+    }
+    const std::uint64_t request = request_seq_;
+    ++pending_;
+    deps().catalog.list_videos(claims->subject, query->after, query->limit,
+                               [this, request, owner = claims->subject](auto result) noexcept {
+                                   --pending_;
+                                   on_videos(request, owner, std::move(result));
+                               });
 }
 
 void Connection::on_service_deleted(std::uint64_t request,

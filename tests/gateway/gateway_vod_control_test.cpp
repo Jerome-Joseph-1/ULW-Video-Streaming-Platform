@@ -482,6 +482,64 @@ TEST_F(GatewayVodControl, OnlyTheServicesBearerTokenMayUseTheNewServiceRoutes) {
     EXPECT_TRUE(gw_.purges().empty());
 }
 
+TEST_F(GatewayVodControl, AUserListsTheirOwnVideosNewestFirstAPageAtATime) {
+    for (int n = 1; n <= 3; ++n) {
+        gw_.put_video(video(n == 2 ? core::VideoState::Processing : core::VideoState::Ready,
+                            n == 3 ? core::Visibility::unlisted() : core::Visibility{},
+                            nth_video(n)));
+    }
+    // Bob's, even shared with everyone, is not Alice's to list.
+    gw_.put_video(
+        video(core::VideoState::Ready, core::Visibility::unlisted(), nth_video(4), "bob"));
+
+    const auto all = get("/api/v1/videos", kAlice);
+    ASSERT_TRUE(all);
+    ASSERT_EQ(all->status, 200) << all->body;
+    EXPECT_EQ(all->header("content-type"), "application/json");
+    EXPECT_EQ(all->header("cache-control"), "no-store");
+    EXPECT_TRUE(all->body.starts_with(R"({"owner":"alice","videos":[{"id":")" + nth_video(3)))
+        << all->body;
+    EXPECT_LT(all->body.find(nth_video(3)), all->body.find(nth_video(2)));
+    EXPECT_LT(all->body.find(nth_video(2)), all->body.find(nth_video(1)));
+    EXPECT_EQ(all->body.find(nth_video(4)), std::string::npos) << "bob's";
+    EXPECT_NE(all->body.find(R"("visibility":"unlisted")"), std::string::npos);
+    EXPECT_TRUE(all->body.ends_with(R"(],"next":null})")) << all->body;
+
+    const auto page = get("/api/v1/videos?limit=2", kAlice);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->status, 200);
+    const auto next = page->body.find(R"("next":")");
+    ASSERT_NE(next, std::string::npos) << page->body;
+    const std::string cursor =
+        page->body.substr(next + 8, page->body.find('"', next + 8) - (next + 8));
+    const auto rest = get("/api/v1/videos?after=" + cursor + "&limit=2", kAlice);
+    ASSERT_TRUE(rest);
+    ASSERT_EQ(rest->status, 200) << rest->body;
+    EXPECT_NE(rest->body.find(nth_video(1)), std::string::npos) << rest->body;
+    EXPECT_EQ(rest->body.find(nth_video(2)), std::string::npos) << rest->body;
+
+    const auto bobs = get("/api/v1/videos", kBob);
+    ASSERT_TRUE(bobs);
+    EXPECT_EQ(bobs->status, 200);
+    EXPECT_NE(bobs->body.find(nth_video(4)), std::string::npos) << bobs->body;
+    EXPECT_EQ(bobs->body.find(nth_video(1)), std::string::npos) << bobs->body;
+}
+
+TEST_F(GatewayVodControl, AUsersListingNamesNoOwnerAndAPageItCanServe) {
+    for (const std::string_view query :
+         {"?owner=alice", "?owner=bob", "?limit=0", "?limit=201", "?limit=x", "?limit=1&limit=2",
+          "?after=nope", "?after=12."}) {
+        const auto r = get("/api/v1/videos" + std::string(query), kAlice);
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 400) << query;
+        EXPECT_EQ(r->body, R"({"error":"bad_query"})");
+    }
+    EXPECT_EQ(get("/api/v1/videos?limit=200", kAlice)->status, 200);
+    EXPECT_EQ(get("/api/v1/videos", "")->status, 401);
+    gw_.fail_catalog(core::ports::CatalogError::Unavailable);
+    EXPECT_EQ(get("/api/v1/videos", kAlice)->status, 503);
+}
+
 TEST_F(GatewayVodControl, ACatalogOutageIsARetryOnEveryNewRoute) {
     publish(core::VideoState::Ready);
     gw_.fail_catalog(core::ports::CatalogError::Unavailable);

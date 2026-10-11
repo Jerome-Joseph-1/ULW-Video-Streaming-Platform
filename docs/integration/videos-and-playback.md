@@ -77,13 +77,14 @@ async function waitUntilPlayable(id, token, onProgress) {
 
 ## Endpoints
 
-<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (on_video, start_playlist, on_playlist), apps/gateway/src/playback.cpp -->
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (on_video, start_playlist, on_playlist, start_own_listing), apps/gateway/src/playback.cpp, apps/gateway/src/video_access.cpp (own_video_query, videos_json) -->
 
 All need a token ([auth.md](auth.md)) and take no body. `{id}` is the `video_id` from the create
 response: a lowercase canonical UUID. Anything else (uppercase included) answers `404`.
 
 | Endpoint | Success | Errors |
 |---|---|---|
+| `GET /api/v1/videos` | `200`, `application/json`, `Cache-Control: no-store`, a page of your own videos ([Your videos](#your-videos)) | `400`, `401`, `503`, `500` |
 | `GET /api/v1/videos/{id}` | `200`, `application/json`, the video object below | `401`, `404`, `503`, `500` |
 | `GET /api/v1/videos/{id}/master.m3u8` | `200`, `application/vnd.apple.mpegurl`, the master playlist | `401`, `404`, `409`, `503`, `500` |
 | `GET /api/v1/videos/{id}/{rendition}/index.m3u8` | `200`, `application/vnd.apple.mpegurl`, a media playlist | `401`, `404`, `409`, `503`, `500` |
@@ -112,6 +113,27 @@ A failed video, as its owner sees it:
 ```
 
 Anyone else who may see it gets the same object without `error_reason` and `visibility`.
+
+### Your videos
+
+`GET /api/v1/videos` lists the caller's own uploads (and live recordings), every state included
+and deleted ones left out, newest first: the page the [service API's
+listing](#service-api-visibility-takedown-and-listing) gives for the token's own user. Videos
+others shared with you are not yours and are not listed. Its query, both optional:
+
+| Parameter | Meaning |
+|---|---|
+| `limit` | 1 to 200, default 50 |
+| `after` | The `next` of the previous page, as given. Opaque: do not build one |
+
+```json
+{"owner":"auth0|123","videos":[{"id":"0199950c-...","title":"clip.mp4","state":"processing","version":2,"duration_ms":null,"progress":{"stage":"transcoding","percent":40},"visibility":"private","created_at":1759600000}],"next":null}
+```
+
+Each video is the object above as its owner sees it, with `created_at` in Unix seconds; `next`
+is `null` on the last page. An `owner` parameter, or a `limit` or `after` that is malformed or
+given twice, is `400` with `{"error":"bad_query"}`. One request shows the progress of every
+upload in flight, instead of polling each video.
 
 ### Playlists
 
