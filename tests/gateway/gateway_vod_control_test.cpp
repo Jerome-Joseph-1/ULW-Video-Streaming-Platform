@@ -489,7 +489,8 @@ TEST_F(GatewayVodControl, AUserListsTheirOwnVideosNewestFirstAPageAtATime) {
                             nth_video(n)));
     }
     // Bob's, even shared with everyone, is not Alice's to list.
-    gw_.put_video(video(core::VideoState::Ready, core::Visibility::unlisted(), nth_video(4), "bob"));
+    gw_.put_video(
+        video(core::VideoState::Ready, core::Visibility::unlisted(), nth_video(4), "bob"));
 
     const auto all = get("/api/v1/videos", kAlice);
     ASSERT_TRUE(all);
