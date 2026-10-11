@@ -293,6 +293,7 @@ class Relay(unittest.TestCase):
 
 
 class ScratchReach(unittest.TestCase):
+    @unittest.skipUnless(os.geteuid() == 0, "giving the directory to another user takes root")
     def test_a_directory_closed_to_others_is_out_of_reach(self):
         with tempfile.TemporaryDirectory() as d:
             closed = pathlib.Path(d) / "home"
