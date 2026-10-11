@@ -1,5 +1,5 @@
 // PgLiveStreams against the Postgres of deploy/local/compose.yaml, on a scratch database
-// migrated to the bundled schema (migration 0011).
+// migrated to the bundled schema (migrations 0011 and 0020).
 #include "core/ports/live.hpp"
 #include "infra/postgres/live_streams.hpp"
 #include "net/offload_pool.hpp"
@@ -109,6 +109,32 @@ protected:
         std::optional<LiveResult<EndedLiveStream>> r;
         store->end(id, reason, at_seconds(at), [&](auto x) noexcept { r = std::move(x); });
         return wait(r);
+    }
+
+    // An empty owner is the operator's backend.
+    LiveResult<LiveStream> set_visibility(const core::LiveStreamId& id, std::string_view owner,
+                                          const core::Visibility& visibility) {
+        std::optional<LiveResult<LiveStream>> r;
+        store->set_visibility(id, owner.empty() ? std::nullopt : std::optional(user(owner)),
+                              visibility, [&](auto x) noexcept { r = std::move(x); });
+        return wait(r);
+    }
+
+    LiveResult<bool> shares_room(const core::RoomId& room, std::string_view owner,
+                                 std::string_view viewer) {
+        std::optional<LiveResult<bool>> r;
+        store->shares_room(room, user(owner), user(viewer),
+                           [&](auto x) noexcept { r = std::move(x); });
+        return wait(r);
+    }
+
+    void add_member(const core::RoomId& room, std::string_view member) {
+        auto conn = db->session();
+        ASSERT_TRUE(conn.exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1, 'group_chat') "
+                              "ON CONFLICT DO NOTHING",
+                              Params{}.add_uuid(room.uuid())));
+        ASSERT_TRUE(conn.exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1, $2)",
+                              Params{}.add_uuid(room.uuid()).add_text(member)));
     }
 
     LiveResult<std::vector<LiveStream>> unfinished(std::size_t limit) {
@@ -331,6 +357,82 @@ TEST_F(PgLiveStreamsTest, TheUnfinishedAreListedOldestFirst) {
     ASSERT_TRUE(one);
     EXPECT_EQ(one->size(), 1U);
     EXPECT_EQ(unfinished(0), std::unexpected(LiveStoreError::NotFound));
+}
+
+// ADR-0105: every stream starts unlisted, as streams were before they had a visibility.
+TEST_F(PgLiveStreamsTest, AStreamStartsUnlistedAndItsOwnerSetsWhoMayWatch) {
+    const auto made = create("auth0|alice");
+    ASSERT_TRUE(made);
+    const core::LiveStreamId id = made->stream.id;
+    EXPECT_EQ(made->stream.visibility, core::Visibility::unlisted());
+    const auto hidden = set_visibility(id, "auth0|alice", core::Visibility{});
+    ASSERT_TRUE(hidden) << core::ports::to_string(hidden.error());
+    EXPECT_EQ(hidden->visibility, core::Visibility{});
+    EXPECT_EQ(find(id)->visibility, core::Visibility{});
+    // Every statement answers it: the live and ended rows too.
+    EXPECT_EQ(mark_live(id, 1'767'225'700)->visibility, core::Visibility{});
+    EXPECT_EQ(end(id, LiveEnd::Owner, 1'767'225'800)->stream.visibility, core::Visibility{});
+    // Not hers, or no such stream: the same NotFound.
+    EXPECT_EQ(set_visibility(id, "auth0|bob", core::Visibility::unlisted()),
+              std::unexpected(LiveStoreError::NotFound));
+    EXPECT_EQ(set_visibility(core::LiveStreamId::generate(clock, random), "auth0|alice",
+                             core::Visibility::unlisted()),
+              std::unexpected(LiveStoreError::NotFound));
+}
+
+TEST_F(PgLiveStreamsTest, ARoomSharesAStreamOnlyWhileItListsItsOwner) {
+    const auto made = create("auth0|alice");
+    ASSERT_TRUE(made);
+    const core::LiveStreamId id = made->stream.id;
+    const core::RoomId room = core::RoomId::generate(clock, random);
+    const auto shared = core::Visibility::room(room);
+    EXPECT_EQ(set_visibility(id, "auth0|alice", shared),
+              std::unexpected(LiveStoreError::NotMember));
+    EXPECT_EQ(find(id)->visibility, core::Visibility::unlisted()) << "nothing changed";
+    add_member(room, "auth0|alice");
+    add_member(room, "auth0|bob");
+    const auto set = set_visibility(id, "auth0|alice", shared);
+    ASSERT_TRUE(set) << core::ports::to_string(set.error());
+    EXPECT_EQ(set->visibility, shared);
+    EXPECT_EQ(find(id)->visibility, shared);
+    EXPECT_EQ(shares_room(room, "auth0|alice", "auth0|bob"), true);
+    EXPECT_EQ(shares_room(room, "auth0|alice", "auth0|carol"), false);
+    // The owner gone from the room: it shares the stream with nobody.
+    auto conn = db->session();
+    ASSERT_TRUE(conn.exec("DELETE FROM chat_members WHERE room_id = $1 AND user_id = $2",
+                          Params{}.add_uuid(room.uuid()).add_text("auth0|alice")));
+    EXPECT_EQ(shares_room(room, "auth0|alice", "auth0|bob"), false);
+}
+
+TEST_F(PgLiveStreamsTest, TheOperatorsBackendSetsAnyStreamsVisibilityToARoomOfItsOwner) {
+    const auto made = create("auth0|alice");
+    ASSERT_TRUE(made);
+    const core::LiveStreamId id = made->stream.id;
+    EXPECT_EQ(set_visibility(id, "", core::Visibility{})->visibility, core::Visibility{});
+    const core::RoomId room = core::RoomId::generate(clock, random);
+    add_member(room, "auth0|bob");
+    // The room lists bob, not the stream's owner: refused, as for the owner.
+    EXPECT_EQ(set_visibility(id, "", core::Visibility::room(room)),
+              std::unexpected(LiveStoreError::NotMember));
+    add_member(room, "auth0|alice");
+    EXPECT_EQ(set_visibility(id, "", core::Visibility::room(room))->visibility,
+              core::Visibility::room(room));
+    EXPECT_EQ(set_visibility(core::LiveStreamId::generate(clock, random), "",
+                             core::Visibility::unlisted()),
+              std::unexpected(LiveStoreError::NotFound));
+}
+
+TEST_F(PgLiveStreamsTest, TheSchemaRefusesAVisibilityThatBreaksTheRules) {
+    auto conn = db->session();
+    EXPECT_FALSE(conn.exec("INSERT INTO live_streams (id, owner_id, srt_passphrase, created_at, "
+                           "visibility) VALUES (gen_random_uuid(), 'x', '0123456789ab', now(), "
+                           "'public')"));
+    EXPECT_FALSE(conn.exec("INSERT INTO live_streams (id, owner_id, srt_passphrase, created_at, "
+                           "visibility) VALUES (gen_random_uuid(), 'x', '0123456789ab', now(), "
+                           "'room')"));
+    EXPECT_FALSE(conn.exec("INSERT INTO live_streams (id, owner_id, srt_passphrase, created_at, "
+                           "visibility_room) VALUES (gen_random_uuid(), 'x', '0123456789ab', "
+                           "now(), gen_random_uuid())"));
 }
 
 TEST_F(PgLiveStreamsTest, TheSchemaRefusesARowThatBreaksTheRules) {

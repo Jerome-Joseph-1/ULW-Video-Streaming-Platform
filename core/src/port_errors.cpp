@@ -126,8 +126,25 @@ std::string_view to_string(LiveStoreError e) noexcept {
         return "stream store unavailable";
     case LiveStoreError::Corrupt:
         return "corrupt stream record";
+    case LiveStoreError::NotMember:
+        return "not a member of the room";
     }
     return "unknown stream store error";
+}
+
+bool may_watch(const LiveStream& stream, const UserId& viewer, bool room_member) noexcept {
+    if (stream.owner == viewer) {
+        return true;
+    }
+    switch (stream.visibility.kind()) {
+    case VisibilityKind::Private:
+        return false;
+    case VisibilityKind::Room:
+        return room_member;
+    case VisibilityKind::Unlisted:
+        return true;
+    }
+    return false;
 }
 
 std::string_view to_string(PackagerState s) noexcept {

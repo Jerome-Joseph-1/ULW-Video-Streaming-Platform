@@ -579,6 +579,19 @@ ALTER TABLE chat_members VALIDATE CONSTRAINT chat_members_user_id;
 ALTER TABLE chat_rooms VALIDATE CONSTRAINT chat_rooms_named_kind;
 ```
 
+**Migration 0020 (who may watch a live stream, docs/adr/0105) comes after 0019.** It adds
+`visibility` (default `unlisted`, what every stream was) and `visibility_room` to
+`live_streams` in one ALTER, and validates its two checks there, scanning `live_streams` under
+the ALTER's lock: one row per stream ever started, so moments. Only the stream service reads that
+table; nothing else waits. To see or reset who may watch a stream, as the gateway's role:
+
+```sql
+SELECT id, owner_id, state, visibility, visibility_room FROM live_streams WHERE id = '<stream>';
+UPDATE live_streams SET visibility = 'unlisted', visibility_room = NULL WHERE id = '<stream>';
+```
+
+A change made in SQL reaches every gateway within 5 s.
+
 The NetworkPolicies allow ports, not addresses, because Postgres and the store often run outside
 the cluster. If their addresses are stable, patch them in as an `ipBlock` on the 5432 and 443
 rules.

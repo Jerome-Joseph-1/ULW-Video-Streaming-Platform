@@ -331,6 +331,54 @@ TEST_F(MessageStoreTest, RecordLiveRefusesARoomTheRoomPlaneCreatedClosed) {
               "stream_live_chat lossy");
 }
 
+// ADR-0105: a stream's chat admits whoever the stream's visibility admits, and answers anyone
+// else as for a stream not on air. A chat with no stream row (run outside the stream service)
+// admits anyone, as the other tests here show.
+TEST_F(MessageStoreTest, AStreamsChatAdmitsWhomTheStreamsVisibilityAdmits) {
+    const std::string stream = "0192f3a4-0000-7000-8000-0000000000c1";
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    const core::UserId carol = *core::UserId::parse("auth0|carol");
+    ASSERT_TRUE(conn_->exec("INSERT INTO live_streams (id, owner_id, srt_passphrase, created_at, "
+                            "visibility) VALUES ($1::uuid, 'auth0|alice', '0123456789ab', now(), "
+                            "'private')",
+                            Params{}.add_text(stream)));
+    const auto room =
+        core::RoomId::parse(scalar(*conn_, "SELECT live_chat_room($1)", Params{}.add_text(stream)));
+    ASSERT_TRUE(room);
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->record_live(*room, std::move(done)); }));
+    const auto join = [&](const core::UserId& user) {
+        return ask<core::ports::Admission>([&](auto done) {
+            store_->admits(*room, user, core::ports::RoomKind::StreamLiveChat, std::move(done));
+        });
+    };
+    EXPECT_EQ(join(bob), core::ports::Admission::NotLive);
+    EXPECT_EQ(join(alice_), core::ports::Admission::Admitted) << "the owner always";
+
+    const std::string shared = "0192f3c4-7a1b-7c2d-8e3f-0123456789ab";
+    ASSERT_TRUE(
+        conn_->exec("INSERT INTO chat_rooms (room_id, kind) VALUES ($1::uuid, 'group_chat')",
+                    Params{}.add_text(shared)));
+    ASSERT_TRUE(
+        conn_->exec("INSERT INTO chat_members (room_id, user_id) VALUES ($1::uuid, 'auth0|bob'), "
+                    "($1::uuid, 'auth0|alice')",
+                    Params{}.add_text(shared)));
+    ASSERT_TRUE(
+        conn_->exec("UPDATE live_streams SET visibility = 'room', visibility_room = $2::uuid "
+                    "WHERE id = $1::uuid",
+                    Params{}.add_text(stream).add_text(shared)));
+    EXPECT_EQ(join(bob), core::ports::Admission::Admitted);
+    EXPECT_EQ(join(carol), core::ports::Admission::NotLive);
+
+    ASSERT_TRUE(conn_->exec("UPDATE live_streams SET visibility = 'unlisted', "
+                            "visibility_room = NULL WHERE id = $1::uuid",
+                            Params{}.add_text(stream)));
+    EXPECT_EQ(join(carol), core::ports::Admission::Admitted);
+    // Nothing was written for the refused joins: the room is still recorded live.
+    EXPECT_EQ(scalar(*conn_, "SELECT kind FROM chat_rooms WHERE room_id = $1",
+                     Params{}.add_uuid(room->uuid())),
+              "stream_live_chat");
+}
+
 // ADR-0092: a stream's chat closes when the stream ends. Its kind stays recorded, and from then
 // on it reads as a closed room nobody is a member of: a viewer's join is refused, and a call's
 // check finds it closed.

@@ -6,11 +6,14 @@
 #include "support/eventually.hpp"
 #include "support/http_client.hpp"
 
+#include <chrono>
 #include <gtest/gtest.h>
 #include <map>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 
 namespace {
 
@@ -249,6 +252,198 @@ TEST_F(GatewayStreams, RequestsCarryNoBodyAndNeedAToken) {
     const auto r = c.request("POST", "/api/v1/live", "", {}, {{"Cookie", "auth_token=user.alice"}});
     ASSERT_TRUE(r);
     EXPECT_EQ(r->status, 403);
+}
+
+// Who may watch a stream (ADR-0105).
+class GatewayStreamVisibility : public GatewayStreams {
+protected:
+    static constexpr std::string_view kRoom = "0192f3c4-7a1b-7c2d-8e3f-0123456789ab";
+
+    HttpResponse patch(const std::string& id, std::string_view body,
+                       std::string_view token = kAlice) {
+        HttpClient c(gw.endpoint());
+        auto r = c.request("PATCH", "/api/v1/live/" + id, token, std::as_bytes(std::span(body)),
+                           {{"Content-Type", "application/json"}});
+        EXPECT_TRUE(r);
+        return r.value_or(HttpResponse{});
+    }
+
+    // A live stream of alice's with a playlist in the store; its id.
+    std::string live_with_playlist() {
+        const std::string id = create();
+        EXPECT_EQ(send("POST", "/api/v1/live/" + id + "/start", kAlice).status, 200);
+        gw.put_object("live/" + id + "/index.m3u8",
+                      "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n"
+                      "#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init_0.mp4\"\n"
+                      "#EXTINF:2.000,\nseg_0_0.m4s\n");
+        return id;
+    }
+
+    // What `token` gets from the stream's status and its playlist.
+    std::pair<int, int> seen_by(const std::string& id, std::string_view token) {
+        return {send("GET", "/api/v1/live/" + id, token).status,
+                send("GET", "/api/v1/live/" + id + "/index.m3u8", token).status};
+    }
+
+    void member(std::string_view user) {
+        gw.with_live([&](LiveFakes& f) { f.store.members.emplace(kRoom, user); });
+    }
+};
+
+TEST_F(GatewayStreamVisibility, AStreamIsUnlistedUntilItsOwnerSaysOtherwise) {
+    const std::string id = live_with_playlist();
+    const HttpResponse own = send("GET", "/api/v1/live/" + id, kAlice);
+    EXPECT_EQ(text_at(json_of(own), "visibility"), "unlisted");
+    const HttpResponse seen = send("GET", "/api/v1/live/" + id, kBob);
+    EXPECT_EQ(json_of(seen).find("visibility"), nullptr) << "the owner's to know";
+    EXPECT_EQ(seen_by(id, kBob), std::make_pair(200, 200));
+}
+
+TEST_F(GatewayStreamVisibility, APrivateStreamIsTheOwnersAloneAndReadsAsNoStream) {
+    const std::string id = live_with_playlist();
+    const HttpResponse r = patch(id, R"({"visibility":"private"})");
+    ASSERT_EQ(r.status, 200) << r.body;
+    EXPECT_EQ(r.header("cache-control"), "no-store");
+    EXPECT_EQ(text_at(json_of(r), "visibility"), "private");
+    EXPECT_EQ(text_at(json_of(r), "state"), "live");
+    EXPECT_EQ(seen_by(id, kAlice), std::make_pair(200, 200));
+    EXPECT_EQ(seen_by(id, kBob), std::make_pair(404, 404));
+    const HttpResponse missing = send("GET", "/api/v1/live/" + id + "/index.m3u8", kBob);
+    EXPECT_TRUE(missing.body.empty()) << missing.body;
+    // Back to unlisted, and bob is a viewer again at once on this gateway.
+    ASSERT_EQ(patch(id, R"({"visibility":"unlisted"})").status, 200);
+    EXPECT_EQ(seen_by(id, kBob), std::make_pair(200, 200));
+}
+
+TEST_F(GatewayStreamVisibility, ARoomSharesTheStreamWithItsMembersWhileItListsTheOwner) {
+    const std::string id = live_with_playlist();
+    const std::string room = "room:" + std::string(kRoom);
+    const HttpResponse refused = patch(id, R"({"visibility":")" + room + R"("})");
+    EXPECT_EQ(refused.status, 403);
+    EXPECT_EQ(refused.body, R"({"error":"not_member"})");
+    member("alice");
+    member("bob");
+    const HttpResponse r = patch(id, R"({"visibility":")" + room + R"("})");
+    ASSERT_EQ(r.status, 200) << r.body;
+    EXPECT_EQ(text_at(json_of(r), "visibility"), room);
+    EXPECT_EQ(seen_by(id, kBob), std::make_pair(200, 200));
+    EXPECT_EQ(seen_by(id, "user.carol"), std::make_pair(404, 404));
+    EXPECT_EQ(seen_by(id, kAlice), std::make_pair(200, 200));
+}
+
+TEST_F(GatewayStreamVisibility, OnlyTheOwnerSetsItAndOnlyToOneOfTheThreeForms) {
+    const std::string id = create();
+    EXPECT_EQ(patch(id, R"({"visibility":"private"})", kBob).status, 404);
+    EXPECT_EQ(patch("0192f3a4-0000-7000-8000-000000000001", R"({"visibility":"private"})").status,
+              404);
+    EXPECT_EQ(patch(id, R"({"visibility":"private"})", "").status, 401);
+    for (const std::string_view body :
+         {R"({})", R"({"visibility":"public"})", R"({"visibility":"room:nope"})", R"([])",
+          R"({"visibility":3})", "not json"}) {
+        const HttpResponse r = patch(id, body);
+        EXPECT_EQ(r.status, 400) << body;
+        EXPECT_EQ(r.body, R"({"error":"bad_visibility"})") << body;
+    }
+    gw.with_live([&](LiveFakes& f) {
+        EXPECT_EQ(f.store.rows.at(id).visibility, core::Visibility::unlisted());
+    });
+    // An ended stream's still the owner's to hide: its playlist outlives it.
+    ASSERT_EQ(send("POST", "/api/v1/live/" + id + "/end", kAlice).status, 200);
+    EXPECT_EQ(patch(id, R"({"visibility":"private"})").status, 200);
+}
+
+TEST_F(GatewayStreamVisibility, TheOperatorsBackendSetsWhoMayWatchAnyStream) {
+    const std::string id = live_with_playlist();
+    const auto service_patch = [&](const std::string& stream, std::string_view body,
+                                   std::string_view token = "service.backend") {
+        HttpClient c(gw.endpoint());
+        auto r = c.request("PATCH", "/api/v1/service/live/" + stream, token,
+                           std::as_bytes(std::span(body)), {{"Content-Type", "application/json"}});
+        EXPECT_TRUE(r);
+        return r.value_or(HttpResponse{});
+    };
+    const HttpResponse hidden = service_patch(id, R"({"visibility":"private"})");
+    ASSERT_EQ(hidden.status, 200) << hidden.body;
+    EXPECT_EQ(text_at(json_of(hidden), "visibility"), "private") << "seen as its owner sees it";
+    EXPECT_EQ(seen_by(id, kBob), std::make_pair(404, 404));
+    EXPECT_EQ(seen_by(id, kAlice), std::make_pair(200, 200));
+    // A room must list the stream's owner, not the backend.
+    const std::string room = R"({"visibility":"room:)" + std::string(kRoom) + R"("})";
+    const HttpResponse refused = service_patch(id, room);
+    EXPECT_EQ(refused.status, 403);
+    EXPECT_EQ(refused.body, R"({"error":"not_member"})");
+    member("alice");
+    member("bob");
+    ASSERT_EQ(service_patch(id, room).status, 200);
+    EXPECT_EQ(seen_by(id, kBob), std::make_pair(200, 200));
+    // Only the backend's bearer token; a missing stream and a bad body as the video routes say.
+    for (const std::string_view token : {kAlice, kBob}) {
+        const HttpResponse r = service_patch(id, R"({"visibility":"unlisted"})", token);
+        EXPECT_EQ(r.status, 403) << token;
+        EXPECT_EQ(r.body, R"({"error":"forbidden"})");
+    }
+    const HttpResponse missing =
+        service_patch("0192f3a4-0000-7000-8000-000000000001", R"({"visibility":"private"})");
+    EXPECT_EQ(missing.status, 404);
+    EXPECT_EQ(missing.body, R"({"error":"not_found"})");
+    EXPECT_EQ(service_patch("not-a-stream", R"({"visibility":"private"})").status, 404);
+    const HttpResponse bad = service_patch(id, R"({"visibility":"public"})");
+    EXPECT_EQ(bad.status, 400);
+    EXPECT_EQ(bad.body, R"({"error":"bad_visibility"})");
+}
+
+TEST_F(GatewayStreamVisibility, ManyPlaylistReloadsCostOneRowReadPerFreshnessInterval) {
+    const std::string id = live_with_playlist();
+    member("alice");
+    member("bob");
+    ASSERT_EQ(patch(id, R"({"visibility":"room:)" + std::string(kRoom) + R"("})").status, 200);
+    std::size_t before = 0;
+    gw.with_live([&](LiveFakes& f) { before = f.store.calls; });
+    for (int i = 0; i < 20; ++i) {
+        ASSERT_EQ(send("GET", "/api/v1/live/" + id + "/index.m3u8", kBob).status, 200);
+    }
+    gw.with_live([&](LiveFakes& f) {
+        // The PATCH left the row known; bob's membership is read once and remembered.
+        EXPECT_EQ(f.store.calls - before, 1U);
+        EXPECT_EQ(f.store.membership_reads, 1U);
+    });
+}
+
+TEST_F(GatewayStreamVisibility, AStreamTheServiceDidNotStartIsABroadcastAsBefore) {
+    // Started outside the service: no row records who may watch it.
+    gw.put_object("live/launch-2026/index.m3u8",
+                  "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n"
+                  "#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init_0.mp4\"\n"
+                  "#EXTINF:2.000,\nseg_0_0.m4s\n");
+    EXPECT_EQ(send("GET", "/api/v1/live/launch-2026/index.m3u8", kBob).status, 200);
+    const std::string unknown = "0192f3a4-0000-7000-8000-0000000000ee";
+    gw.put_object("live/" + unknown + "/index.m3u8",
+                  "#EXTM3U\n#EXT-X-VERSION:7\n#EXT-X-TARGETDURATION:2\n"
+                  "#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-MAP:URI=\"init_0.mp4\"\n"
+                  "#EXTINF:2.000,\nseg_0_0.m4s\n");
+    EXPECT_EQ(send("GET", "/api/v1/live/" + unknown + "/index.m3u8", kBob).status, 200);
+}
+
+TEST_F(GatewayStreamVisibility, AStoreOutageIsARetryForAViewerWhoseAnswerIsNotKnown) {
+    const std::string id = create();
+    gw.with_live([](LiveFakes& f) { f.store.fail = core::ports::LiveStoreError::Unavailable; });
+    const HttpResponse r = send("GET", "/api/v1/live/" + id + "/index.m3u8", kBob);
+    EXPECT_EQ(r.status, 503);
+    EXPECT_EQ(r.header("retry-after"), "2");
+}
+
+TEST_F(GatewayStreamVisibility, AMemberTakenOffTheRoomStopsWatchingOnceTheAnswerIsStale) {
+    const std::string id = live_with_playlist();
+    member("alice");
+    member("bob");
+    ASSERT_EQ(patch(id, R"({"visibility":"room:)" + std::string(kRoom) + R"("})").status, 200);
+    ASSERT_EQ(seen_by(id, kBob), std::make_pair(200, 200));
+    gw.with_live([&](LiveFakes& f) { f.store.members.erase({std::string(kRoom), "bob"}); });
+    // The status reads afresh at once; the playlist within watch_fresh (5 s by default).
+    EXPECT_EQ(send("GET", "/api/v1/live/" + id, kBob).status, 404);
+    ASSERT_TRUE(ulw::test::eventually(
+        [&] { return send("GET", "/api/v1/live/" + id + "/index.m3u8", kBob).status == 404; },
+        std::chrono::seconds{10}));
 }
 
 TEST_F(GatewayStreams, TheServiceIsCounted) {

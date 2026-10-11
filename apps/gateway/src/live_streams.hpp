@@ -15,10 +15,13 @@
 #include <cstdint>
 #include <expected>
 #include <functional>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 namespace gateway {
@@ -49,6 +52,13 @@ struct LiveSettings {
     // How often unfinished streams are looked at, and how many at a time.
     core::Millis sweep_interval{10'000};
     std::size_t sweep_batch = 64;
+    // How long who may watch a stream is taken as known (ADR-0105): a stream's row, and a
+    // viewer's membership of the room it is shared with. A change of visibility made through
+    // another gateway process, or a member taken off the room, takes effect within this.
+    core::Millis watch_fresh{5'000};
+    // Streams and viewers remembered at once; the oldest go first past these.
+    std::size_t watch_streams = 1024;
+    std::size_t watch_viewers = 65'536;
 };
 
 struct LiveDeps {
@@ -74,6 +84,18 @@ enum class LiveFailure : std::uint8_t {
     Unavailable,
     // A dependency refused the request as made, or a stored row is broken.
     Internal,
+    // A room the stream's owner is not a member of.
+    NotMember,
+};
+
+// Whether a viewer may watch a stream's playlist (ADR-0105).
+enum class Watch : std::uint8_t {
+    Allowed,
+    // Answered exactly as a stream that does not exist.
+    Refused,
+    // The stream service did not start it, so nothing records who may watch it: a stream run
+    // outside the service is a broadcast to any signed-in viewer, as before (ADR-0059).
+    Unrecorded,
 };
 
 template <class T>
@@ -137,8 +159,23 @@ public:
     // has ends for that reason. Asking the media server, not believing the event, keeps a
     // publisher that came back through another gateway replica on air.
     void publisher_left(const core::LiveStreamId& id, LiveDone<Departure> done);
-    // The stream as any viewer may see it.
+    // The stream as the service sees it, whoever may watch it: for the gateway's own watchers
+    // (ADR-0093), never answered to a viewer.
     void status(const core::LiveStreamId& id, LiveDone<core::ports::LiveStream> done);
+    // The stream, for a viewer who may watch it; NotFound for anyone else.
+    void status(const core::LiveStreamId& id, const core::UserId& viewer,
+                LiveDone<core::ports::LiveStream> done);
+    // Sets who may watch the stream, for its owner, or for the operator's backend when `owner`
+    // is nullopt (ADR-0105). NotMember for a room the stream's owner is not a member of.
+    void set_visibility(const core::LiveStreamId& id, const std::optional<core::UserId>& owner,
+                        const core::Visibility& visibility, LiveDone<core::ports::LiveStream> done);
+    // Whether `viewer` may watch the stream named `name` (a playlist's path segment), when that
+    // is known from the last watch_fresh; nullopt when it must be asked through watch().
+    [[nodiscard]] std::optional<Watch> known_watch(std::string_view name,
+                                                   const core::UserId& viewer);
+    // Asks, and remembers the answer for watch_fresh. Reads of one stream's row, and of one
+    // viewer's membership, are shared by every request that needs them while one is in flight.
+    void watch(std::string_view name, const core::UserId& viewer, LiveDone<Watch> done);
     // A viewer found the stream's playlist ended: the packager has ended it.
     void playlist_ended(const core::LiveStreamId& id);
 
@@ -174,6 +211,27 @@ private:
     void sweep_done() noexcept;
     void reap_delays() noexcept;
 
+    // The row as the watch cache holds it: nullopt for a stream with no row.
+    using Row = std::optional<Stream>;
+    struct Remembered {
+        Row row;
+        core::MonoTime fresh_until;
+    };
+    struct Membership {
+        bool member = false;
+        core::MonoTime fresh_until;
+    };
+    using RowDone = std::move_only_function<void(std::expected<Row, LiveFailure>) noexcept>;
+    using MemberDone = std::move_only_function<void(std::expected<bool, LiveFailure>) noexcept>;
+    // The stream's row from the cache or one shared read.
+    void watched_row(const core::LiveStreamId& id, RowDone done);
+    // The viewer's membership of the room the stream is shared with, likewise.
+    void membership(const Stream& stream, const core::UserId& viewer, MemberDone done);
+    [[nodiscard]] std::optional<Watch> decide(const Row& row, const core::UserId& viewer);
+    void remember(const core::LiveStreamId& id, Row row);
+    // Drops what is remembered of the stream: its visibility changed here.
+    void forget(const core::LiveStreamId& id);
+
     [[nodiscard]] LiveFailure store_failure(core::ports::LiveStoreError e) noexcept;
     [[nodiscard]] LiveFailure media_failure(core::ports::MediaError e) noexcept;
     [[nodiscard]] LiveFailure packager_failure(core::ports::PackagerError e) noexcept;
@@ -190,6 +248,12 @@ private:
     // Streams whose end a viewer's playlist reported and that are being ended: every viewer
     // polling the status sees the same end, and one end is enough.
     std::set<std::string, std::less<>> ending_;
+    // Who may watch which stream, as last read (ADR-0105), and the reads in flight.
+    std::map<std::string, Remembered, std::less<>> watched_;
+    std::map<std::string, std::vector<RowDone>, std::less<>> reading_rows_;
+    // By (stream id, viewer).
+    std::map<std::pair<std::string, std::string>, Membership> members_;
+    std::map<std::pair<std::string, std::string>, std::vector<MemberDone>> reading_members_;
 };
 
 [[nodiscard]] std::string_view to_string(LiveFailure f) noexcept;

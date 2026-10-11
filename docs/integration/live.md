@@ -18,12 +18,12 @@ closed to new joins once it ends.
 
 ## Starting a stream
 
-<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_stream_route, respond_stream, fail_live), apps/gateway/src/live_streams.cpp, apps/gateway/src/publisher_watch.cpp, apps/gateway/src/webhook_server.cpp, infra/postgres/src/live_streams.cpp, migrations/0011_live_streams.sql, docs/adr/0092-the-stream-service-lives-in-the-gateway.md, migrations/0013_live_streams_publisher_left.sql, docs/adr/0093-livekit-webhooks-on-an-internal-listener.md -->
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_stream_route, respond_stream, fail_live), apps/gateway/src/live_streams.cpp, apps/gateway/src/publisher_watch.cpp, apps/gateway/src/webhook_server.cpp, infra/postgres/src/live_streams.cpp, migrations/0011_live_streams.sql, docs/adr/0092-the-stream-service-lives-in-the-gateway.md, migrations/0013_live_streams_publisher_left.sql, docs/adr/0093-livekit-webhooks-on-an-internal-listener.md, migrations/0020_live_stream_visibility.sql, docs/adr/0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md -->
 
 The gateway's stream service starts a stream for the signed-in user, hands its owner publisher
 tickets, takes it live, and ends it. Every request is authenticated like the rest of the API
-(bearer token or the auth cookie, and with the cookie an allowed `Origin`), carries no body, and
-counts against the user's request rate. The owner of a stream is the user whose token started
+(bearer token or the auth cookie, and with the cookie an allowed `Origin`), carries no body
+(the `PATCH` below aside), and counts against the user's request rate. The owner of a stream is the user whose token started
 it; only they can get its tickets, take it live or end it, and someone else's stream answers
 `404`, as a video does. A user has **one unfinished stream at a time**.
 
@@ -33,7 +33,9 @@ it; only they can get its tickets, take it live or end it, and someone else's st
 | `POST /api/v1/live/{id}/ticket` | The owner | `200` a fresh publisher ticket: `url`, `token`, `expires_at` | `401`, `404`, `409`, `429`, `503`, `500` |
 | `POST /api/v1/live/{id}/start` | The owner, after the WHIP POST's `201` | `200` the stream, `live` | `401`, `404`, `409`, `429`, `503`, `500` |
 | `POST /api/v1/live/{id}/end` | The owner | `200` the stream, `ended` | `401`, `404`, `429`, `503`, `500` |
-| `GET /api/v1/live/{id}` | Any signed-in user | `200` the stream | `401`, `404`, `429`, `503`, `500` |
+| `PATCH /api/v1/live/{id}` | The owner | `200` the stream, with its new `visibility` ([Who may watch](#who-may-watch)) | `400`, `401`, `403`, `404`, `413`, `429`, `503`, `500` |
+| `GET /api/v1/live/{id}` | Anyone who may watch it | `200` the stream | `401`, `404`, `429`, `503`, `500` |
+| `PATCH /api/v1/service/live/{id}` | The operator's backend | `200` the stream, as its owner sees it, with its new `visibility` ([Who may watch](#who-may-watch)) | `400`, `401`, `403`, `404`, `413`, `503`, `500` |
 
 The stream, as every one of these answers it (`Cache-Control: no-store`):
 
@@ -45,13 +47,15 @@ The stream, as every one of these answers it (`Cache-Control: no-store`):
 | `created_at`, `live_at`, `ended_at` | Unix seconds, or `null` until then |
 | `ended_by` | `null` until it ends; then `owner` (ended with `end`), `publisher_left` (the media server said the publisher left, and it was still gone 10 s later), `finished` (the publisher went: a WHIP DELETE, the media server dropping it, 12 hours, or a broken stream), `failed` (its packager could not run) or `timeout` (not taken live within 2 minutes of `POST /api/v1/live`, or past 13 hours). Treat any value not listed here as an end you need not act on |
 | `video_id` | The owner only: the recording's video once it is queued, else `null` ([When a stream ends](#when-a-stream-ends)). Absent for anyone else |
+| `visibility` | The owner only: who may watch, `unlisted`, `private` or `room:<room id>` ([Who may watch](#who-may-watch)). Absent for anyone else |
 | `publish` | `POST /api/v1/live` only: the first publisher ticket |
 
 Who may broadcast: any signed-in user, unless the deployment names a claim
 (`ULW_LIVE_BROADCASTER_CLAIM`, [operator-contract.md](operator-contract.md)): then only a
 token whose claim holds the value it names (a string equal to it, an array holding it, or
-`true`) may start a stream; anyone signed in may still watch. Each user may start a few streams
-an hour, however each ends, and the platform runs a fixed number at once.
+`true`) may start a stream; watching needs no such claim ([Who may watch](#who-may-watch)).
+Each user may start a few streams an hour, however each ends, and the platform runs a fixed
+number at once.
 
 The flow:
 
@@ -191,13 +195,11 @@ source.
 |---|---|---|
 | `GET /api/v1/live/{id}/index.m3u8` | `200`, `application/vnd.apple.mpegurl`, the stream's live playlist | `401`, `404`, `503`, `500` |
 
-- **Who may watch.** Any signed-in user (a valid token, as for every API route) may watch any
-  stream by its id. A live stream is a broadcast; its recording is the broadcaster's own video
-  like any upload ([When a stream ends](#when-a-stream-ends)). A stream has no visibility of its
-  own: the visibility and grants of [videos-and-playback.md](videos-and-playback.md#who-can-see-a-video)
-  apply to its recording, not to the stream while it is live (ADR-0097). `{id}` is the stream's `id`
-  ([Starting a stream](#starting-a-stream)); a stream an operator started by hand has the id it
-  was given, 1 to 64 of `A-Z a-z 0-9 _ -`.
+- **Who may watch.** Whoever the stream's visibility admits ([Who may watch](#who-may-watch)):
+  by default any signed-in user who has its id. Anyone else gets the empty `404` a stream that
+  does not exist gets. `{id}` is the stream's `id` ([Starting a stream](#starting-a-stream)); a
+  stream an operator started by hand, outside the stream service, has the id it was given, 1 to
+  64 of `A-Z a-z 0-9 _ -`, and any signed-in user may watch it.
 - **The playlist.** RFC 8216 live: `EXT-X-VERSION:7`, `EXT-X-TARGETDURATION` (the segment length,
   2 to 10 s, 2 by default), `EXT-X-MEDIA-SEQUENCE`, which never decreases, the last 10 segments
   (fMP4, each with `EXT-X-PROGRAM-DATE-TIME`), and after a packager restart
@@ -241,6 +243,47 @@ Cache-Control: private, no-cache
 https://<bucket host>/live/launch-2026/seg_0_118.m4s?X-Amz-Algorithm=AWS4-HMAC-SHA256&...
 ...
 ```
+
+### Who may watch
+
+<!-- apps/gateway/src/connection.cpp (start_live, on_watch, act_on_stream), apps/gateway/src/live_streams.cpp (watch, known_watch, set_visibility, status), infra/postgres/src/live_streams.cpp (kSetVisibility, kSharesRoom), docs/adr/0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md -->
+
+Who may watch is the product's policy; the platform enforces it. The operator's backend sets it
+for any stream with `PATCH /api/v1/service/live/{id}`, and a stream's owner for their own with
+`PATCH /api/v1/live/{id}`, as both may for a video
+([videos-and-playback.md](videos-and-playback.md#who-can-see-a-video)). Either takes a JSON body
+(`Content-Type: application/json`, at most 4 KiB) of the same form a video takes:
+
+| `visibility` | Who may watch, besides the owner |
+|---|---|
+| `"unlisted"` | Anyone signed in who has the stream's id. Every stream starts so, as every stream was before it had a visibility |
+| `"private"` | Nobody |
+| `"room:<room id>"` | The members of that chat room, direct or group, as chat lists them, while the room lists the owner too. The stream's owner must be a member when it is set, whoever sets it (`403` `not_member` otherwise) |
+
+It may be set in any state; set it before `start` to keep a stream from anyone else from its
+first segment. It applies to the playlist and to `GET /api/v1/live/{id}`: anyone it does not
+admit gets `404`, as for a stream that does not exist. It says nothing of the recording, which
+is a video with a visibility of its own, private until its owner shares it
+([When a stream ends](#when-a-stream-ends)).
+
+Both answer the stream object as its owner sees it, with `visibility`. Refusals carry
+`{"error":"<code>"}`: `400` `bad_visibility` (not one of the three forms; an empty body is `400`
+with no body), `403` `not_member`, and on the owner's route `404` with no body for a stream not
+the caller's. The backend's route takes the same token as the
+[service API for videos](videos-and-playback.md#service-api-grants), in the `Authorization`
+header only (`403` `forbidden` for anything else), and answers `404` `not_found` for no such
+stream.
+
+A change takes effect at once for requests to the gateway process that made it, and within
+5 s for the others: each process takes who may watch a stream as known for 5 s, so that a
+stream's viewers, reloading its playlist every couple of seconds, cost one read of the stream a
+5 s interval between them, and each member of a room one read of their membership. A member
+taken off the room stops getting the playlist within those 5 s; segment URLs already handed
+out stay valid until they expire (one hour), as for a video.
+
+The stream's live chat follows the same visibility ([chat.md](chat.md#a-streams-live-chat)): a
+join is refused `not_live`, as for a stream not on air, to anyone it does not admit. Each join
+reads it afresh; someone already in the chat stays when it changes, until they leave.
 
 ## When a stream ends
 
