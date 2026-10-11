@@ -28,19 +28,11 @@ env:
   UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
   TSAN_OPTIONS: halt_on_error=1:second_deadlock_stack=1
 
-# Where each job runs (docs/operations/ci-lanes.md, "Where jobs run"): the jobs that need the
-# self-hosted host's kernel (io_uring, locked memory: build-test, tsan, reactor-matrix,
-# autobahn, fuzz) run there for pushes, the nightly, manual runs and pull requests from branches
-# of this repository; a hosted runner takes them for pull requests from forks, whose code must
-# never run on that host. Main's runs (its pushes and the nightly) may take any of the host's
-# runners; every other run takes only those labelled as the repository variable
-# ULW_SHARED_RUNNERS says, a JSON list such as ["self-hosted","ulw-shared"], so a runner left
-# without that label is main's alone and main never queues behind pull requests. Unset, every
-# run may take any runner. Lint, secrets and manifests need nothing the host has and run hosted
-# whatever the event: the repository is public, so hosted minutes cost nothing. The host's
-# runners take up to four jobs at once and keep their state between jobs, so jobs that publish a
-# fixed host port, start deploy/local/compose.yaml's fixed-name containers, or change the host
-# beyond the setup action's sysctls stay on ubuntu-24.04 whatever the event (each says which).
+# Where each job runs (docs/operations/ci-lanes.md, "Where jobs run"): every job on a
+# GitHub-hosted ubuntu-24.04 runner, a fresh machine per job, whatever the event. The repository
+# is public, so hosted minutes cost nothing. The jobs that need io_uring (build-test, tsan,
+# reactor-matrix, autobahn) get it from the runner's kernel; reactor-matrix runs
+# tools/io_uring_probe.c first, so a kernel that cannot serve the reactor is named as the cause.
 jobs:
   # Which lane this run is, and on a pull request what it changed (docs/operations/ci-lanes.md).
   # Outside a pull request every output is the full lane's. On a pull request, `code` is false when
@@ -115,7 +107,7 @@ jobs:
     name: build-test (${{ matrix.compiler }}/${{ matrix.preset }}${{ matrix.label && format(', {0}', matrix.label) || '' }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
-    runs-on: &trusted-runner ${{ (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository) && 'ubuntu-24.04' || (github.ref == 'refs/heads/main' && 'self-hosted' || fromJSON(vars.ULW_SHARED_RUNNERS || '"self-hosted"')) }}
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -127,24 +119,6 @@ jobs:
       TEST_PRESET: ${{ matrix.test }}
       TEST_LABEL: ${{ matrix.label }}
     steps:
-      # First in every job that may run on the self-hosted host, before the checkout (which a
-      # local action would need), so defined once here and repeated by its YAML alias. A
-      # self-hosted runner keeps its workspace between jobs, and an earlier job may have left
-      # root's files there (build-test's root step, autobahn's container) or, if cancelled,
-      # root's processes running; either would stop the checkout from cleaning it. Processes
-      # are matched by their executable's real path in this runner's own workspace and scratch,
-      # so the host's other runners' jobs are left alone.
-      - &clear-runner
-        name: Clear what an earlier job on this runner left
-        if: runner.environment == 'self-hosted'
-        run: |
-          workspace=$(realpath -m "$GITHUB_WORKSPACE")
-          temp=$(realpath -m "$RUNNER_TEMP")
-          for dir in "$workspace" "$temp"; do
-            sudo find /proc -mindepth 2 -maxdepth 2 -name exe -lname "$dir/*" \
-              -printf '%h\n' 2>/dev/null | cut -d/ -f3 | xargs -r sudo kill -KILL || true
-          done
-          sudo chown -R "$(id -u):$(id -g)" "$workspace" "$temp"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -155,8 +129,8 @@ jobs:
       - run: cmake --build --preset "$PRESET"
         id: build
       # Every io_uring ring is charged to the user's RLIMIT_MEMLOCK, summed over all of that user's
-      # processes (the integration job says why), and the self-hosted runners share one user, so
-      # the limit is lifted for the tests as the integration job does.
+      # processes (the integration job says why), and ctest runs many at once, so the limit is
+      # lifted for the tests as the integration job does.
       - run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
           ctest --preset "$TEST_PRESET" ${TEST_LABEL:+-L "$TEST_LABEL"}
@@ -181,12 +155,11 @@ jobs:
   tsan:
     # The full lane only (docs/operations/ci-lanes.md).
     if: github.event_name != 'pull_request'
-    runs-on: *trusted-runner
+    runs-on: ubuntu-24.04
     env:
       CC: clang-19
       CXX: clang++-19
     steps:
-      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -196,8 +169,8 @@ jobs:
       - run: cmake --preset tsan
       - run: cmake --build --preset tsan
       # Every io_uring ring is charged to the user's RLIMIT_MEMLOCK, summed over all of that user's
-      # processes (the integration job says why), and the self-hosted runners share one user, so
-      # the limit is lifted for the tests as the integration job does.
+      # processes (the integration job says why), and ctest runs many at once, so the limit is
+      # lifted for the tests as the integration job does.
       - run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
           ctest --preset tsan-unit
@@ -206,7 +179,7 @@ jobs:
     name: reactor-matrix (${{ matrix.reactor }})
     # The full lane only (docs/operations/ci-lanes.md).
     if: github.event_name != 'pull_request'
-    runs-on: *trusted-runner
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -216,7 +189,6 @@ jobs:
       CXX: g++-14
       ULW_REACTOR: ${{ matrix.reactor }}
     steps:
-      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -231,8 +203,8 @@ jobs:
       - run: cmake --build --preset ci
       # gtest_discover_tests appends "  # GetParam() = ..." to parameterised test names.
       # Every io_uring ring is charged to the user's RLIMIT_MEMLOCK, summed over all of that user's
-      # processes (the integration job says why), and the self-hosted runners share one user, so
-      # the limit is lifted for the tests as the integration job does.
+      # processes (the integration job says why), and ctest runs many at once, so the limit is
+      # lifted for the tests as the integration job does.
       - run: |
           sudo prlimit --pid $$ --memlock=unlimited:unlimited
           ctest --preset ci -R 'Reactors/.*/${{ matrix.reactor == 'io_uring' && 'IoUring' || 'Epoll' }}( |$)'
@@ -246,9 +218,9 @@ jobs:
   # (ADR-0086): every test has a scratch database, a bucket prefix or bucket and ports of its
   # own, and the one that docker-pauses the Postgres is RUN_SERIAL (tests/CMakeLists.txt), so it
   # never overlaps another. The conformance label still runs one test at a time, after it.
-  # Hosted only: Postgres on fixed host port 15432, restarted by its container id, MinIO by
-  # its fixed container name on 9000, LiveKit on 7880, and a locked-memory limit lifted with
-  # prlimit; jobs sharing a host would collide on all of them.
+  # Postgres on fixed host port 15432, restarted by its container id, MinIO by its fixed
+  # container name on 9000, LiveKit on 7880, and a locked-memory limit lifted with prlimit: the
+  # job owns its runner.
   integration:
     name: integration (${{ matrix.preset }})
     # The full lane only (docs/operations/ci-lanes.md).
@@ -347,8 +319,7 @@ jobs:
       github.event_name != 'pull_request' ||
       github.event.pull_request.head.repo.full_name == github.repository ||
       contains(github.event.pull_request.labels.*.name, 'coverage'))
-    # Hosted only: Postgres on fixed host port 55432 and MinIO, as integration, and the Sonar
-    # token, which the self-hosted host never sees.
+    # Postgres on fixed host port 55432 and MinIO, as integration, and the Sonar token.
     runs-on: ubuntu-24.04
     # The unit label one test at a time (6 min on main), the integration label one test per
     # core (19 min one at a time on main), the report and the scan (2 min).
@@ -524,7 +495,7 @@ jobs:
   # log or table. M22's on the same cluster: 1000 MLS messages stored as ciphertext gzip cannot
   # shrink, and no plaintext anywhere. The tests are parameterised over both reactors, so one
   # run covers io_uring and epoll.
-  # Hosted only: Postgres on fixed host port 15432 and the nodes on fixed ports.
+  # Postgres on fixed host port 15432 and the nodes on fixed ports.
   cluster:
     # The full lane only (docs/operations/ci-lanes.md).
     if: github.event_name != 'pull_request'
@@ -564,7 +535,7 @@ jobs:
   # tickets, and two Chrome profiles connect with them and decode each other's media; and a group
   # call of four (tests/call/group-call.spec.mjs, ADR-0095) through an owner killed mid-call and
   # an expulsion.
-  # Hosted only: LiveKit, Redis and egress on the host's network, on fixed ports and with
+  # LiveKit, Redis and egress on the host's network, on fixed ports and with
   # fixed container names, and Postgres on fixed host port 15432.
   ingest:
     # The full lane only (docs/operations/ci-lanes.md).
@@ -635,11 +606,7 @@ jobs:
     name: boundaries + format + tidy (${{ strategy.job-index }}/${{ strategy.job-total }})
     needs: changes
     runs-on: ubuntu-24.04
-    # On a hosted runner, whatever the event: a quarter of the tree took 15-24 min there (runner
-    # speed varies), over 50 on the self-hosted host, where each job has three cores and shares
-    # the host with three others, and past 150 once that host's queue backed up
-    # (docs/operations/ci-lanes.md, "Where jobs run"). Lint needs nothing the host has, and the
-    # repository is public, so hosted minutes cost nothing. Well past 60 is a hang.
+    # A quarter of the tree takes 15-24 min (runner speed varies); well past 60 is a hang.
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -649,7 +616,6 @@ jobs:
       CC: clang-19
       CXX: clang++-19
     steps:
-      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -682,7 +648,7 @@ jobs:
       # The browser client (ADR-0098): the same checks, natively and for wasm32, and its room
       # logic against an in-memory room. Its lock adds crates the bridge's fetch does not cover.
       # The quick lane runs them only when the pull request changed clients/web-mls/.
-      # The room tests run under Node, which the self-hosted host does not have.
+      # The room tests run under Node, pinned here rather than the image's.
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         if: matrix.shard == 0 && needs.changes.outputs.web-mls == 'true'
         with:
@@ -734,7 +700,7 @@ jobs:
     name: autobahn (${{ matrix.reactor }})
     # The full lane only (docs/operations/ci-lanes.md).
     if: github.event_name != 'pull_request'
-    runs-on: *trusted-runner
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -744,7 +710,6 @@ jobs:
       CXX: g++-14
       ULW_REACTOR: ${{ matrix.reactor }}
     steps:
-      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -755,9 +720,9 @@ jobs:
           ccache-save: "false"
       - run: cmake --preset ci
       - run: cmake --build --preset ci --target ulw_ws_echo_server
-      # Not run.sh's fixed 9001: both reactors' jobs, and other runs', may share a host. A port
-      # nothing listens on, below the ephemeral range as tests/support/reserve_port.hpp picks
-      # them; one taken in between fails the run at the server's start, not silently.
+      # Not run.sh's fixed 9001: a port nothing listens on, below the ephemeral range as
+      # tests/support/reserve_port.hpp picks them; one taken in between fails the run at the
+      # server's start, not silently.
       - name: Pick the echo server's port
         id: port
         run: |
@@ -772,10 +737,6 @@ jobs:
       - run: tests/autobahn/run.sh build/ci
         env:
           ULW_AUTOBAHN_PORT: ${{ steps.port.outputs.port }}
-      # The suite's container runs as root and writes its reports into the workspace.
-      - name: Hand the reports back to the runner's user
-        if: always() && runner.environment == 'self-hosted'
-        run: sudo chown -R "$(id -u):$(id -g)" build/ci/autobahn || true
       - if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -790,15 +751,14 @@ jobs:
     # The full lane only (docs/operations/ci-lanes.md).
     if: github.event_name != 'pull_request'
     # Seven targets, nproc at a time: two rounds of the run length (30 min nightly) on a hosted
-    # runner's four cores, three on the self-hosted host's share of three, plus the build.
+    # runner's four cores, plus the build.
     timeout-minutes: 120
-    runs-on: *trusted-runner
+    runs-on: ubuntu-24.04
     env:
       CC: clang-19
       CXX: clang++-19
       FUZZ_TARGETS: ws http hls toml mls sdp rtp
     steps:
-      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -845,7 +805,6 @@ jobs:
       # From gitleaks_8.30.1_checksums.txt in the release, linux_x64 line.
       GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
     steps:
-      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -868,7 +827,6 @@ jobs:
     if: needs.changes.outputs.deploy == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - *clear-runner
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

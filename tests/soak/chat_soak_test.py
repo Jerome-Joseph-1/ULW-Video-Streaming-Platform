@@ -66,6 +66,18 @@ class JudgeTest(unittest.TestCase):
         self.assertFalse(passed)
         self.assertTrue(any("fds" in line and "NOT FLAT" in line for line in report))
 
+    def test_a_relays_segments_are_judged_together(self):
+        # Two fresh processes of four hours each, the second at a higher level (ADR-0104).
+        def segment(index, shift_kb, leak=0.0):
+            return [{**r, "segment": index,
+                     **{f"{column(n)}_rss_kb": r[f"{column(n)}_rss_kb"] + shift_kb for n in NODES}}
+                    for r in samples(minutes=240, leak_per_command=leak, seed=index + 1)]
+        passed, report = judge(segment(0, 0) + segment(1, 3000), CLIENTS)
+        self.assertTrue(passed, "\n".join(report))
+        self.assertIn("in 2 segments", report[0])
+        passed, report = judge(segment(0, 3000, 0.5) + segment(1, 0, 0.5), CLIENTS)
+        self.assertFalse(passed, "\n".join(report))
+
     def test_descriptor_bound_counts_every_connection_the_soak_can_hold(self):
         self.assertEqual(chat_soak.fd_bound(CLIENTS),
                          CLIENTS + chat_soak.VISITORS_IN_FLIGHT + chat_soak.SLOW_MAX + 3)
