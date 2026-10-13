@@ -134,13 +134,20 @@ stands.
 
 ### Cancel: `DELETE /api/v1/uploads/{id}`
 
-Discards the bytes stored so far and marks the upload aborted. `204`, and `204` again on a repeat.
-A committed upload cannot be cancelled (`409`). Afterwards `HEAD` answers `404` and `PATCH` and
-commit answer `409`, until the upload's expiry, when all three answer `410`
-([Resuming](#resuming)). The video stays in the state it had (`init` or `uploading`) and is never
-playable. A committed video is deleted instead, with `DELETE /api/v1/videos/{id}`
-([videos-and-playback.md](videos-and-playback.md#deleting-a-video)), which refuses a video whose
-upload is still in progress.
+<!-- apps/gateway/src/connection.cpp (on_found), infra/postgres/src/upload_catalog.cpp (kAbortUpload), apps/reaper/src/reaper.cpp (purge_videos), docs/adr/0106-deleting-a-video-mid-upload-aborts-the-upload.md -->
+
+Discards the bytes stored so far, marks the upload aborted and deletes its video, which nothing
+can commit any more: from the `204` on the video is a `404` everywhere and is no longer in the
+owner's list (`GET /api/v1/videos`), and the reaper removes whatever the store still holds for it
+at its next pass. `204` again on a repeat, which also deletes a video an earlier cancel left
+behind. A committed upload cannot be cancelled (`409`): its video is deleted instead, with
+`DELETE /api/v1/videos/{id}` ([videos-and-playback.md](videos-and-playback.md#deleting-a-video)).
+Afterwards `HEAD` answers `404` and `PATCH` and commit answer `409`, until the upload's expiry,
+when all three answer `410` ([Resuming](#resuming)), and `404` once the reaper has removed the
+video.
+
+Deleting the video mid-upload, with `DELETE /api/v1/videos/{id}` or the operator's
+`DELETE /api/v1/service/videos/{id}`, has the same effect as cancelling its upload.
 
 ## Resuming
 

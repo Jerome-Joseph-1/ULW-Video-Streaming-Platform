@@ -1,6 +1,6 @@
 # 0100. The operator's backend controls VOD: who uploads by a claim of the user's token, a video deleted at once in the catalog and purged by the reaper, and a service API to share, take down and list
 
-Status: Accepted
+Status: Accepted, amended by 0106 (a video mid-upload is deleted too, its upload aborted; cancelling an upload deletes its video)
 Date: 2026-10-08
 
 ## Context

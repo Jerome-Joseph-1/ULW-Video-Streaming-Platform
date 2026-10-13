@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -60,18 +61,24 @@ public:
 // video_purges as the reaper sees it: what due() answers, and what forget() was asked.
 class FakePurges final : public core::ports::IVideoPurges {
 public:
-    [[nodiscard]] std::expected<std::vector<core::VideoId>, CatalogError>
+    [[nodiscard]] std::expected<std::vector<core::ports::DuePurge>, CatalogError>
     due(std::size_t limit) override {
         limits.push_back(limit);
         if (due_error) {
             return std::unexpected(*due_error);
         }
-        std::vector<core::VideoId> out;
+        std::vector<core::ports::DuePurge> out;
         for (const core::VideoId& v : queue) {
             if (out.size() == limit) {
                 break;
             }
-            out.push_back(v);
+            core::ports::DuePurge purge{.video = v, .uploads = {}};
+            for (const auto& [video, upload] : staged) {
+                if (video == v) {
+                    purge.uploads.push_back(upload);
+                }
+            }
+            out.push_back(std::move(purge));
         }
         return out;
     }
@@ -84,6 +91,8 @@ public:
     }
 
     std::vector<core::VideoId> queue;
+    // The ingest sessions of uploads a deleted video never completed.
+    std::vector<std::pair<core::VideoId, core::ports::IngestId>> staged;
     std::optional<CatalogError> due_error;
     std::expected<bool, CatalogError> forget_answer = true;
     std::vector<std::size_t> limits;
@@ -452,6 +461,42 @@ TEST_F(ReaperTest, APassPurgesNoMoreVideosThanItsShare) {
     EXPECT_EQ(report.videos_purged, 6U);
     EXPECT_EQ(purges.limits, (std::vector<std::size_t>{3, 3}));
     EXPECT_EQ(purges.queue.size(), 4U);
+}
+
+// A video deleted while its upload was open (ADR-0106): the staged parts are discarded before its
+// objects are listed, and an object a commit finished just ahead of the delete goes with them.
+TEST_F(ReaperTest, AVideoDeletedMidUploadLosesItsStagedPartsFirst) {
+    const core::VideoId video = deleted_video();
+    purges.staged.emplace_back(
+        video, core::ports::IngestId{
+                   .key = *core::StorageKey::parse("videos/" + video.to_string() + "/raw"),
+                   .backend_ref = "multipart-1",
+                   .total_bytes = 10,
+                   .chunk_size = 5});
+    const auto report = run();
+    EXPECT_EQ(report.videos_purged, 1U);
+    EXPECT_TRUE(report.problems.empty());
+    EXPECT_EQ(store.discarded, std::vector<std::string>{"multipart-1"});
+    EXPECT_TRUE(store.objects.empty());
+    EXPECT_EQ(purges.forgotten, std::vector<core::VideoId>{video});
+}
+
+TEST_F(ReaperTest, AStagedUploadTheStoreStillHoldsKeepsTheVideoQueued) {
+    const core::VideoId video = deleted_video();
+    purges.staged.emplace_back(
+        video, core::ports::IngestId{
+                   .key = *core::StorageKey::parse("videos/" + video.to_string() + "/raw"),
+                   .backend_ref = "multipart-1",
+                   .total_bytes = 10,
+                   .chunk_size = 5});
+    store.still_held = true;
+    const auto report = run();
+    EXPECT_EQ(report.videos_purged, 0U);
+    EXPECT_EQ(report.videos_purge_failed, 1U);
+    ASSERT_EQ(report.problems.size(), 1U);
+    EXPECT_NE(report.problems.front().find("still holds it"), std::string::npos);
+    EXPECT_TRUE(purges.forgotten.empty());
+    EXPECT_EQ(purges.queue.size(), 1U);
 }
 
 } // namespace

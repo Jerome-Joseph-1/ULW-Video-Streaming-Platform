@@ -1292,6 +1292,54 @@ TEST_P(GatewayUpload, OnlyTheOwnerCancelsAndACancelledUploadTakesNothingMore) {
     EXPECT_TRUE(gw.jobs().empty());
 }
 
+// ADR-0106: cancelling takes the video with it, so it neither lists nor plays, and its staged
+// parts wait for the reaper; a repeat answers the same.
+TEST_P(GatewayUpload, CancellingAnUploadDeletesItsVideo) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fs, .chunk = kMiB}));
+    const auto data = ulw::test::pattern(2 * kMiB);
+    HttpClient c(gw.endpoint());
+    const auto up = create_upload(c, data.size());
+    ASSERT_TRUE(up);
+    ASSERT_EQ(patch(c, up->upload_id, 0, std::span(data).first(kMiB))->status, 204);
+    const std::string path = "/api/v1/uploads/" + up->upload_id;
+    EXPECT_EQ(c.request("DELETE", path, kAlice)->status, 204);
+    EXPECT_EQ(c.request("GET", "/api/v1/videos/" + up->video_id, kAlice)->status, 404);
+    const auto listed = c.request("GET", "/api/v1/videos", kAlice);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(listed->body.find(up->video_id), std::string::npos) << listed->body;
+    EXPECT_EQ(c.request("DELETE", "/api/v1/videos/" + up->video_id, kAlice)->status, 204);
+    EXPECT_EQ(c.request("DELETE", path, kAlice)->status, 204);
+    EXPECT_EQ(gw.purges(), std::vector<core::VideoId>{*core::VideoId::parse(up->video_id)});
+}
+
+// ADR-0106: deleting a video mid-upload, by its owner or the operator's backend, aborts the
+// upload: a later append or commit is refused, and the video does not come back.
+TEST_P(GatewayUpload, DeletingAVideoMidUploadAbortsItsUpload) {
+    for (const std::string_view who : {kAlice, std::string_view("service.backend")}) {
+        GatewayUnderTest gw(over_transport({.backend = Backend::Fs, .chunk = kMiB}));
+        const auto data = ulw::test::pattern(2 * kMiB);
+        HttpClient c(gw.endpoint());
+        const auto up = create_upload(c, data.size());
+        ASSERT_TRUE(up);
+        ASSERT_EQ(patch(c, up->upload_id, 0, std::span(data).first(kMiB))->status, 204);
+        const std::string video =
+            (who == kAlice ? "/api/v1/videos/" : "/api/v1/service/videos/") + up->video_id;
+        EXPECT_EQ(c.request("DELETE", video, who)->status, 204) << who;
+        EXPECT_EQ(c.request("DELETE", video, who)->status, 204) << who;
+
+        const auto late = patch(c, up->upload_id, kMiB, std::span(data).subspan(kMiB));
+        ASSERT_TRUE(late);
+        EXPECT_EQ(late->status, 409);
+        HttpClient d(gw.endpoint());
+        EXPECT_EQ(d.request("POST", "/api/v1/uploads/" + up->upload_id + "/commit", kAlice)->status,
+                  409);
+        EXPECT_TRUE(gw.jobs().empty());
+        EXPECT_EQ(d.request("GET", "/api/v1/videos/" + up->video_id, kAlice)->status, 404);
+        EXPECT_EQ(d.request("DELETE", "/api/v1/uploads/" + up->upload_id, kAlice)->status, 204);
+        EXPECT_EQ(gw.purges().size(), 1U);
+    }
+}
+
 // A catalog that is down is a 503 on every route that needs it, so clients retry; a row it
 // cannot read is a 500, which they must not. Nothing an outage refused is half done after it.
 TEST_P(GatewayUpload, ACatalogOutageIsA503AndAnUnreadableRowA500OnEveryRoute) {

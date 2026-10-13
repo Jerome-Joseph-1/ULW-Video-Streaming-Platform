@@ -139,6 +139,10 @@ public:
     // did the work, and whatever the worker has made of the video since on a repeat.
     virtual void commit_upload(const UploadId& id, const VideoId& video,
                                const std::string& request_id, CatalogCallback<VideoState> done) = 0;
+    // Cancels an upload (ADR-0106): it is aborted, so no later append or commit goes through, and
+    // its video, which nothing can commit now, is deleted as delete_video deletes one, staged
+    // parts queued for the reaper. Idempotent: an upload aborted already succeeds, and its video
+    // goes if an earlier abort left it. NotFound for no such upload; Conflict once it completed.
     virtual void abort_upload(const UploadId& id, CatalogCallback<void> done) = 0;
 
     // Who may see a video (ADR-0097). Every read a viewer's request makes goes through
@@ -156,13 +160,14 @@ public:
     virtual void set_visibility(const VideoId& id, const std::optional<UserId>& owner,
                                 const Visibility& visibility,
                                 CatalogCallback<VideoRecord> done) = 0;
-    // Deletes a committed video (processing, ready or failed) for good (ADR-0100): from this
-    // call on every read finds no such video, its grants are gone, a transcode job still queued
-    // for it is cancelled, and its stored objects are queued for the reaper, which removes them
-    // and then the row. With `owner`, only a video of theirs; without (the operator's backend),
-    // any. Idempotent: a video deleted already, and not removed by the reaper yet, succeeds
-    // again. NotFound when no video by that id exists (or is not `owner`'s, or the reaper has
-    // removed it); Conflict while its upload is in progress (init or uploading).
+    // Deletes a video for good, in any state (ADR-0100, ADR-0106): an upload still open for it is
+    // aborted, so no later append or commit can bring it back; from this call on every read
+    // finds no such video, its grants are gone, a transcode job still queued for it is
+    // cancelled, and its stored objects and staged parts are queued for the reaper, which
+    // removes them and then the row. With `owner`, only a video of theirs; without (the operator's
+    // backend), any. Idempotent: a video deleted already, and not removed by the reaper yet,
+    // succeeds again. NotFound when no video by that id exists (or is not `owner`'s, or the reaper
+    // has removed it).
     virtual void delete_video(const VideoId& id, const std::optional<UserId>& owner,
                               CatalogCallback<void> done) = 0;
     // At most `limit` of `owner`'s videos that are not deleted, newest first, from after
