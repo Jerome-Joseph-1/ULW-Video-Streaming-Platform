@@ -9,6 +9,7 @@ node stayed flat, by the criterion of ADR-0042 applied to chat's units of work (
     tests/soak/chat_soak.py --build build/ci --hours 6 --out /some/dir
     tests/soak/chat_soak.py --self-test --out /some/dir           # 12 minutes, proves the harness
     tests/soak/chat_soak.py --rejudge /some/dir/samples.csv --clients 64
+    tests/soak/chat_soak.py --rejudge a/samples.csv b/samples.csv --clients 64   # a relay's
 
 The database is created in the server named by ULW_TEST_DATABASE_URL (the shared Postgres of
 deploy/local/compose.yaml by default) and dropped at the end. The binaries are copied into
@@ -109,7 +110,8 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from soak import MONTH_SECONDS, Z95, Counts, env_or, fit, log, per_hour, proc_sample  # noqa: E402
+from soak import (MONTH_SECONDS, Z95, Counts, env_or, fd_check, fit_within, load_segments,  # noqa: E402
+                  log, proc_sample, rate, segments, window_line)
 
 ROOT = Path(__file__).resolve().parents[2]
 MIB = 1024 * 1024
@@ -1013,29 +1015,25 @@ class Signals(threading.Thread):
             i += 1
 
 
-def split(rows, warmup):
-    return ([r for r in rows if r["elapsed_min"] < warmup],
-            [r for r in rows if r["elapsed_min"] >= warmup])
-
-
 def judge(rows, clients, warmup=WARMUP_MINUTES):
-    """Returns (passed, report lines): ADR-0042's criterion, per node, on chat's units."""
-    warm, window = split(rows, warmup)
-    if len(window) < 10:
+    """Returns (passed, report lines): ADR-0042's criterion, per node, on chat's units, over one
+    run or a relay's segments (soak.segments(), ADR-0104)."""
+    parts = segments(rows, warmup)
+    windows = [w for _, w in parts if w]
+    if sum(len(w) for w in windows) < 10:
         return False, ["too few samples after the warm-up to judge"]
-    hours = (window[-1]["elapsed_min"] - window[0]["elapsed_min"]) / 60
-    report = [f"window: {len(window)} samples over {hours:.2f} h after a {warmup} min warm-up"]
+    report = [window_line(windows, warmup)]
     passed = True
     for node in NODES:
         c = column(node)
-        rates = {unit: per_hour(window, f"{c}_{col}") for unit, col, _ in UNITS}
-        rss = [(r["elapsed_min"] / 60, r[f"{c}_rss_kb"] * 1024) for r in window]
-        peak = max(v for _, v in rss)
-        slope, se = fit(rss)
+        rates = {unit: rate(windows, f"{c}_{col}") for unit, col, _ in UNITS}
+        rss = [[(r["elapsed_min"] / 60, r[f"{c}_rss_kb"] * 1024) for r in w] for w in windows]
+        peak = max(v for s in rss for _, v in s)
+        slope, se = fit_within(rss)
         upper = slope + Z95 * se
-        report.append(f"{node} rss: first {rss[0][1] / MIB:.1f} MiB, last {rss[-1][1] / MIB:.1f} "
-                      f"MiB, peak {peak / MIB:.1f} MiB, slope {slope / 1e3:+.1f} KB/h, 95% upper "
-                      f"end {upper / 1e3:+.1f} KB/h; per hour " +
+        report.append(f"{node} rss: first {rss[0][0][1] / MIB:.1f} MiB, last "
+                      f"{rss[-1][-1][1] / MIB:.1f} MiB, peak {peak / MIB:.1f} MiB, slope "
+                      f"{slope / 1e3:+.1f} KB/h, 95% upper end {upper / 1e3:+.1f} KB/h; per hour " +
                       ", ".join(f"{rates[u]:.0f} {col}" for u, col, _ in UNITS))
         for unit, _, production in UNITS:
             bound = (MEMORY_LIMIT - peak) / (production * MONTH_SECONDS)
@@ -1048,17 +1046,9 @@ def judge(rows, clients, warmup=WARMUP_MINUTES):
             passed = passed and ok
             report.append(f"  per {unit}: at most {leak:.4f} B, bound {bound:.4f} B: "
                           f"{'flat' if ok else 'NOT SHOWN FLAT'}")
-        fds = [(r["elapsed_min"] / 60, r[f"{c}_fds"]) for r in window]
-        fd_slope, fd_se = fit(fds)
-        fd_rise = (fd_slope + Z95 * fd_se) * hours
-        warm_fds = [r[f"{c}_fds"] for r in warm] or [0]
-        bound = max(fd_bound(clients), max(warm_fds) - min(warm_fds))
-        ok = fd_rise < bound
+        ok, fd_line = fd_check(parts, windows, f"{c}_fds", fd_bound(clients))
         passed = passed and ok
-        report.append(f"{node} fds: first {fds[0][1]}, last {fds[-1][1]}, min "
-                      f"{min(v for _, v in fds)}, max {max(v for _, v in fds)}, rise over the "
-                      f"window at most {fd_rise:+.2f}, bound {bound}: "
-                      f"{'flat' if ok else 'NOT FLAT'}")
+        report.append(f"{node} fds: {fd_line}")
     return passed, report
 
 
@@ -1118,12 +1108,16 @@ def main():
     parser.add_argument("--interval", type=float, default=60.0, help="seconds between samples")
     parser.add_argument("--self-test", action="store_true",
                         help="12 minutes, 15 s samples, owner changes every 150 s")
-    parser.add_argument("--rejudge", metavar="SAMPLES_CSV")
+    parser.add_argument("--rejudge", metavar="SAMPLES_CSV", nargs="+",
+                        help="judge a finished run again, or a relay soak's segments together")
     args = parser.parse_args()
     if args.rejudge:
-        passed, report = judge(load_samples(args.rejudge), args.clients)
-        print("\n".join(report + [f"verdict: {'PASS' if passed else 'FAIL'}"]))
-        return 0 if passed else 1
+        rows, unsound = load_segments(args.rejudge, load_samples)
+        passed, report = judge(rows, args.clients)
+        print("\n".join(report + [f"verdict: {'PASS' if passed else 'FAIL'}"] +
+                        [f"INVALID: segment {path}: {why}; the verdict above is not evidence "
+                         "either way" for path, why in unsound]))
+        return 2 if unsound else 0 if passed else 1
     if not args.out:
         parser.error("--out is required for a run")
     warmup, scale, every = WARMUP_MINUTES, 1.0, 600.0
@@ -1232,6 +1226,12 @@ def main():
         passed = flat and covered and exited and not failure
     summary.append(f"verdict: {'PASS' if passed else 'FAIL'}")
     (out / "summary.txt").write_text("\n".join(summary) + "\n")
+    # For judging this run with others (--rejudge, ADR-0104): whether it is evidence at all,
+    # apart from what its samples say.
+    why = failure or (None if covered else "a path of the mix never ran") or \
+        (None if exited else f"exit codes after SIGTERM: {codes}")
+    (out / "result.json").write_text(json.dumps({"flat": flat, "sound": why is None,
+                                                 "why": why}) + "\n")
     print("\n".join(summary), flush=True)
     if failure:
         return 2

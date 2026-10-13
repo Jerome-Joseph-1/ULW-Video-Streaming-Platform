@@ -241,7 +241,59 @@ class Polling(unittest.TestCase):
 
 
 @unittest.skipUnless(os.geteuid() == 0, "the sandbox's view is root's without capabilities")
+class Relay(unittest.TestCase):
+    """A relay soak's segments, judged together (ADR-0104)."""
+
+    @staticmethod
+    def segment(index, rss_kb_at):
+        return [{**r, "segment": index} for r in samples(300, rss_kb_at)]
+
+    def test_one_series_fits_as_the_plain_fit(self):
+        points = [(m / 60, 30_000 + 7 * m + (m % 5)) for m in range(100)]
+        self.assertEqual(soak.fit_within([points]), soak.fit(points))
+
+    def test_segments_that_restart_at_other_levels_but_stay_flat_pass(self):
+        # Each a fresh process at its own level; concatenated, they would look like a rise.
+        rows = self.segment(0, lambda m: 30_000) + self.segment(1, lambda m: 34_000) + \
+            self.segment(2, lambda m: 38_000)
+        passed, report = judge(rows, 8)
+        self.assertTrue(passed, report)
+        self.assertIn("in 3 segments", report[0])
+
+    def test_a_leak_shared_by_every_segment_fails_however_each_starts(self):
+        leak = lambda base: lambda m: base + int(m * 40_000 / 1024 / 60)  # noqa: E731
+        rows = self.segment(0, leak(38_000)) + self.segment(1, leak(30_000))
+        slope, _ = soak.fit_within([[(r["elapsed_min"] / 60, r["gateway_rss_kb"] * 1024)
+                                     for r in rows if r["segment"] == i] for i in (0, 1)])
+        self.assertAlmostEqual(slope / 1e3, 40.0, delta=1.0)
+        passed, _ = judge(rows, 8)
+        self.assertFalse(passed)
+
+    def test_a_segment_whose_run_was_not_sound_is_named(self):
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for name, result in [("a", {"flat": True, "sound": True, "why": None}),
+                                 ("b", {"flat": True, "sound": False, "why": "a service exited"}),
+                                 ("c", None)]:
+                run = pathlib.Path(d) / name
+                run.mkdir()
+                rows = samples(30, lambda m: 30_000)
+                with open(run / "samples.csv", "w") as f:
+                    f.write(",".join(rows[0]) + "\n")
+                    f.writelines(",".join(str(v) for v in r.values()) + "\n" for r in rows)
+                if result:
+                    (run / "result.json").write_text(json.dumps(result))
+                paths.append(str(run / "samples.csv"))
+            rows, unsound = soak.load_segments(paths)
+            self.assertEqual({r["segment"] for r in rows}, {0, 1, 2})
+            self.assertEqual([(pathlib.Path(p).parent.name, why) for p, why in unsound],
+                             [("b", "a service exited"), ("c", "no result.json beside it")])
+            # One run alone needs no result.json: runs from before it are judged as they were.
+            self.assertEqual(soak.load_segments(paths[2:])[1], [])
+
+
 class ScratchReach(unittest.TestCase):
+    @unittest.skipUnless(os.geteuid() == 0, "giving the directory to another user takes root")
     def test_a_directory_closed_to_others_is_out_of_reach(self):
         with tempfile.TemporaryDirectory() as d:
             closed = pathlib.Path(d) / "home"

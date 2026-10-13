@@ -1,34 +1,40 @@
 name: soak-experiment
 
-# A soak run dispatched by hand at any ref, for experiments on the soaks' memory and for the
-# 6 h acceptance soak (ADR-0042, docs/operations/soak.md). The data is the point: samples.csv,
-# the summary and the processes' logs are uploaded whatever the verdict.
+# A soak dispatched by hand at any ref, for experiments on the soaks' memory and for the
+# acceptance soak (ADR-0042, docs/operations/soak.md). The data is the point: samples.csv, the
+# summary and the processes' logs are uploaded whatever the verdict.
 #
-# `runner` picks a GitHub-hosted runner or the project's self-hosted one. Hosted jobs are cut
-# off at 6 h, build included, so there `hours` stops at 4.9, the most that leaves the job its
-# 45 minutes for setup and the build under the 355 it is given; on the self-hosted runner it
-# goes to 22, which keeps the job under the 24 h its token lives (the artifact upload at the end
-# needs it) and the second job of `both`, queued behind the first (max-parallel below), under
-# the 24 h a queued job waits. It starts at 0.5: the judges skip the first 15 minutes and need
-# ten samples after them.
+# A relay soak (ADR-0104). A hosted job is cut off at 6 h, so a run longer than one job holds is
+# split into segments of at most `segment-hours`: the binaries are built once, each segment
+# starts them fresh on a runner of its own and soaks them, and the `judge` job fits the
+# segments' samples together, one slope shared by all of them and an intercept for each
+# (soak.py's fit_within). A leak adds the same bytes per unit of work in every segment, so the
+# shared slope measures it however the segments' levels differ; one segment is the old
+# single-run verdict exactly. What a relay cannot show is a process older than one segment.
+#
+# `hours` is the load in total, from 0.5 to 60: the judges skip each segment's first
+# 15 minutes and need ten samples after them, and 60 h is twelve segments of 5 h.
 
 on:
   workflow_dispatch:
     inputs:
-      runner:
-        description: Where to run.
-        type: choice
-        options: [hosted, self-hosted]
-        default: hosted
       kind:
         description: Which soak to run.
         type: choice
         options: [chat, gateway, both]
         default: chat
       hours:
-        description: Hours of load, from 0.5 to 4.9 hosted or 22 self-hosted.
+        description: Hours of load in total, from 0.5 to 60, split into segments.
         type: number
         default: 1.5
+      segment-hours:
+        description: Longest a segment runs, from 0.5 to 5.25 (one hosted job each).
+        type: number
+        default: 5.25
+      parallel:
+        description: Segments running at once, both kinds together, 1 to 10 (the account runs 20 jobs).
+        type: number
+        default: 4
       clients:
         description: Client threads, 1 to 1024; empty keeps the script's own (chat 64, gateway 8).
         type: string
@@ -37,155 +43,186 @@ on:
 permissions:
   contents: read
 
-# One soak at a time per runner kind: a second on the self-hosted host would collide on its
-# fixed ports (Postgres 15432, MinIO, the soaks' own).
-concurrency:
-  group: soak-experiment-${{ inputs.runner }}
-  cancel-in-progress: false
-
 jobs:
-  # Checks the inputs and turns them into the soak job's matrix and timeouts, which expressions
-  # alone cannot compute.
+  # Checks the inputs and turns them into the matrices and timeouts, which expressions alone
+  # cannot compute.
   plan:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      job-minutes: ${{ steps.plan.outputs.job-minutes }}
+      kinds: ${{ steps.plan.outputs.kinds }}
+      segments: ${{ steps.plan.outputs.segments }}
+      targets: ${{ steps.plan.outputs.targets }}
+      segment-hours: ${{ steps.plan.outputs.segment-hours }}
       soak-minutes: ${{ steps.plan.outputs.soak-minutes }}
+      job-minutes: ${{ steps.plan.outputs.job-minutes }}
     steps:
       - id: plan
         # Through the environment, not spliced into the script: inputs are the dispatcher's text.
         env:
-          RUNNER: ${{ inputs.runner }}
           KIND: ${{ inputs.kind }}
           HOURS: ${{ inputs.hours }}
+          SEGMENT_HOURS: ${{ inputs.segment-hours }}
+          PARALLEL: ${{ inputs.parallel }}
           CLIENTS: ${{ inputs.clients }}
         run: |
-          case $RUNNER in
-            hosted) most=4.9 ;;
-            self-hosted) most=22 ;;
-            *) echo "::error::unknown runner '$RUNNER'"; exit 1 ;;
-          esac
-          if ! awk -v h="$HOURS" -v m="$most" 'BEGIN { exit !(h ~ /^[0-9]*\.?[0-9]+$/ && h >= 0.5 && h <= m) }'; then
-            echo "::error::hours must be a number from 0.5 to $most on a $RUNNER runner, not '$HOURS'"
-            exit 1
+          within() {  # within <value> <least> <most>: a plain decimal in that range
+            awk -v v="$1" -v lo="$2" -v hi="$3" 'BEGIN { exit !(v ~ /^[0-9]*\.?[0-9]+$/ && v >= lo && v <= hi) }'
+          }
+          if ! within "$HOURS" 0.5 60; then
+            echo "::error::hours must be a number from 0.5 to 60, not '$HOURS'"; exit 1
+          fi
+          if ! within "$SEGMENT_HOURS" 0.5 5.25; then
+            echo "::error::segment-hours must be a number from 0.5 to 5.25, not '$SEGMENT_HOURS'"; exit 1
+          fi
+          if [[ ! $PARALLEL =~ ^([1-9]|10)$ ]]; then
+            echo "::error::parallel must be a whole number from 1 to 10, not '$PARALLEL'"; exit 1
           fi
           # The chat server takes 1,280 connections; more clients would measure refusals.
           if [[ -n $CLIENTS && ! ( $CLIENTS =~ ^[1-9][0-9]{0,3}$ && $CLIENTS -le 1024 ) ]]; then
-            echo "::error::clients must be empty or a whole number from 1 to 1024, not '$CLIENTS'"
-            exit 1
+            echo "::error::clients must be empty or a whole number from 1 to 1024, not '$CLIENTS'"; exit 1
           fi
-          chat='{"kind":"chat","script":"tests/soak/chat_soak.py","out":"soak-chat","targets":"chat_server ulw_migrate ulw_devtoken"}'
-          gateway='{"kind":"gateway","script":"tests/soak/soak.py","out":"soak-gw","targets":"gateway_server transcode_worker ulw_sandbox ulw_migrate ulw_devtoken"}'
           case $KIND in
-            chat) include="[$chat]" ;;
-            gateway) include="[$gateway]" ;;
-            both) include="[$chat,$gateway]" ;;
+            chat) kinds='["chat"]'; targets="chat_server ulw_migrate ulw_devtoken" ;;
+            gateway) kinds='["gateway"]'; targets="gateway_server transcode_worker ulw_sandbox ulw_migrate ulw_devtoken" ;;
+            both) kinds='["chat","gateway"]'; targets="chat_server gateway_server transcode_worker ulw_sandbox ulw_migrate ulw_devtoken" ;;
             *) echo "::error::unknown kind '$KIND'"; exit 1 ;;
           esac
-          # The soak itself: its hours, plus 15 minutes to start, stop its threads and judge.
-          # The job: that plus 45 minutes for setup and the build; at most 4.9 hours keeps a
-          # hosted job under 355, short of its 360.
-          soak=$(awk -v h="$HOURS" 'BEGIN { m = h * 60; printf "%d", (m == int(m) ? m : int(m) + 1) + 15 }')
-          job=$((soak + 45))
+          # As few segments as the length allows, all of one length (to the minute, rounded up).
+          read -r count minutes < <(awk -v h="$HOURS" -v s="$SEGMENT_HOURS" 'BEGIN {
+            n = int(h / s); if (n * s < h) n++
+            m = h * 60 / n; if (m != int(m)) m = int(m) + 1
+            print n, m }')
+          if (( minutes < 30 )); then
+            echo "::error::$HOURS h in $count segments leaves $minutes min each; the judge needs 30"; exit 1
+          fi
+          # The soak step: its minutes plus 15 to start, stop its threads and judge. The job:
+          # that plus 20 for the runner, Postgres and the packages; at most 5.25 h keeps it
+          # under 355, short of a hosted job's 360.
           {
-            echo "matrix={\"include\":$include}"
-            echo "soak-minutes=$soak"
-            echo "job-minutes=$job"
+            echo "kinds=$kinds"
+            echo "segments=$(seq -s, 1 "$count" | sed 's/.*/[&]/')"
+            echo "targets=$targets"
+            echo "segment-hours=$(awk -v m="$minutes" 'BEGIN { printf "%.4f", m / 60 }')"
+            echo "soak-minutes=$((minutes + 15))"
+            echo "job-minutes=$((minutes + 35))"
           } >>"$GITHUB_OUTPUT"
+          echo "$KIND: $count segment(s) of $minutes min, $PARALLEL at a time" >>"$GITHUB_STEP_SUMMARY"
 
-  soak:
-    name: soak (${{ matrix.kind }})
+  # Once, so every segment runs the same binaries.
+  build:
     needs: plan
-    runs-on: ${{ inputs.runner == 'self-hosted' && 'self-hosted' || 'ubuntu-24.04' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CC: gcc-14
+      CXX: g++-14
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup
+        with:
+          cache-key: gcc-ci
+          ccache-save: "false"
+      - run: cmake --preset ci
+      - env:
+          TARGETS: ${{ needs.plan.outputs.targets }}
+        run: |
+          read -ra targets <<<"$TARGETS"
+          cmake --build --preset ci --target "${targets[@]}"
+      # A tarball, which keeps the executable bits an artifact would drop, at the paths under
+      # build/ci the soaks copy them from.
+      - run: |
+          cd build/ci
+          built=()
+          for f in apps/chat/chat_server apps/gateway/gateway_server apps/worker/transcode_worker \
+                   apps/worker/ulw_sandbox apps/migrate/ulw_migrate tools/devtoken/ulw_devtoken; do
+            if [[ -f $f ]]; then built+=("$f"); fi
+          done
+          tar -czf "$RUNNER_TEMP/binaries.tgz" "${built[@]}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: soak-binaries-${{ github.run_id }}
+          path: ${{ runner.temp }}/binaries.tgz
+          retention-days: 3
+
+  segment:
+    name: soak (${{ matrix.kind }}, segment ${{ matrix.segment }})
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ fromJSON(needs.plan.outputs.job-minutes) }}
     strategy:
       fail-fast: false
-      # One leg at a time on the self-hosted host: it has several runners, and the chat and
-      # gateway legs of `both` would collide there on Postgres's 15432, compose project `local`
-      # and its ulw-minio, which each leg's cleanup takes down. Hosted legs get a machine each.
-      max-parallel: ${{ inputs.runner == 'self-hosted' && 1 || 2 }}
-      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+      max-parallel: ${{ fromJSON(inputs.parallel) }}
+      matrix:
+        kind: ${{ fromJSON(needs.plan.outputs.kinds) }}
+        segment: ${{ fromJSON(needs.plan.outputs.segments) }}
     # As ci.yml's integration job: the digest of deploy/local/compose.yaml and its password,
-    # on 15432, below the ephemeral port range (ci.yml says why), which ULW_TEST_DATABASE_URL
-    # below names. The chat soak needs Postgres only; the gateway soak also starts MinIO below.
+    # on 15432, below the ephemeral port range, which ULW_TEST_DATABASE_URL below names. The
+    # chat soak needs Postgres only; the gateway soak also starts MinIO below.
     services:
       postgres:
         # Same digest as deploy/local/compose.yaml.
         image: postgres:16@sha256:1a6ab3f5345eb6dbe04a1349529caabdb0ab09293a09590fad07b2246bfa4b54
         env:
           POSTGRES_PASSWORD: testtest123
-        # Loopback only: a published port bypasses the host's firewall.
         ports: ["127.0.0.1:15432:5432"]
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 2s --health-timeout 2s
           --health-retries 15
     env:
-      CC: gcc-14
-      CXX: g++-14
       ULW_TEST_DATABASE_URL: postgresql://postgres:testtest123@127.0.0.1:15432/postgres
     steps:
-      # A self-hosted runner keeps its workspace between jobs; the soak runs as root (below), so
-      # anything an earlier one left there would stop the checkout from cleaning it. As ci.yml's
-      # first step: processes by their executable's real path in this runner's own directories.
-      - if: inputs.runner == 'self-hosted'
-        run: |
-          workspace=$(realpath -m "$GITHUB_WORKSPACE")
-          temp=$(realpath -m "$RUNNER_TEMP")
-          for dir in "$workspace" "$temp"; do
-            sudo find /proc -mindepth 2 -maxdepth 2 -name exe -lname "$dir/*" \
-              -printf '%h\n' 2>/dev/null | cut -d/ -f3 | xargs -r sudo kill -KILL || true
-          done
-          sudo chown -R "$(id -u):$(id -g)" "$workspace" "$temp"
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # On the self-hosted runner the setup installs what a hosted image carries and a bare
-      # host does not, rustup among them, into this directory.
-      - if: inputs.runner == 'self-hosted'
-        run: echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
-      - uses: ./.github/actions/setup
+      # What the binaries load, ffmpeg for the worker, and psql, with which the soaks create
+      # and drop their database. The worker refuses to start without its sandbox, whose user
+      # namespaces the runners' AppArmor policy refuses (as the setup action says).
+      - run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev libjemalloc-dev zlib1g-dev \
+            ffmpeg postgresql-client
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          cache-key: gcc-ci
-      # The soaks create and drop their database with psql.
-      - run: >-
-          sudo apt-get -o DPkg::Lock::Timeout=600 install -y -qq --no-install-recommends
-          postgresql-client
+          name: soak-binaries-${{ github.run_id }}
+          path: ${{ runner.temp }}
+      - run: mkdir -p build/ci && tar -xzf "$RUNNER_TEMP/binaries.tgz" -C build/ci
       # The gateway soak's store, on the address and keys its defaults name.
       - name: Start MinIO
         if: matrix.kind == 'gateway'
         run: docker compose -f deploy/local/compose.yaml up -d --wait minio
-      - run: cmake --preset ci
-      - env:
-          TARGETS: ${{ matrix.targets }}
-        run: |
-          read -ra targets <<<"$TARGETS"
-          cmake --build --preset ci --target "${targets[@]}"
       - name: Soak
         timeout-minutes: ${{ fromJSON(needs.plan.outputs.soak-minutes) }}
         env:
-          SCRIPT: ${{ matrix.script }}
-          OUT: ${{ runner.temp }}/${{ matrix.out }}
-          HOURS: ${{ inputs.hours }}
+          SCRIPT: ${{ matrix.kind == 'chat' && 'tests/soak/chat_soak.py' || 'tests/soak/soak.py' }}
+          HOURS: ${{ needs.plan.outputs.segment-hours }}
           CLIENTS: ${{ inputs.clients }}
         run: |
+          OUT=$RUNNER_TEMP/soak
           args=(--build build/ci --hours "$HOURS" --out "$OUT")
           if [[ -n $CLIENTS ]]; then
             args+=(--clients "$CLIENTS")
           fi
-          # As root, as the soaks run on a host: the services make themselves undumpable
-          # (ops::disable_core_dumps), which leaves their /proc/<pid>/fd, sampled every minute,
-          # to root alone, and the scripts start them with ULW_ALLOW_ROOT for that reason. No
-          # bytecode: root's __pycache__ would outlive the job on a self-hosted runner.
-          sudo --preserve-env=ULW_TEST_DATABASE_URL PYTHONDONTWRITEBYTECODE=1 "$SCRIPT" "${args[@]}"
+          # As root: the services make themselves undumpable (ops::disable_core_dumps), which
+          # leaves their /proc/<pid>/fd, sampled every minute, to root alone, and the scripts
+          # start them with ULW_ALLOW_ROOT for that reason.
+          status=0
+          sudo --preserve-env=ULW_TEST_DATABASE_URL "$SCRIPT" "${args[@]}" || status=$?
+          sudo chown -R "$(id -u):$(id -g)" "$OUT"
+          # 1 is this segment's own verdict, not flat, which the judge weighs with the others';
+          # anything else is a run that went wrong, which result.json records for the judge too.
+          if (( status > 1 )); then
+            echo "::error::the soak exited $status"; exit "$status"
+          fi
       - name: Summary
         if: ${{ !cancelled() }}
-        env:
-          OUT: ${{ runner.temp }}/${{ matrix.out }}
         run: |
-          if [[ -f $OUT/summary.txt ]]; then
-            { echo '```'; cat "$OUT/summary.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          if [[ -f $RUNNER_TEMP/soak/summary.txt ]]; then
+            { echo '```'; cat "$RUNNER_TEMP/soak/summary.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
           fi
       # The samples and logs whatever the verdict; not the copied binaries, the keys or the
       # gateway's scratch.
@@ -193,35 +230,73 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: soak-${{ matrix.kind }}-${{ github.run_id }}
+          name: soak-${{ matrix.kind }}-${{ github.run_id }}-segment-${{ matrix.segment }}
           path: |
-            ${{ runner.temp }}/${{ matrix.out }}/samples.csv
-            ${{ runner.temp }}/${{ matrix.out }}/summary.txt
-            ${{ runner.temp }}/${{ matrix.out }}/pids.json
-            ${{ runner.temp }}/${{ matrix.out }}/windows.json
-            ${{ runner.temp }}/${{ matrix.out }}/*.log
+            ${{ runner.temp }}/soak/samples.csv
+            ${{ runner.temp }}/soak/summary.txt
+            ${{ runner.temp }}/soak/result.json
+            ${{ runner.temp }}/soak/pids.json
+            ${{ runner.temp }}/soak/windows.json
+            ${{ runner.temp }}/soak/*.log
           if-no-files-found: warn
           retention-days: 30
       - if: failure() && matrix.kind == 'gateway'
         run: docker compose -f deploy/local/compose.yaml logs minio
-      # A self-hosted runner keeps what a job leaves: services a cancelled soak did not stop
-      # (root's, on fixed ports), the root-owned soak output, and MinIO.
-      - if: always() && inputs.runner == 'self-hosted'
-        env:
-          OUT: ${{ runner.temp }}/${{ matrix.out }}
+
+  # The verdict on every segment of a kind together (ADR-0104): 0 flat, 1 not flat, 2 a segment
+  # missing or its run unsound, which makes the samples no evidence either way.
+  judge:
+    name: judge (${{ matrix.kind }})
+    needs: [plan, segment]
+    if: ${{ !cancelled() && needs.plan.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        kind: ${{ fromJSON(needs.plan.outputs.kinds) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: soak-${{ matrix.kind }}-${{ github.run_id }}-segment-*
+          path: ${{ runner.temp }}/segments
+      - env:
+          SCRIPT: ${{ matrix.kind == 'chat' && 'tests/soak/chat_soak.py' || 'tests/soak/soak.py' }}
+          SEGMENTS: ${{ needs.plan.outputs.segments }}
+          CLIENTS: ${{ inputs.clients }}
+          KIND: ${{ matrix.kind }}
         run: |
-          # By the executable's path, in this job's workspace (the build) or its scratch (the
-          # soak's copies): the host's other runners run the same programs for CI, and a match
-          # by name would kill theirs. ulw_sandbox is the worker's child, started by its full
-          # path; the ffmpeg in it is the system's, and is killed with it (pid 1 of its
-          # namespace dies with the helper).
-          for dir in "$(realpath -m "$GITHUB_WORKSPACE")" "$(realpath -m "$RUNNER_TEMP")"; do
-            sudo find /proc -mindepth 2 -maxdepth 2 -name exe -lname "$dir/*" \
-              -printf '%h\n' 2>/dev/null | cut -d/ -f3 | xargs -r sudo kill || true
+          expected=$(jq length <<<"$SEGMENTS")
+          # A segment whose soak never reached its end left no result.json; the script itself
+          # wants one beside each of several, and here one segment needs it as much.
+          samples=()
+          for i in $(seq 1 "$expected"); do
+            dir="$RUNNER_TEMP/segments/soak-$KIND-$GITHUB_RUN_ID-segment-$i"
+            # download-artifact puts a lone match straight into its path, not a directory of
+            # its name.
+            if [[ ! -d $dir ]] && (( expected == 1 )); then dir="$RUNNER_TEMP/segments"; fi
+            if [[ -f $dir/samples.csv && -f $dir/result.json ]]; then
+              samples+=("$dir/samples.csv")
+            else
+              echo "::error::segment $i did not finish: no samples.csv or result.json"
+            fi
           done
-          sudo rm -rf "$OUT"
-          # The worker's scratch, which soak.py puts under /tmp when $OUT is out of the sandbox's
-          # reach (a home directory of mode 750); a cancelled soak never reaches its cleanup.
-          sudo find /tmp -maxdepth 1 -name 'ulw-soak-scratch-*' -exec rm -rf {} +
-          docker compose -f deploy/local/compose.yaml down || true
-          sudo chown -R "$(id -u):$(id -g)" "$GITHUB_WORKSPACE"
+          if (( ${#samples[@]} == 0 )); then exit 2; fi
+          args=(--rejudge "${samples[@]}")
+          if [[ -n $CLIENTS ]]; then
+            args+=(--clients "$CLIENTS")
+          fi
+          status=0
+          # Into a file, not through tee: without pipefail a pipeline's status is tee's, and the
+          # verdict would be lost.
+          python3 -I "$SCRIPT" "${args[@]}" >"$RUNNER_TEMP/verdict.txt" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/verdict.txt"
+          { echo "### $KIND: ${#samples[@]} of $expected segment(s)"; echo '```'
+            cat "$RUNNER_TEMP/verdict.txt"; echo '```'; } >>"$GITHUB_STEP_SUMMARY"
+          if (( ${#samples[@]} < expected )); then
+            echo "::error::$(( expected - ${#samples[@]} )) segment(s) missing: no verdict"; exit 2
+          fi
+          exit "$status"
