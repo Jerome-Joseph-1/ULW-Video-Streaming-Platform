@@ -121,7 +121,9 @@ ENTRYPOINT ["/usr/local/bin/chat_server"]
 FROM ${DEBIAN} AS ffmpeg-runtime
 ARG ULW_SANDBOX_FFMPEG
 ARG ULW_SANDBOX_FFPROBE
-ENV DEBIAN_SNAPSHOT=20260930T100000Z
+# 20261013: librsvg2-2 2.60.0+dfsg-1+deb13u1 (CVE-2026-96889, ffmpeg's dependency) in
+# debian-security since 20261012T204506Z; every pin below is unchanged.
+ENV DEBIAN_SNAPSHOT=20261013T000000Z
 RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/local/sbin/apt-install-debian \
     --mount=type=secret,id=ca-bundle,mode=0444 \
     apt-install-debian \
