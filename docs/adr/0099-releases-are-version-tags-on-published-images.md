@@ -1,6 +1,6 @@
 # 0099. A release is a version tag on a commit and images already published from main
 
-Status: Accepted
+Status: Accepted, amended by 0107 (patches of an older minor version are released from its maintenance line, release/vX.Y)
 Date: 2026-10-08
 Amends: ADR-0085 (images carry a version tag beside the SHA tag and `main`)
 

@@ -5,12 +5,13 @@ name: ci
 # SonarQube scan, secrets, manifests when deploy/ changed, and the browser MLS client's checks
 # (web-mls-dist, and its step of lint) when clients/web-mls/ changed; a pull request that touches
 # only docs/, Markdown, deploy/ or .github/ skips the build and coverage. A push to main or to a
-# batch/** branch, the nightly run and a manual run run the full suite: every job below. The merge
+# batch/** branch or a maintenance line's release/vX.Y branch (docs/adr/0107), the nightly run and
+# a manual run run the full suite: every job below. The merge
 # loop pushes batch/N (main plus the queued pull requests' heads) and squash-merges them only once
 # that run is green, so every check runs on the tree main ends up with.
 on:
   push:
-    branches: [main, "batch/**"]
+    branches: [main, "batch/**", "release/v*"]
   pull_request:
   schedule:
     - cron: "17 3 * * *"
