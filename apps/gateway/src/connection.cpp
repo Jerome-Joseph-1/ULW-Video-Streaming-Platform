@@ -1395,10 +1395,6 @@ void Connection::on_service_deleted(std::uint64_t request,
     if (!serving(request)) {
         return;
     }
-    if (!result && result.error() == CatalogError::Conflict) {
-        fail_with(Status::Conflict, "not_committed");
-        return;
-    }
     on_grant_changed(request, result);
 }
 
@@ -1438,11 +1434,6 @@ void Connection::on_deleted(std::uint64_t request, const core::VideoId& video,
     }
     if (result) {
         respond({.status = Status::NoContent}, {});
-        return;
-    }
-    if (result.error() == CatalogError::Conflict) {
-        // The owner's upload is still in progress: cancel it instead (uploads.md).
-        fail_with(Status::Conflict, "not_committed");
         return;
     }
     if (result.error() != CatalogError::NotFound) {

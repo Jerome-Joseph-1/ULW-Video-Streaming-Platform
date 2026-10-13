@@ -98,8 +98,22 @@ std::optional<std::string> remove_objects(core::ports::IObjectAdmin& admin,
     return std::nullopt;
 }
 
-void purge_videos(core::ports::IVideoPurges& purges, core::ports::IObjectAdmin& admin,
-                  const Options& options, Report& report) {
+// A video deleted while its upload was open has staged parts the store holds apart from its
+// objects: they go first, so that a commit still in flight can no longer leave an object behind
+// the listing.
+std::optional<std::string> remove_video(core::ports::IIngestStore& store,
+                                        core::ports::IObjectAdmin& admin,
+                                        const core::ports::DuePurge& purge) {
+    for (const core::ports::IngestId& upload : purge.uploads) {
+        if (auto problem = release(store, admin, upload)) {
+            return problem;
+        }
+    }
+    return remove_objects(admin, purge.video);
+}
+
+void purge_videos(core::ports::IVideoPurges& purges, core::ports::IIngestStore& store,
+                  core::ports::IObjectAdmin& admin, const Options& options, Report& report) {
     for (std::size_t looked = 0; looked < options.videos_per_pass; looked += options.batch) {
         const auto due = purges.due(options.batch);
         if (!due) {
@@ -108,8 +122,9 @@ void purge_videos(core::ports::IVideoPurges& purges, core::ports::IObjectAdmin& 
             return;
         }
         bool all_purged = true;
-        for (const core::VideoId& video : *due) {
-            if (const auto problem = remove_objects(admin, video)) {
+        for (const core::ports::DuePurge& purge : *due) {
+            const core::VideoId& video = purge.video;
+            if (const auto problem = remove_video(store, admin, purge)) {
                 report.problems.push_back(*problem);
                 ++report.videos_purge_failed;
                 all_purged = false;
@@ -155,7 +170,7 @@ Report run_once(core::ports::IUploadExpiry& uploads, core::ports::IIngestStore& 
             std::format("sweep orphaned uploads: {}", core::ports::to_string(swept.error())));
     }
     forget_rooms(rooms, clock, options, report);
-    purge_videos(purges, admin, options, report);
+    purge_videos(purges, store, admin, options, report);
     return report;
 }
 

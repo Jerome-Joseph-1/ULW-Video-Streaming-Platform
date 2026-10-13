@@ -109,3 +109,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0103](0103-the-worker-publishes-from-a-pool-on-kept-connections.md) | The worker publishes segments from a bounded pool of threads, each keeping one connection to the store | Accepted |
 | [0104](0104-ci-runs-on-hosted-runners-and-soaks-relay.md) | CI runs on hosted runners only, and a soak longer than a hosted job runs as a relay of segments judged together | Accepted |
 | [0105](0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md) | A live stream's visibility is set by the operator's backend or its owner and enforced here, before the playlist cache, from a short-lived answer per stream and per room member | Accepted |
+| [0106](0106-deleting-a-video-mid-upload-aborts-the-upload.md) | Deleting a video mid-upload aborts its upload, and cancelling an upload deletes its video | Accepted |

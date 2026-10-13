@@ -200,8 +200,19 @@ void MemoryCatalog::abort_upload(const core::UploadId& id, CatalogCallback<void>
     core::ports::CatalogResult<void> result{};
     if (const auto it = uploads_.find(id); it == uploads_.end()) {
         result = std::unexpected(CatalogError::NotFound);
-    } else if (it->second.upload.state == core::UploadState::Active) {
+    } else if (it->second.upload.state == core::UploadState::Completed) {
+        result = std::unexpected(CatalogError::Conflict);
+    } else {
+        // Its video goes too, as the database's statement deletes it (ADR-0106), also on a repeat.
         it->second.upload.state = core::UploadState::Aborted;
+        const core::VideoId video = it->second.upload.video_id;
+        if (const auto v = videos_.find(video); v != videos_.end() && !deleted_.contains(video) &&
+                                                (v->second.state == core::VideoState::Init ||
+                                                 v->second.state == core::VideoState::Uploading)) {
+            deleted_.insert(video);
+            grants_.erase(video);
+            purges_.push_back(video);
+        }
     }
     defer([done = std::move(done), result]() mutable noexcept { done(result); });
 }
@@ -334,10 +345,13 @@ void MemoryCatalog::delete_video(const core::VideoId& id, const std::optional<co
         result = std::unexpected(CatalogError::NotFound);
     } else if (deleted_.contains(id)) {
         // A repeat: done already.
-    } else if (it->second.state == core::VideoState::Init ||
-               it->second.state == core::VideoState::Uploading) {
-        result = std::unexpected(CatalogError::Conflict);
     } else {
+        // An upload still open for it is aborted, so nothing can commit it now (ADR-0106).
+        for (auto& [upload_id, entry] : uploads_) {
+            if (entry.upload.video_id == id && entry.upload.state == core::UploadState::Active) {
+                entry.upload.state = core::UploadState::Aborted;
+            }
+        }
         deleted_.insert(id);
         grants_.erase(id);
         // A job still queued is cancelled, as the database's statement fails it.
