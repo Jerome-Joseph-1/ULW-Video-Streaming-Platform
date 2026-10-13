@@ -25,10 +25,9 @@ backend may set its visibility, take it down and list a user's videos
 | `ready` | The worker has published the HLS renditions; `duration_ms` is set | yes |
 | `failed` | Transcoding failed for good (the worker retries a job before giving up) | never |
 
-`ready` and `failed` are final. A cancelled upload leaves its video in `init` or `uploading`
-for good. A video in `processing`, `ready` or `failed` may be deleted, by its owner or by the
-operator's backend; from then on it is gone, a `404` on every endpoint to everyone, its owner
-included ([Deleting a video](#deleting-a-video)).
+`ready` and `failed` are final. A video in any state may be deleted, by its owner or by the
+operator's backend, and cancelling its upload deletes it too; from then on it is gone, a `404` on
+every endpoint to everyone, its owner included ([Deleting a video](#deleting-a-video)).
 
 There is no push notification in this version. **Poll `GET /api/v1/videos/{id}`** after the
 commit until `state` is `ready` or `failed`, and show `progress` while it is `processing`
@@ -246,14 +245,18 @@ Refusals carry a JSON body, `{"error":"<code>"}`:
 
 ### Deleting a video
 
-<!-- apps/gateway/src/connection.cpp (start_delete, on_deleted), infra/postgres/src/upload_catalog.cpp (kDeleteVideo), infra/postgres/src/upload_reaper.cpp (kDuePurges, kForgetPurged), apps/reaper/src/reaper.cpp (purge_videos), migrations/0017_video_purges.sql, docs/adr/0100-the-operators-backend-controls-vod.md -->
+<!-- apps/gateway/src/connection.cpp (start_delete, on_deleted), infra/postgres/src/upload_catalog.cpp (kDeleteVideo), infra/postgres/src/upload_reaper.cpp (kDuePurges, kForgetPurged), apps/reaper/src/reaper.cpp (purge_videos), migrations/0017_video_purges.sql, docs/adr/0100-the-operators-backend-controls-vod.md, docs/adr/0106-deleting-a-video-mid-upload-aborts-the-upload.md -->
 
 | Endpoint | Success | Errors |
 |---|---|---|
-| `DELETE /api/v1/videos/{id}` | `204`: the video is gone | `400`, `401`, `403`, `404`, `409`, `503`, `500` |
+| `DELETE /api/v1/videos/{id}` | `204`: the video is gone | `400`, `401`, `403`, `404`, `503`, `500` |
 
-The owner only, and no body. A video in `processing`, `ready` or `failed` may be deleted; a
-transcode still waiting for it is cancelled, and one already running is left to finish unseen.
+The owner only, and no body. A video in any state may be deleted; a transcode still waiting for
+it is cancelled, and one already running is left to finish unseen. A video whose upload is still
+in progress (`init` or `uploading`) has its upload aborted in the same step, as a cancel would:
+a later `PATCH` or commit of that upload answers `409` (`410` once it would have expired, `404`
+once the reaper has removed it), and never brings the video back
+([uploads.md](uploads.md#cancel-delete-apiv1uploadsid)).
 From the `204` on, the video is gone for everyone, its owner included, on every gateway: its
 metadata and both playlists answer `404`, exactly as for a video that never existed, and so do
 the PATCH, a repeat of the owner's delete aside, and the service API's routes for it. Its grants
@@ -274,7 +277,6 @@ Refusals carry a JSON body, `{"error":"<code>"}`:
 |---|---|---|
 | `403` | `forbidden` | You may see the video but are not its owner |
 | `404` | `not_found` | No such video, a bad id, or a video you may not see: the three are indistinguishable |
-| `409` | `not_committed` | The upload is still in progress (`init` or `uploading`): cancel it instead, with `DELETE /api/v1/uploads/{id}` ([uploads.md](uploads.md#cancel-delete-apiv1uploadsid)) |
 
 A body is `400`; `401` and `503` (`Retry-After: 5`) come with an empty body, as elsewhere.
 
@@ -337,7 +339,7 @@ would share it with nobody.
 **Takedown.** The `DELETE` has exactly the effect of the owner's
 [delete](#deleting-a-video), for any user's video: gone for everyone at once, grants removed,
 objects removed at the reaper's next pass, `204` again on a repeat. A video whose upload is in
-progress is `409` `not_committed`; nobody but its uploader can see it anyway.
+progress is taken down too, its upload aborted, as the owner's delete does.
 
 **Listing.** The `GET` lists one user's videos, every state included and deleted ones left out,
 newest first (by creation, then by id, so the order is stable across pages). Its query:
@@ -368,7 +370,6 @@ Refusals carry a JSON body, `{"error":"<code>"}`:
 | `403` | `forbidden` | Not a service token |
 | `403` | `not_member` | `PATCH`: the room does not list the video's owner |
 | `404` | `not_found` | No such video (deleted ones included), or a bad id |
-| `409` | `not_committed` | `DELETE`: the upload is still in progress |
 
 ## CORS
 

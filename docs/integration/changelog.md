@@ -3,6 +3,27 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-13: a video mid-upload can be deleted, and cancelling an upload deletes its video
+
+<!-- infra/postgres/src/upload_catalog.cpp (kDeleteVideo, kAbortUpload), infra/postgres/src/upload_reaper.cpp (kDuePurges), apps/reaper/src/reaper.cpp (purge_videos), apps/gateway/src/connection.cpp (on_deleted, on_service_deleted), docs/adr/0106-deleting-a-video-mid-upload-aborts-the-upload.md on main -->
+
+A fix (versioning rule 3), in v0.2.1, v1.0.1 and later. No migration.
+
+| Before | Now |
+|---|---|
+| `DELETE /api/v1/videos/{id}` and `DELETE /api/v1/service/videos/{id}` answered `409` `not_committed` for a video whose upload was in progress | Both answer `204`, again `204` on a repeat: the upload is aborted, the video is deleted and the reaper removes its staged parts ([Deleting a video](videos-and-playback.md#deleting-a-video)) |
+| `DELETE /api/v1/uploads/{id}` left the video in `init` or `uploading`, listed and undeletable | The cancel deletes the video too: `404` everywhere, gone from the operator's listing, `GET /api/v1/service/videos` ([Cancel](uploads.md#cancel-delete-apiv1uploadsid)) |
+| | A `PATCH` or commit of an upload whose video was deleted answers `409` (`410` past its expiry, `404` once purged) and never brings the video back |
+
+What to do:
+
+- **The operator's backend:** take down abandoned uploads with `DELETE /api/v1/service/videos/{id}`;
+  treat `204` and a later `404` as deleted. Videos a cancel left in `init` before this change go
+  the same way, or by repeating the cancel.
+- **Clients:** a delete no longer needs to know whether the upload finished; stop sending a cancel
+  first. Stop handling `409` `not_committed`.
+- **Operators:** nothing; no migration.
+
 ## 2026-10-09: the worker publishes long videos in minutes, not tens of minutes
 
 <!-- apps/worker/src/job_runner.cpp (publish, upload_all), apps/worker/src/config.cpp (ULW_PUBLISH_CONCURRENCY), infra/curl/src/http.cpp (Session), infra/storage/s3/src/s3_transfer.cpp (upload_session), deploy/kubernetes/base/video-worker/deployment.yaml, docs/adr/0103-the-worker-publishes-from-a-pool-on-kept-connections.md -->

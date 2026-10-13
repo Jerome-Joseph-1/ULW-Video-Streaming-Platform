@@ -107,13 +107,18 @@ WITH cancelled AS (
      WHERE state = 'queued'
        AND video_id IN (SELECT p.video_id FROM video_purges p
                           JOIN videos v ON v.id = p.video_id
-                         WHERE v.deleted_at IS NOT NULL))
-SELECT p.video_id FROM video_purges p
- WHERE NOT EXISTS (SELECT 1 FROM jobs j
-                    WHERE j.video_id = p.video_id AND j.state IN ('queued', 'running'))
-   AND NOT EXISTS (SELECT 1 FROM videos v WHERE v.id = p.video_id AND v.deleted_at IS NULL)
- ORDER BY p.deleted_at
- LIMIT $1)sql";
+                         WHERE v.deleted_at IS NOT NULL)),
+due AS (
+    SELECT p.video_id, p.deleted_at FROM video_purges p
+     WHERE NOT EXISTS (SELECT 1 FROM jobs j
+                        WHERE j.video_id = p.video_id AND j.state IN ('queued', 'running'))
+       AND NOT EXISTS (SELECT 1 FROM videos v WHERE v.id = p.video_id AND v.deleted_at IS NULL)
+     ORDER BY p.deleted_at
+     LIMIT $1)
+SELECT d.video_id, u.object_key, u.backend_ref, u.size_bytes, u.chunk_size
+  FROM due d
+  LEFT JOIN uploads u ON u.video_id = d.video_id AND u.state <> 'completed'
+ ORDER BY d.deleted_at, d.video_id)sql";
 
 // The row goes, and its upload, jobs, renditions and grants with it (ON DELETE CASCADE), unless
 // a job is queued or running for it again; the queue's entry goes with the row, or alone when
@@ -151,20 +156,29 @@ std::unexpected<CatalogError> failure(const DbFailure& f) {
     return std::unexpected(to_catalog_error(f.error));
 }
 
-std::optional<ExpiredUpload> decode_candidate(const Result& rows, int row) {
-    const auto id = domain_at<core::UploadId>(rows, row, 0);
-    auto key = domain_at<core::StorageKey>(rows, row, 1);
-    const auto backend_ref = rows.get(row, 2);
-    const auto size = rows.get(row, 3).and_then(parse_uint64);
-    const auto chunk = rows.get(row, 4).and_then(parse_uint64);
-    if (!id || !key || !backend_ref || !size || !chunk) {
+// An upload's ingest session from its object_key, backend_ref, size_bytes and chunk_size, from
+// column `first` on.
+std::optional<core::ports::IngestId> decode_session(const Result& rows, int row, int first) {
+    auto key = domain_at<core::StorageKey>(rows, row, first);
+    const auto backend_ref = rows.get(row, first + 1);
+    const auto size = rows.get(row, first + 2).and_then(parse_uint64);
+    const auto chunk = rows.get(row, first + 3).and_then(parse_uint64);
+    if (!key || !backend_ref || !size || !chunk) {
         return std::nullopt;
     }
-    return ExpiredUpload{.id = *id,
-                         .ingest = {.key = std::move(*key),
-                                    .backend_ref = std::string{*backend_ref},
-                                    .total_bytes = *size,
-                                    .chunk_size = *chunk}};
+    return core::ports::IngestId{.key = std::move(*key),
+                                 .backend_ref = std::string{*backend_ref},
+                                 .total_bytes = *size,
+                                 .chunk_size = *chunk};
+}
+
+std::optional<ExpiredUpload> decode_candidate(const Result& rows, int row) {
+    const auto id = domain_at<core::UploadId>(rows, row, 0);
+    auto ingest = decode_session(rows, row, 1);
+    if (!id || !ingest) {
+        return std::nullopt;
+    }
+    return ExpiredUpload{.id = *id, .ingest = std::move(*ingest)};
 }
 
 std::int64_t micros_since_epoch(core::WallTime t) noexcept {
@@ -255,7 +269,8 @@ PgUploadReaper::forget_unused(core::WallTime recorded_before, std::size_t limit)
                                         .finished = *finished == "t"};
 }
 
-std::expected<std::vector<core::VideoId>, CatalogError> PgUploadReaper::due(std::size_t limit) {
+std::expected<std::vector<core::ports::DuePurge>, CatalogError>
+PgUploadReaper::due(std::size_t limit) {
     auto conn = impl_->session();
     if (!conn) {
         return std::unexpected(conn.error());
@@ -264,13 +279,24 @@ std::expected<std::vector<core::VideoId>, CatalogError> PgUploadReaper::due(std:
     if (!rows) {
         return failure(rows.error());
     }
-    std::vector<core::VideoId> videos;
+    // One row per unfinished upload, or one with no upload: a video's rows come together.
+    std::vector<core::ports::DuePurge> videos;
     for (int row = 0; row < rows->rows(); ++row) {
         const auto id = domain_at<core::VideoId>(*rows, row, 0);
         if (!id) {
             return std::unexpected(CatalogError::Corrupt);
         }
-        videos.push_back(*id);
+        if (videos.empty() || videos.back().video != *id) {
+            videos.push_back({.video = *id, .uploads = {}});
+        }
+        if (!rows->get(row, 1)) {
+            continue;
+        }
+        auto upload = decode_session(*rows, row, 1);
+        if (!upload) {
+            return std::unexpected(CatalogError::Corrupt);
+        }
+        videos.back().uploads.push_back(std::move(*upload));
     }
     return videos;
 }
