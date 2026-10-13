@@ -27,8 +27,8 @@ inline constexpr Oid kUuidOid = 2950;
 // server never infers a parameter's type from its context.
 class Params {
 public:
-    // The widest statement, the upload insert, binds ten.
-    static constexpr std::size_t kMax = 10;
+    // The widest statement, the upload insert with its Idempotency-Key, binds twelve.
+    static constexpr std::size_t kMax = 12;
 
     Params& add_int(std::int64_t value) noexcept;
     Params& add_bool(bool value) noexcept;

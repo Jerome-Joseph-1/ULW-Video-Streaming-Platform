@@ -1340,6 +1340,72 @@ TEST_P(GatewayUpload, DeletingAVideoMidUploadAbortsItsUpload) {
     }
 }
 
+// ADR-0108: a create retried with the same Idempotency-Key answers the upload the first made,
+// so a client that lost the answer cannot make a second video of the same file.
+TEST_P(GatewayUpload, ACreateRetriedUnderItsIdempotencyKeyAnswersTheSameUpload) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const std::string body =
+        R"({"filename":"trip.mp4","size_bytes":3000000,"content_type":"video/mp4"})";
+    const auto create = [&](std::string_view token, std::string_view key,
+                            const std::string& with = {}) {
+        HttpClient c(gw.endpoint());
+        const std::string& sent = with.empty() ? body : with;
+        std::map<std::string, std::string> headers;
+        if (!key.empty()) {
+            headers.emplace("Idempotency-Key", std::string(key));
+        }
+        return c.request("POST", "/api/v1/uploads", token, std::as_bytes(std::span(sent)), headers);
+    };
+    const auto first = create(kAlice, "trip-2026-10-13");
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->status, 201) << first->body;
+    const auto again = create(kAlice, "trip-2026-10-13");
+    ASSERT_TRUE(again);
+    EXPECT_EQ(again->status, 201);
+    EXPECT_EQ(again->body, first->body);
+    // The content type is compared as parsed, so a retry spelling it otherwise matches.
+    const auto spelled =
+        create(kAlice, "trip-2026-10-13",
+               R"({"filename":"trip.mp4","size_bytes":3000000,"content_type":"Video/MP4"})");
+    EXPECT_EQ(spelled->body, first->body);
+    HttpClient c(gw.endpoint());
+    const auto listed = c.request("GET", "/api/v1/videos", kAlice);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(core::json::parse(listed->body)->find("videos")->as_array()->size(), 1U);
+
+    // The same key for another file is refused; another user's key is their own.
+    const auto other =
+        create(kAlice, "trip-2026-10-13",
+               R"({"filename":"trip.mp4","size_bytes":3000001,"content_type":"video/mp4"})");
+    ASSERT_TRUE(other);
+    EXPECT_EQ(other->status, 409);
+    EXPECT_EQ(other->body, R"({"error":"idempotency_key_reused"})");
+    const auto bobs = create(kBob, "trip-2026-10-13");
+    ASSERT_TRUE(bobs);
+    EXPECT_EQ(bobs->status, 201);
+    EXPECT_NE(bobs->body, first->body);
+    // Without a key every create is a new upload.
+    EXPECT_NE(create(kAlice, "")->body, create(kAlice, "")->body);
+}
+
+TEST_P(GatewayUpload, AMalformedIdempotencyKeyIsRefused) {
+    const GatewayUnderTest gw(over_transport());
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    for (const std::string& key :
+         {std::string("has space"), std::string(256, 'k'), std::string("caf\xc3\xa9")}) {
+        HttpClient c(gw.endpoint());
+        const auto r = c.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)),
+                                 {{"Idempotency-Key", key}});
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 400) << key;
+    }
+    HttpClient c(gw.endpoint());
+    EXPECT_EQ(c.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)),
+                        {{"Idempotency-Key", std::string(255, 'k')}})
+                  ->status,
+              201);
+}
+
 // A catalog that is down is a 503 on every route that needs it, so clients retry; a row it
 // cannot read is a 500, which they must not. Nothing an outage refused is half done after it.
 TEST_P(GatewayUpload, ACatalogOutageIsA503AndAnUnreadableRowA500OnEveryRoute) {

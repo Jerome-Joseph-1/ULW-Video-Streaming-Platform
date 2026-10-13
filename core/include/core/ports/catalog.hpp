@@ -38,12 +38,28 @@ template <class T> using CatalogResult = std::expected<T, CatalogError>;
 // Whatever it captures must outlive the call.
 template <class T> using CatalogCallback = std::move_only_function<void(CatalogResult<T>) noexcept>;
 
+// A create's Idempotency-Key (ADR-0108): the owner's key, and what the request asked for, so
+// that a retry asking for something else under the same key is told apart from a retry.
+struct UploadRequestKey {
+    std::string key;
+    std::string fingerprint;
+};
+
 struct NewUpload {
     VideoRecord video;
     UploadRecord upload;
     // Adapter state for the object store's ingest, persisted verbatim.
     std::string backend_ref;
     StorageKey object_key;
+    std::optional<UploadRequestKey> request;
+};
+
+// The upload an owner's Idempotency-Key already names, as its create answered it.
+struct KeyedUpload {
+    VideoId video;
+    UploadId upload;
+    std::uint64_t chunk_size = 0;
+    std::string fingerprint;
 };
 
 struct StoredUpload {
@@ -111,8 +127,15 @@ class IUploadCatalog {
 public:
     virtual ~IUploadCatalog() = default;
 
+    // The video and its upload, together. Idempotent for the same ids (a statement retried
+    // after its answer was lost). With a request key the owner has used already for another
+    // upload, Conflict and nothing is created (ADR-0108).
     virtual void create_upload(NewUpload upload, CatalogCallback<void> done) = 0;
     virtual void find_upload(const UploadId& id, CatalogCallback<StoredUpload> done) = 0;
+    // The upload `owner`'s Idempotency-Key names; NotFound when none does, or when the upload is
+    // gone (its video purged).
+    virtual void find_keyed_upload(const UserId& owner, const std::string& key,
+                                   CatalogCallback<KeyedUpload> done) = 0;
 
     // Exclusive right to append to one upload, across every gateway process. Refused with
     // Conflict while someone else holds it; released by release_upload or when the holding

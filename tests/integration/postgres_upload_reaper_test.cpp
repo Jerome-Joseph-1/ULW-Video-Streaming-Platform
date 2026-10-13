@@ -83,7 +83,8 @@ protected:
                                    .expires_at = std::chrono::floor<std::chrono::microseconds>(
                                        clock.wall_now() + kTtl)},
             .backend_ref = "session-" + video.to_string(),
-            .object_key = *core::StorageKey::parse("videos/" + video.to_string() + "/raw")};
+            .object_key = *core::StorageKey::parse("videos/" + video.to_string() + "/raw"),
+            .request = std::nullopt};
         Reply<void> reply;
         catalog->create_upload(u, reply.callback());
         EXPECT_TRUE(ulw::test::wait(*reactor, reply));

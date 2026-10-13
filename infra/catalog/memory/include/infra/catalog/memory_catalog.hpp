@@ -37,6 +37,8 @@ public:
     MemoryCatalog(const MemoryCatalog&) = delete;
     MemoryCatalog& operator=(const MemoryCatalog&) = delete;
 
+    void find_keyed_upload(const core::UserId& owner, const std::string& key,
+                           core::ports::CatalogCallback<core::ports::KeyedUpload> done) override;
     void create_upload(core::ports::NewUpload upload,
                        core::ports::CatalogCallback<void> done) override;
     void find_upload(const core::UploadId& id,
@@ -122,6 +124,8 @@ private:
     bool hold_claims_ = false;
     std::vector<std::move_only_function<void() noexcept>> held_claims_;
     std::unordered_map<core::UploadId, core::ports::StoredUpload> uploads_;
+    // Each owner's Idempotency-Keys: the upload each names, and its request's fingerprint.
+    std::map<std::pair<std::string, std::string>, std::pair<core::UploadId, std::string>> keys_;
     std::unordered_map<core::VideoId, core::VideoRecord> videos_;
     // When each video was created, in microseconds as the database keeps it.
     std::unordered_map<core::VideoId, std::int64_t> created_;

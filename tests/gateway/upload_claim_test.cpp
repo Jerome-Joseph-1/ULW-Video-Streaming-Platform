@@ -38,6 +38,10 @@ public:
     void find_upload(const core::UploadId& /*id*/, CatalogCallback<StoredUpload> done) override {
         done(std::unexpected(CatalogError::Unavailable));
     }
+    void find_keyed_upload(const core::UserId& /*owner*/, const std::string& /*key*/,
+                           CatalogCallback<core::ports::KeyedUpload> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
     void claim_upload(const core::UploadId& /*id*/, const core::UserId& /*owner*/,
                       CatalogCallback<ClaimedUpload> done) override {
         done(std::unexpected(CatalogError::Unavailable));
@@ -260,7 +264,8 @@ protected:
                                        .state = core::UploadState::Active,
                                        .expires_at = clock.wall_now() + std::chrono::hours(24)},
                 .backend_ref = "ingest-1",
-                .object_key = *core::StorageKey::parse("videos/" + video.to_string() + "/raw")},
+                .object_key = *core::StorageKey::parse("videos/" + video.to_string() + "/raw"),
+                .request = std::nullopt},
             [&](auto r) noexcept { made = r; });
         ASSERT_TRUE(ulw::test::pump_until(*reactor, [&] { return made.has_value(); }));
         ASSERT_TRUE(*made);

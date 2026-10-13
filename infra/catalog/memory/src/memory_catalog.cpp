@@ -72,12 +72,44 @@ void MemoryCatalog::create_upload(core::ports::NewUpload upload, CatalogCallback
         });
         return;
     }
+    if (upload.request) {
+        auto key = std::pair{std::string(upload.upload.owner.view()), upload.request->key};
+        if (const auto held = keys_.find(key);
+            held != keys_.end() && uploads_.contains(held->second.first)) {
+            defer([done = std::move(done)]() mutable noexcept {
+                done(std::unexpected(CatalogError::Conflict));
+            });
+            return;
+        }
+        keys_.insert_or_assign(std::move(key), std::pair{id, upload.request->fingerprint});
+    }
     videos_.emplace(video, std::move(upload.video));
     stamp_created(video);
     uploads_.emplace(id, StoredUpload{.upload = upload.upload,
                                       .backend_ref = std::move(upload.backend_ref),
                                       .object_key = std::move(upload.object_key)});
     defer([done = std::move(done)]() mutable noexcept { done({}); });
+}
+
+void MemoryCatalog::find_keyed_upload(const core::UserId& owner, const std::string& key,
+                                      CatalogCallback<core::ports::KeyedUpload> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<core::ports::KeyedUpload> result =
+        std::unexpected(CatalogError::NotFound);
+    if (const auto held = keys_.find(std::pair{std::string(owner.view()), key});
+        held != keys_.end()) {
+        if (const auto it = uploads_.find(held->second.first); it != uploads_.end()) {
+            result = core::ports::KeyedUpload{.video = it->second.upload.video_id,
+                                              .upload = it->first,
+                                              .chunk_size = it->second.upload.chunk_size,
+                                              .fingerprint = held->second.second};
+        }
+    }
+    defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
+        done(std::move(result));
+    });
 }
 
 void MemoryCatalog::find_upload(const core::UploadId& id, CatalogCallback<StoredUpload> done) {

@@ -26,6 +26,14 @@ using http::Status;
 // A create request is ~120 bytes of JSON; 4 KiB leaves room for a long filename and nothing
 // else, so the body is buffered whole and parsed once.
 constexpr std::size_t kMaxJsonBody = std::size_t{4} * 1024;
+// The longest Idempotency-Key a create may carry (ADR-0108).
+constexpr std::size_t kMaxIdempotencyKey = 255;
+
+// 1 to 255 visible ASCII characters, as the catalog's check requires (ADR-0108).
+bool idempotency_key_valid(std::string_view key) noexcept {
+    return !key.empty() && key.size() <= kMaxIdempotencyKey &&
+           std::ranges::all_of(key, [](char c) { return c >= '!' && c <= '~'; });
+}
 // Staging only ever holds what one parser callback handed over: one 64 KiB receive, or the
 // parser's retained tail of at most 4 x 64 KiB.
 constexpr std::size_t kMaxStaging = std::size_t{4} * 64 * 1024;
@@ -332,11 +340,8 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     case RouteId::UpdateServiceVideo:
     case RouteId::UpdateStream:
     case RouteId::UpdateServiceStream:
-        if (head.content_length == 0) {
-            return http::HeadVerdict::reject(Status::BadRequest);
-        }
-        if (head.content_length > kMaxJsonBody) {
-            return http::HeadVerdict::reject(Status::ContentTooLarge);
+        if (const auto refused = check_json_head(match->id, head)) {
+            return http::HeadVerdict::reject(*refused);
         }
         break;
     case RouteId::AppendChunk: {
@@ -401,6 +406,28 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
         return http::HeadVerdict::accept();
     }
     return authenticate_head(head);
+}
+
+// A JSON body is required and bounded; a create's Idempotency-Key, if any, is kept for the
+// catalog (ADR-0108).
+std::optional<Status> Connection::check_json_head(RouteId route,
+                                                  const http::RequestHead& head) noexcept {
+    if (head.content_length == 0) {
+        return Status::BadRequest;
+    }
+    if (head.content_length > kMaxJsonBody) {
+        return Status::ContentTooLarge;
+    }
+    if (route != RouteId::CreateUpload) {
+        return std::nullopt;
+    }
+    if (const auto key = http::find_header(head.headers, "idempotency-key")) {
+        if (!idempotency_key_valid(*key)) {
+            return Status::BadRequest;
+        }
+        req_.idempotency_key = std::string(*key);
+    }
+    return std::nullopt;
 }
 
 http::HeadVerdict Connection::authenticate_head(const http::RequestHead& head) noexcept {
@@ -711,8 +738,73 @@ void Connection::start_create() noexcept {
                                 .title = std::string(title),
                                 .size = bytes,
                                 .type = std::move(*content_type),
-                                .key = std::move(*key)};
-    submit(ControlOp::Create);
+                                .key = std::move(*key),
+                                .request = std::nullopt};
+    if (!req_.idempotency_key) {
+        submit(ControlOp::Create);
+        return;
+    }
+    // A retry under the same key must ask for the same file. The content type is the parsed,
+    // lower-cased one, so a retry that spells it otherwise still matches.
+    PendingCreate& create = *req_.create;
+    create.request = core::ports::UploadRequestKey{
+        .key = *req_.idempotency_key,
+        .fingerprint = std::format("{}\n{}\n{}", create.size, create.type.view(), create.title)};
+    find_keyed(false);
+}
+
+void Connection::find_keyed(bool retried) noexcept {
+    const core::ports::Claims* claims = get(req_.claims);
+    const PendingCreate* create = get(req_.create);
+    if (claims == nullptr || create == nullptr || !create->request) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    const std::uint64_t request = request_seq_;
+    ++pending_;
+    deps().catalog.find_keyed_upload(
+        claims->subject, create->request->key,
+        [this, request, retried](core::ports::CatalogResult<core::ports::KeyedUpload> r) noexcept {
+            --pending_;
+            on_keyed(request, retried, std::move(r));
+        });
+}
+
+// A key nobody holds starts the create; one held answers that upload as its create did, if this
+// request asks for the same file; otherwise the key is someone else's request's.
+void Connection::on_keyed(std::uint64_t request, bool retried,
+                          core::ports::CatalogResult<core::ports::KeyedUpload> keyed) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    const PendingCreate* create = get(req_.create);
+    if (create == nullptr || !create->request) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (!keyed) {
+        if (keyed.error() == CatalogError::NotFound && !retried) {
+            submit(ControlOp::Create);
+            return;
+        }
+        // Lost the race for the key to an upload already gone: rare enough to retry whole.
+        fail_catalog(keyed.error() == CatalogError::NotFound ? CatalogError::Unavailable
+                                                             : keyed.error());
+        return;
+    }
+    if (keyed->fingerprint != create->request->fingerprint) {
+        fail_with(Status::Conflict, "idempotency_key_reused");
+        return;
+    }
+    respond_created(keyed->video, keyed->upload, keyed->chunk_size);
+}
+
+void Connection::respond_created(const core::VideoId& video, const core::UploadId& upload,
+                                 std::uint64_t chunk) noexcept {
+    respond_json(Status::Created,
+                 std::format(R"({{"video_id":"{}","upload_id":"{}","chunk_size":{},)"
+                             R"("durable_offset":0}})",
+                             video.to_string(), upload.to_string(), chunk));
 }
 
 void Connection::start_append() noexcept {
@@ -1957,6 +2049,7 @@ void Connection::on_created(ControlJob job) noexcept {
                                .expires_at = deps().clock.wall_now() + gw().limits().upload_ttl},
         .backend_ref = ingest.backend_ref,
         .object_key = ingest.key,
+        .request = create->request,
     };
     if (!core::Video::rehydrate(rows.video) || !core::Upload::rehydrate(rows.upload)) {
         // start_create checked everything the client controls; the store's answer is at fault.
@@ -1978,15 +2071,16 @@ void Connection::on_created(ControlJob job) noexcept {
             if (phase_ != Phase::Request || created == nullptr) {
                 return;
             }
+            if (!result && result.error() == CatalogError::Conflict && created->request) {
+                // Another create took the key first: answer its upload.
+                find_keyed(true);
+                return;
+            }
             if (!result) {
                 fail_catalog(result.error());
                 return;
             }
-            respond_json(Status::Created,
-                         std::format(R"({{"video_id":"{}","upload_id":"{}","chunk_size":{},)"
-                                     R"("durable_offset":0}})",
-                                     created->video.to_string(), created->upload.to_string(),
-                                     chunk));
+            respond_created(created->video, created->upload, chunk);
         });
 }
 
