@@ -3,6 +3,27 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-13: a video mid-upload can be deleted, and cancelling an upload deletes its video
+
+<!-- infra/postgres/src/upload_catalog.cpp (kDeleteVideo, kAbortUpload), infra/postgres/src/upload_reaper.cpp (kDuePurges), apps/reaper/src/reaper.cpp (purge_videos), apps/gateway/src/connection.cpp (on_deleted, on_service_deleted), docs/adr/0106-deleting-a-video-mid-upload-aborts-the-upload.md on main -->
+
+A fix (versioning rule 3), in v0.2.1, v1.0.1 and later. No migration.
+
+| Before | Now |
+|---|---|
+| `DELETE /api/v1/videos/{id}` and `DELETE /api/v1/service/videos/{id}` answered `409` `not_committed` for a video whose upload was in progress | Both answer `204`, again `204` on a repeat: the upload is aborted, the video is deleted and the reaper removes its staged parts ([Deleting a video](videos-and-playback.md#deleting-a-video)) |
+| `DELETE /api/v1/uploads/{id}` left the video in `init` or `uploading`, listed and undeletable | The cancel deletes the video too: `404` everywhere, gone from the operator's listing, `GET /api/v1/service/videos` ([Cancel](uploads.md#cancel-delete-apiv1uploadsid)) |
+| | A `PATCH` or commit of an upload whose video was deleted answers `409` (`410` past its expiry, `404` once purged) and never brings the video back |
+
+What to do:
+
+- **The operator's backend:** take down abandoned uploads with `DELETE /api/v1/service/videos/{id}`;
+  treat `204` and a later `404` as deleted. Videos a cancel left in `init` before this change go
+  the same way, or by repeating the cancel.
+- **Clients:** a delete no longer needs to know whether the upload finished; stop sending a cancel
+  first. Stop handling `409` `not_committed`.
+- **Operators:** nothing; no migration.
+
 ## 2026-10-08: the operator's backend controls VOD; owners delete videos
 
 <!-- apps/gateway/src/connection.cpp (start_create, start_delete, start_service_route), apps/gateway/src/video_access.cpp (video_query, videos_json), infra/auth/src/service_claim.cpp (read_uploader_claim), infra/postgres/src/upload_catalog.cpp (kDeleteVideo, kListVideos), apps/reaper/src/reaper.cpp (purge_videos), migrations/0017_video_purges.sql, docs/adr/0100-the-operators-backend-controls-vod.md -->

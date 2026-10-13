@@ -10,7 +10,7 @@ name: ci
 # that run is green, so every check runs on the tree main ends up with.
 on:
   push:
-    branches: [main, "batch/**"]
+    branches: [main, "batch/**", "release/v*"]
   pull_request:
   schedule:
     - cron: "17 3 * * *"

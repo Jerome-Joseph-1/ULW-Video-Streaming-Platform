@@ -237,18 +237,21 @@ TEST_F(GatewayVodControl, EveryCommittedStateMayBeDeleted) {
     EXPECT_EQ(gw_.purges().size(), 3U);
 }
 
-TEST_F(GatewayVodControl, AnUploadInProgressIsCancelledNotDeleted) {
+// ADR-0106: a video still being uploaded is deleted like any other.
+TEST_F(GatewayVodControl, AnUploadInProgressIsDeletedToo) {
+    int n = 0;
     for (const core::VideoState state : {core::VideoState::Init, core::VideoState::Uploading}) {
-        publish(state);
-        const auto r = remove(kAlice);
-        ASSERT_TRUE(r);
-        EXPECT_EQ(r->status, 409);
-        EXPECT_EQ(r->body, R"({"error":"not_committed"})");
-        EXPECT_EQ(get(video_path(), kAlice)->status, 200);
+        const std::string id = nth_video(++n);
+        gw_.put_video(video(state, {}, id));
         // Nobody else learns it exists.
-        EXPECT_EQ(remove(kBob)->status, 404);
+        EXPECT_EQ(remove(kBob, id)->status, 404);
+        const auto r = remove(kAlice, id);
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 204);
+        EXPECT_EQ(get(video_path({}, id), kAlice)->status, 404);
+        EXPECT_EQ(remove(kAlice, id)->status, 204);
     }
-    EXPECT_TRUE(gw_.purges().empty());
+    EXPECT_EQ(gw_.purges().size(), 2U);
 }
 
 TEST_F(GatewayVodControl, OnlyTheOwnerDeletesAndOthersCannotTellTheVideoExists) {
@@ -366,12 +369,18 @@ TEST_F(GatewayVodControl, TheServiceIsToldWhatItCannotTakeDown) {
         EXPECT_EQ(r->status, 404) << video;
         EXPECT_EQ(r->body, R"({"error":"not_found"})");
     }
-    publish(core::VideoState::Uploading);
-    const auto busy = service("DELETE", service_path());
-    ASSERT_TRUE(busy);
-    EXPECT_EQ(busy->status, 409);
-    EXPECT_EQ(busy->body, R"({"error":"not_committed"})");
     EXPECT_TRUE(gw_.purges().empty());
+}
+
+// ADR-0106: the service takes down a video mid-upload too, which its owner's cancel would need.
+TEST_F(GatewayVodControl, TheServiceTakesDownAVideoMidUpload) {
+    publish(core::VideoState::Uploading);
+    const auto down = service("DELETE", service_path());
+    ASSERT_TRUE(down);
+    EXPECT_EQ(down->status, 204);
+    EXPECT_EQ(get(video_path(), kAlice)->status, 404);
+    EXPECT_EQ(service("DELETE", service_path())->status, 204);
+    EXPECT_EQ(gw_.purges().size(), 1U);
 }
 
 TEST_F(GatewayVodControl, TheServiceListsAUsersVideosNewestFirstAPageAtATime) {

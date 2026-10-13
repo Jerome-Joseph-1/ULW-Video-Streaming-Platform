@@ -26,7 +26,7 @@ public:
     expire(core::WallTime now, std::size_t limit) override;
     [[nodiscard]] std::expected<core::ports::UnusedRoomsScan, core::ports::CatalogError>
     forget_unused(core::WallTime recorded_before, std::size_t limit) override;
-    [[nodiscard]] std::expected<std::vector<core::VideoId>, core::ports::CatalogError>
+    [[nodiscard]] std::expected<std::vector<core::ports::DuePurge>, core::ports::CatalogError>
     due(std::size_t limit) override;
     [[nodiscard]] std::expected<bool, core::ports::CatalogError>
     forget(const core::VideoId& video) override;

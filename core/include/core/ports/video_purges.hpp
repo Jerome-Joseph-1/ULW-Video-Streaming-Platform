@@ -2,6 +2,7 @@
 
 #include "core/models/ids.hpp"
 #include "core/ports/catalog.hpp"
+#include "core/ports/storage.hpp"
 
 #include <cstddef>
 #include <expected>
@@ -13,6 +14,13 @@ namespace core::ports {
 // operator's backend took down, is gone from every read at once; its stored objects and then its
 // row go here, at the reaper's next pass. Blocking: for the reaper's own thread, never a
 // reactor's.
+// A deleted video due for purging, with the ingest sessions of its uploads that never completed:
+// one deleted while its upload was open has staged parts the store holds apart from its objects.
+struct DuePurge {
+    VideoId video;
+    std::vector<IngestId> uploads;
+};
+
 class IVideoPurges {
 public:
     virtual ~IVideoPurges() = default;
@@ -20,7 +28,7 @@ public:
     // has a transcode job queued or running. A job still queued for one is cancelled here, so it
     // is due at a later call; one running is left to finish, or to lapse and be cancelled then,
     // so that no worker writes a rendition after the objects are gone.
-    [[nodiscard]] virtual std::expected<std::vector<VideoId>, CatalogError>
+    [[nodiscard]] virtual std::expected<std::vector<DuePurge>, CatalogError>
     due(std::size_t limit) = 0;
     // Forgets a deleted video for good, once its objects are gone: its row, and with it its
     // upload, jobs, renditions and grants, and its place in the queue. False, and nothing done,

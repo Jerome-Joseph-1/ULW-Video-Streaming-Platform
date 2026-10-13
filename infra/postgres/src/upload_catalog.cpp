@@ -81,21 +81,28 @@ RETURNING id, owner_id, title, state, version, error_reason, duration_ms, visibi
 constexpr Sql kOwnsVideo = R"sql(
 SELECT 1 FROM videos WHERE id = $1 AND ($2 = '' OR owner_id = $2) AND deleted_at IS NULL)sql";
 
-// A committed video's deletion (ADR-0100), by its owner ($2) or the operator's backend ($2 = ''),
-// in one statement: the video leaves every read (each one asks deleted_at IS NULL), its grants
-// go, a transcode job still queued for it is cancelled, and video_purges queues its stored
-// objects for the reaper. A running job is left to finish or lapse; the reaper waits for it.
+// A video's deletion (ADR-0100, ADR-0106), by its owner ($2) or the operator's backend
+// ($2 = ''), in one statement: an upload still open for it is aborted, so no later append or
+// commit can bring it back; the video leaves every read (each one asks deleted_at IS NULL), its
+// grants go, a transcode job still queued for it is cancelled, and video_purges queues its stored
+// objects and staged parts for the reaper. A running job is left to finish or lapse; the reaper
+// waits for it. The upload's row is locked before the video's, as a commit and a progress
+// update lock them, and the video's update waits on the abort through `aborted`.
 // The first column says whether this statement deleted it; the others are the row as the
-// statement found it, none for no such video: deleted already (a repeat, which succeeds) or in
-// an upload still in progress (refused).
+// statement found it, none for no such video. Deleted already is a repeat, which succeeds.
 constexpr Sql kDeleteVideo = R"sql(
 WITH video AS (
     SELECT state, deleted_at IS NOT NULL AS deleted FROM videos
      WHERE id = $1 AND ($2 = '' OR owner_id = $2)),
+aborted AS (
+    UPDATE uploads SET state = 'aborted'
+     WHERE video_id = $1 AND state = 'active'
+       AND EXISTS (SELECT 1 FROM video WHERE NOT deleted)
+    RETURNING id),
 deleted AS (
     UPDATE videos SET deleted_at = now(), updated_at = now()
      WHERE id = $1 AND ($2 = '' OR owner_id = $2) AND deleted_at IS NULL
-       AND state NOT IN ('init', 'uploading')
+       AND (SELECT count(*) FROM aborted) >= 0
     RETURNING id),
 revoked AS (
     DELETE FROM video_grants WHERE video_id IN (SELECT id FROM deleted)),
@@ -187,10 +194,30 @@ ON CONFLICT (video_id, kind) WHERE state IN ('queued', 'running') DO NOTHING)sql
 
 constexpr Sql kNotifyWorkers = "NOTIFY job_available";
 
-constexpr Sql kAbortUpload =
-    "UPDATE uploads SET state = 'aborted' WHERE id = $1 AND state = 'active'";
-
-constexpr Sql kAbortedState = "SELECT state FROM uploads WHERE id = $1";
+// Cancelling an upload (ADR-0106) aborts it and deletes its video, which nothing could ever
+// commit now, as kDeleteVideo would: its grants go and video_purges queues its staged parts. A
+// video an earlier abort left behind (before ADR-0106, or by the reaper's expiry) goes too, so a
+// repeat cleans up. A video whose upload completed is not this route's to delete.
+// Answers whether this statement aborted the upload, and the upload's state as it found it, none
+// for no such upload.
+constexpr Sql kAbortUpload = R"sql(
+WITH aborted AS (
+    UPDATE uploads SET state = 'aborted' WHERE id = $1 AND state = 'active'
+    RETURNING video_id),
+upload AS (
+    SELECT video_id, state FROM uploads WHERE id = $1),
+deleted AS (
+    UPDATE videos SET deleted_at = now(), updated_at = now()
+     WHERE id IN (SELECT video_id FROM aborted
+                  UNION ALL SELECT video_id FROM upload WHERE state = 'aborted')
+       AND deleted_at IS NULL AND state IN ('init', 'uploading')
+    RETURNING id),
+revoked AS (
+    DELETE FROM video_grants WHERE video_id IN (SELECT id FROM deleted)),
+queued AS (
+    INSERT INTO video_purges (video_id) SELECT id FROM deleted
+    ON CONFLICT (video_id) DO NOTHING)
+SELECT (SELECT count(*) FROM aborted), (SELECT state FROM upload))sql";
 
 // No row for an upload the caller does not own, and then no lock either: the lock is taken
 // only for the rows the WHERE clause lets through.
@@ -402,8 +429,8 @@ CatalogResult<core::ports::GrantPage> decode_grants(const Outcome& outcome, std:
     return page;
 }
 
-// What kDeleteVideo found: no row is no such video (or not the owner's); a row it deleted, or
-// one deleted already, is done; anything else is an upload still in progress.
+// What kDeleteVideo found: no row is no such video (or not the owner's); a row is deleted, by
+// this statement, an earlier one, or another one after this statement's snapshot was taken.
 CatalogResult<void> decode_deleted(const Outcome& outcome) {
     if (!outcome) {
         return failure<void>(outcome.error());
@@ -416,15 +443,6 @@ CatalogResult<void> decode_deleted(const Outcome& outcome) {
     if (!deleted_now || !deleted_before) {
         return std::unexpected(CatalogError::Corrupt);
     }
-    if (*deleted_now == 1 || *deleted_before) {
-        return {};
-    }
-    const auto state = outcome->get(0, 1).and_then(parse_video_state);
-    if (state == core::VideoState::Init || state == core::VideoState::Uploading) {
-        return std::unexpected(CatalogError::Conflict);
-    }
-    // Committed, and not deleted by this statement: another one deleted it first, after this
-    // statement's snapshot was taken.
     return {};
 }
 
@@ -743,7 +761,6 @@ public:
         : upload_(upload), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
-        reading_state_ = false;
         return Statement{.sql = kAbortUpload, .params = Params{}.add_uuid(upload_.uuid())};
     }
 
@@ -752,19 +769,14 @@ public:
             done_(failure<void>(outcome.error()));
             return std::nullopt;
         }
-        if (!reading_state_) {
-            if (outcome->affected() == 1) {
-                done_({});
-                return std::nullopt;
-            }
-            reading_state_ = true;
-            return Statement{.sql = kAbortedState, .params = Params{}.add_uuid(upload_.uuid())};
-        }
-        const auto state = outcome->get(0, 0);
-        if (!state) {
-            done_(std::unexpected(CatalogError::NotFound));
-        } else if (*state == "aborted") {
+        const auto aborted = outcome->get(0, 0).and_then(parse_uint64);
+        const auto state = outcome->get(0, 1);
+        if (!aborted) {
+            done_(std::unexpected(CatalogError::Corrupt));
+        } else if (*aborted == 1 || state == "aborted") {
             done_({});
+        } else if (!state) {
+            done_(std::unexpected(CatalogError::NotFound));
         } else {
             done_(std::unexpected(CatalogError::Conflict));
         }
@@ -775,7 +787,6 @@ public:
 
 private:
     core::UploadId upload_;
-    bool reading_state_ = false;
     CatalogCallback<void> done_;
 };
 

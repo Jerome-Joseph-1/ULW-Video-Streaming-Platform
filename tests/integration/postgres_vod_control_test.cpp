@@ -106,6 +106,33 @@ protected:
                               Params{}.add_uuid(id.uuid()).add_text(state)));
     }
 
+    // An upload for `video` in `state`, with half of its bytes durable.
+    core::UploadId add_upload(const core::VideoId& video, std::string_view state = "active") {
+        const auto id = core::UploadId::generate(clock, random);
+        auto conn = db->session();
+        EXPECT_TRUE(conn.exec(
+            "INSERT INTO uploads (id, video_id, owner_id, durable_offset, backend_ref, object_key, "
+            "chunk_size, size_bytes, state, expires_at) "
+            "VALUES ($1, $2, 'alice', CASE WHEN $3 = 'completed' THEN 10 ELSE 5 END, 'multipart-' "
+            "|| $3, 'videos/' || $2 || '/raw', 5, 10, "
+            "$3, now() + interval '1 day')",
+            Params{}.add_uuid(id.uuid()).add_uuid(video.uuid()).add_text(state)));
+        return id;
+    }
+    CatalogResult<void> cancel(const core::UploadId& upload) {
+        return call<void>([&](auto done) { catalog->abort_upload(upload, std::move(done)); });
+    }
+    CatalogResult<core::VideoState> commit(const core::UploadId& upload,
+                                           const core::VideoId& video) {
+        return call<core::VideoState>(
+            [&](auto done) { catalog->commit_upload(upload, video, "req-1", std::move(done)); });
+    }
+    std::string upload_state(const core::UploadId& upload) {
+        auto conn = db->session();
+        return scalar(conn, "SELECT state FROM uploads WHERE id = $1",
+                      Params{}.add_uuid(upload.uuid()));
+    }
+
     std::string count(infra::postgres::Sql sql, const core::VideoId& id) {
         auto conn = db->session();
         return scalar(conn, sql, Params{}.add_uuid(id.uuid()));
@@ -185,16 +212,90 @@ TEST_F(VodControlTest, OnlyTheOwnerOrTheServiceDeletes) {
     EXPECT_EQ(view(id, "alice").error(), CatalogError::NotFound);
 }
 
-TEST_F(VodControlTest, AnUploadInProgressIsNotDeleted) {
-    for (const std::string_view state : {"init", "uploading"}) {
-        const auto id = add_video(state);
-        EXPECT_EQ(remove(id, "alice").error(), CatalogError::Conflict) << state;
-        EXPECT_EQ(remove(id, std::nullopt).error(), CatalogError::Conflict) << state;
-        EXPECT_TRUE(view(id, "alice")) << state;
-        EXPECT_EQ(count("SELECT count(*) FROM video_purges WHERE video_id = $1", id), "0");
-        // Someone else's still answers as missing.
-        EXPECT_EQ(remove(id, "bob").error(), CatalogError::NotFound);
+// ADR-0106: a video whose upload is still open is deleted too, by its owner or the service; the
+// upload is aborted in the same statement, so nothing can commit it afterwards.
+TEST_F(VodControlTest, AVideoMidUploadIsDeletedAndItsUploadAborted) {
+    for (const std::optional<std::string_view> who :
+         {std::optional<std::string_view>{"alice"}, std::optional<std::string_view>{}}) {
+        for (const std::string_view state : {"init", "uploading"}) {
+            const auto id = add_video(state);
+            const auto upload = add_upload(id);
+            // Someone else's still answers as missing, and changes nothing.
+            EXPECT_EQ(remove(id, "bob").error(), CatalogError::NotFound);
+            EXPECT_EQ(upload_state(upload), "active");
+
+            ASSERT_TRUE(remove(id, who)) << state;
+            EXPECT_EQ(upload_state(upload), "aborted");
+            EXPECT_EQ(view(id, "alice").error(), CatalogError::NotFound);
+            EXPECT_EQ(count("SELECT count(*) FROM video_purges WHERE video_id = $1", id), "1");
+            // A commit afterwards is refused and cannot bring the video back.
+            EXPECT_EQ(commit(upload, id).error(), CatalogError::Conflict);
+            EXPECT_EQ(count("SELECT state::text FROM videos WHERE id = $1", id), state);
+            EXPECT_EQ(count("SELECT count(*) FROM jobs WHERE video_id = $1", id), "0");
+            // A repeat succeeds and changes nothing.
+            EXPECT_TRUE(remove(id, who));
+            EXPECT_EQ(count("SELECT count(*) FROM video_purges WHERE video_id = $1", id), "1");
+        }
     }
+}
+
+// The reaper finds the staged session of an upload a deleted video never completed, so it can
+// discard its parts; a completed one has none.
+TEST_F(VodControlTest, TheReaperIsHandedADeletedVideosStagedUpload) {
+    const auto id = add_video("uploading");
+    const auto upload = add_upload(id);
+    const auto done = add_video("ready");
+    add_upload(done, "completed");
+    ASSERT_TRUE(remove(id, "alice"));
+    ASSERT_TRUE(remove(done, "alice"));
+    const auto due = reaper->due(10);
+    ASSERT_TRUE(due);
+    ASSERT_EQ(due->size(), 2U);
+    for (const auto& purge : *due) {
+        if (purge.video == done) {
+            EXPECT_TRUE(purge.uploads.empty());
+            continue;
+        }
+        ASSERT_EQ(purge.video, id);
+        ASSERT_EQ(purge.uploads.size(), 1U);
+        EXPECT_EQ(purge.uploads[0].backend_ref, "multipart-active");
+        EXPECT_EQ(purge.uploads[0].key.view(), "videos/" + id.to_string() + "/raw");
+        EXPECT_EQ(purge.uploads[0].total_bytes, 10U);
+        EXPECT_EQ(purge.uploads[0].chunk_size, 5U);
+    }
+    EXPECT_EQ(reaper->forget(id), true);
+    EXPECT_EQ(upload_state(upload), "");
+}
+
+// Cancelling an upload deletes its video, which nothing can commit any more (ADR-0106); a repeat,
+// or a cancel of an upload an earlier abort left with its video, deletes it too.
+TEST_F(VodControlTest, CancellingAnUploadDeletesItsVideo) {
+    const auto id = add_video("uploading");
+    const auto upload = add_upload(id);
+    ASSERT_TRUE(grant(id, "bob"));
+    ASSERT_TRUE(cancel(upload));
+    EXPECT_EQ(upload_state(upload), "aborted");
+    EXPECT_EQ(view(id, "alice").error(), CatalogError::NotFound);
+    EXPECT_EQ(count("SELECT count(*) FROM video_grants WHERE video_id = $1", id), "0");
+    EXPECT_EQ(count("SELECT count(*) FROM video_purges WHERE video_id = $1", id), "1");
+    EXPECT_TRUE(list("alice", std::nullopt, 10)->videos.empty());
+    EXPECT_TRUE(cancel(upload));
+    EXPECT_EQ(commit(upload, id).error(), CatalogError::Conflict);
+
+    // Left behind by an abort before ADR-0106.
+    const auto stuck = add_video("init");
+    const auto stuck_upload = add_upload(stuck, "aborted");
+    EXPECT_TRUE(view(stuck, "alice"));
+    ASSERT_TRUE(cancel(stuck_upload));
+    EXPECT_EQ(view(stuck, "alice").error(), CatalogError::NotFound);
+    EXPECT_EQ(count("SELECT count(*) FROM video_purges WHERE video_id = $1", stuck), "1");
+
+    // A completed upload is not cancelled, and its video stays.
+    const auto ready = add_video("ready");
+    const auto completed = add_upload(ready, "completed");
+    EXPECT_EQ(cancel(completed).error(), CatalogError::Conflict);
+    EXPECT_TRUE(view(ready, "alice"));
+    EXPECT_EQ(cancel(core::UploadId::generate(clock, random)).error(), CatalogError::NotFound);
 }
 
 TEST_F(VodControlTest, ADeletionCancelsAQueuedJobAndLeavesARunningOne) {
@@ -317,7 +418,8 @@ TEST_F(VodControlTest, TheReaperPurgesADeletedVideoOnceNoJobRunsForIt) {
     const auto due = reaper->due(10);
     ASSERT_TRUE(due);
     ASSERT_EQ(due->size(), 1U);
-    EXPECT_EQ(due->front(), id);
+    EXPECT_EQ(due->front().video, id);
+    EXPECT_TRUE(due->front().uploads.empty()) << "a committed video has no staged parts";
     const auto forgotten = reaper->forget(id);
     ASSERT_TRUE(forgotten);
     EXPECT_TRUE(*forgotten);
@@ -370,8 +472,8 @@ TEST_F(VodControlTest, TheReaperTakesTheLongestDeletedFirstAndSkipsARestoredVide
     EXPECT_EQ(count("SELECT state FROM jobs WHERE video_id = $1", restored), "queued");
     ASSERT_TRUE(due);
     ASSERT_EQ(due->size(), 2U);
-    EXPECT_EQ((*due)[0], second);
-    EXPECT_EQ((*due)[1], first);
+    EXPECT_EQ((*due)[0].video, second);
+    EXPECT_EQ((*due)[1].video, first);
     EXPECT_EQ(reaper->due(1)->size(), 1U);
     // A restored video is never forgotten: its row stays.
     EXPECT_EQ(reaper->forget(restored), false);
