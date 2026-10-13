@@ -20,7 +20,7 @@
 
 ## Releases
 
-<!-- .github/workflows/release.yml, .github/workflows/publish-images.yml, docs/adr/0099-releases-are-version-tags-on-published-images.md -->
+<!-- .github/workflows/release.yml, .github/workflows/publish-images.yml, .github/workflows/ci.yml (on.push), docs/adr/0099-releases-are-version-tags-on-published-images.md, docs/adr/0107-maintenance-lines-release-patches-of-older-versions.md -->
 
 A release is a version, `vMAJOR.MINOR.PATCH`, given to a commit on `main` and to the four images
 already published for it (ADR-0085, ADR-0099). Each has a
@@ -45,6 +45,15 @@ fix a new patch.
 `main`, with `version` and, for anything but main's tip, `commit`. The run refuses a commit that
 is not on `main`, whose `ci` run did not succeed or whose images are missing, and a version that
 exists already; it builds nothing.
+
+**Maintenance lines** (ADR-0107). A fix for an older minor version that production still runs
+ships as its next patch from a branch `release/vX.Y`, cut from the tag `vX.Y.0` and given the fix
+by cherry-pick (a fix that needs a migration cannot: migration numbers are one line, main's). A
+push to that branch runs `ci`'s full lane and, once it succeeds, publish-images publishes the
+commit without moving `:main`. Then release, "Run workflow" from `main` with `branch`
+`release/vX.Y`, `version` `vX.Y.Z` (the run refuses another minor) and, for anything but the
+branch's tip, `commit`. Such a release is never marked the latest, and its notes start from the
+line's previous patch.
 
 ## Stable and draft
 

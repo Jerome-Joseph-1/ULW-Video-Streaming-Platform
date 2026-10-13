@@ -102,7 +102,9 @@ concurrency group keeps one run going and at most one waiting.
 **publish-images.yml** publishes a commit on main only once ci.yml's run for that commit's push
 to main has succeeded (`event=push&branch=main`); that success starts it (see "Where jobs run").
 Every squash merge is a push to main, and every push to main runs the full lane, so a merged
-commit still gets the run the publish needs; a `batch/**` run never satisfies it.
+commit still gets the run the publish needs; a `batch/**` run never satisfies it. A push to a
+maintenance line, `release/vX.Y` (ADR-0107), runs the full lane too, and its success publishes
+that commit in the same way, without moving `:main`.
 
 ## Where jobs run
 

@@ -1,9 +1,10 @@
 name: release
 
-# Cuts a versioned release, vX.Y.Z, of a commit on main whose images are already published
+# Cuts a versioned release, vX.Y.Z, of a commit on main, or on the maintenance line release/vX.Y
+# for a patch of an older minor version (docs/adr/0107), whose images are already published
 # (docs/adr/0099). Nothing is built: the version is a second name for what publish-images.yml
-# pushed and attested for that commit (docs/adr/0085). The run checks that the commit is on main,
-# that its ci run for its push to main succeeded and that all four images exist under its SHA;
+# pushed and attested for that commit (docs/adr/0085). The run checks that the commit is on its
+# branch, that its ci run for its push to that branch succeeded and that all four images exist under its SHA;
 # then it tags each image's digest as :vX.Y.Z (an alias of that exact manifest), and creates the
 # annotated git tag vX.Y.Z on the commit and a GitHub Release listing every image by
 # <sha>@sha256:<digest>, which is what production pins (deploy/kubernetes/RUNBOOK.md, 4a).
@@ -17,10 +18,15 @@ on:
         type: string
         required: true
       commit:
-        description: Commit, branch or tag to release; it must resolve to a commit on main (empty for main's tip)
+        description: Commit, branch or tag to release; it must resolve to a commit on `branch` (empty for its tip)
         type: string
         required: false
         default: ""
+      branch:
+        description: main, or the maintenance line release/vX.Y whose version this is
+        type: string
+        required: false
+        default: main
 
 permissions: {}
 
@@ -45,23 +51,37 @@ jobs:
     outputs:
       sha: ${{ steps.commit.outputs.sha }}
       version: ${{ steps.commit.outputs.version }}
+      branch: ${{ steps.commit.outputs.branch }}
       video_gateway: ${{ steps.images.outputs.video_gateway }}
       video_worker: ${{ steps.images.outputs.video_worker }}
       chat: ${{ steps.images.outputs.chat }}
       live_packager: ${{ steps.images.outputs.live_packager }}
     steps:
-      - name: Resolve the version and the commit, and check the commit is on main
+      - name: Resolve the version and the commit, and check the commit is on its branch
         id: commit
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
           COMMIT: ${{ inputs.commit }}
+          BRANCH: ${{ inputs.branch }}
         run: |
           if [[ ! $VERSION =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             echo "version '$VERSION' is not vMAJOR.MINOR.PATCH" >&2
             exit 1
           fi
-          ref=${COMMIT:-main}
+          branch=${BRANCH:-main}
+          # A maintenance line release/vX.Y releases vX.Y.Z only (ADR-0107).
+          if [[ $branch != main ]]; then
+            if [[ ! $branch =~ ^release/(v[0-9]+\.[0-9]+)$ ]]; then
+              echo "branch '$branch' is neither main nor a maintenance line release/vX.Y" >&2
+              exit 1
+            fi
+            if [[ $VERSION != "${BASH_REMATCH[1]}".* ]]; then
+              echo "$branch releases ${BASH_REMATCH[1]}.Z only, not $VERSION" >&2
+              exit 1
+            fi
+          fi
+          ref=${COMMIT:-$branch}
           if [[ ! $ref =~ ^[A-Za-z0-9._/-]{1,200}$ || $ref == *..* ]]; then
             echo "commit '$ref' is not a commit, branch or tag name" >&2
             exit 1
@@ -71,10 +91,10 @@ jobs:
             echo "could not resolve a commit: '$sha'" >&2
             exit 1
           fi
-          # Commits of $sha that main lacks: none when $sha is main or one of its ancestors.
-          behind=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...main" --jq .behind_by)
+          # Commits of $sha that the branch lacks: none when $sha is its tip or an ancestor.
+          behind=$(gh api "repos/$GITHUB_REPOSITORY/compare/$sha...$branch" --jq .behind_by)
           if [[ $behind != 0 ]]; then
-            echo "$sha is not on main" >&2
+            echo "$sha is not on $branch" >&2
             exit 1
           fi
           # A version is cut once: its tag must not exist yet, on any commit.
@@ -85,19 +105,21 @@ jobs:
           {
             echo "sha=$sha"
             echo "version=$VERSION"
+            echo "branch=$branch"
           } >> "$GITHUB_OUTPUT"
-          echo "releasing $sha as $VERSION"
-      # The commit's ci run for its push to main must have succeeded (as publish-images.yml
+          echo "releasing $sha from $branch as $VERSION"
+      # The commit's ci run for its push to its branch must have succeeded (as publish-images.yml
       # requires before it pushes). The API reports a re-run's latest attempt.
       - name: Check ci succeeded on this commit
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.commit.outputs.sha }}
+          BRANCH: ${{ steps.commit.outputs.branch }}
         run: |
-          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=main&per_page=50" \
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&branch=$BRANCH&per_page=50" \
             --jq '[.workflow_runs[] | {status, conclusion}]')
           if ! jq -e 'any(.conclusion == "success")' <<<"$runs" >/dev/null; then
-            echo "no successful ci run for the push of $SHA to main: $runs" >&2
+            echo "no successful ci run for the push of $SHA to $BRANCH: $runs" >&2
             exit 1
           fi
           echo "ci succeeded on $SHA"
@@ -194,6 +216,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ needs.check.outputs.sha }}
           VERSION: ${{ needs.check.outputs.version }}
+          BRANCH: ${{ needs.check.outputs.branch }}
           VIDEO_GATEWAY: ${{ needs.check.outputs.video_gateway }}
           VIDEO_WORKER: ${{ needs.check.outputs.video_worker }}
           CHAT: ${{ needs.check.outputs.chat }}
@@ -222,7 +245,7 @@ jobs:
           fi
           notes=$RUNNER_TEMP/notes.md
           {
-            echo "Commit \`$SHA\`."
+            echo "Commit \`$SHA\`, on \`$BRANCH\`."
             echo
             echo "### Images"
             echo
@@ -253,8 +276,21 @@ jobs:
             echo "- [docs/integration/changelog.md]($repo_url/blob/$VERSION/docs/integration/changelog.md)"
             echo
           } > "$notes"
+          # A maintenance line's patch is never marked the latest release: main's newest is.
+          # Its generated notes start from the line's previous patch, not from whatever was
+          # released last on main.
+          latest=true
+          since=()
+          if [[ $BRANCH != main ]]; then
+            latest=false
+            patch=${VERSION##*.}
+            previous=${VERSION%.*}.$((patch - 1))
+            if ((patch > 0)) && gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$previous" --silent 2>/dev/null; then
+              since=(--notes-start-tag "$previous")
+            fi
+          fi
           gh release create "$VERSION" --repo "$GITHUB_REPOSITORY" --verify-tag \
-            --title "$VERSION" --notes-file "$notes" --generate-notes
+            --title "$VERSION" --notes-file "$notes" --generate-notes --latest="$latest" "${since[@]}"
           {
             echo "### Released $VERSION"
             echo
