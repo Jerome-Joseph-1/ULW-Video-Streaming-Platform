@@ -113,3 +113,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0107](0107-maintenance-lines-release-patches-of-older-versions.md) | Maintenance lines release patches of older versions from release/vX.Y branches | Accepted |
 | [0108](0108-a-creates-idempotency-key-names-one-upload.md) | A create's Idempotency-Key names one upload per owner, kept in its own table | Accepted |
 | [0109](0109-an-external-turn-service-as-an-alternative-to-stunner.md) | An external TURN service as an alternative to STUNner, with credentials in each ticket | Accepted |
+| [0110](0110-each-rung-states-the-h264-level-it-needs.md) | Each rung states the H.264 level its size and the source's frame rate need | Accepted |

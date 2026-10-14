@@ -3,6 +3,7 @@
 #include "core/util/parse.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <format>
@@ -105,7 +106,59 @@ std::string kbps(std::uint32_t value) {
     return std::to_string(value) + "k";
 }
 
+// Table A-1's limits, Main profile (whose bitrate and buffer factor is 1000 bit/s): macroblocks
+// a second, macroblocks a frame, peak kbit/s and buffer kbit.
+struct Level {
+    std::string_view name;
+    std::uint64_t mbps;
+    std::uint64_t frame_mbs;
+    std::uint32_t kbps;
+    std::uint32_t cpb;
+};
+
+constexpr std::array<Level, 9> kLevels{{
+    {.name = "4.0", .mbps = 245'760, .frame_mbs = 8'192, .kbps = 20'000, .cpb = 25'000},
+    {.name = "4.1", .mbps = 245'760, .frame_mbs = 8'192, .kbps = 50'000, .cpb = 62'500},
+    {.name = "4.2", .mbps = 522'240, .frame_mbs = 8'704, .kbps = 50'000, .cpb = 62'500},
+    {.name = "5.0", .mbps = 589'824, .frame_mbs = 22'080, .kbps = 135'000, .cpb = 135'000},
+    {.name = "5.1", .mbps = 983'040, .frame_mbs = 36'864, .kbps = 240'000, .cpb = 240'000},
+    {.name = "5.2", .mbps = 2'073'600, .frame_mbs = 36'864, .kbps = 240'000, .cpb = 240'000},
+    {.name = "6.0", .mbps = 4'177'920, .frame_mbs = 139'264, .kbps = 240'000, .cpb = 240'000},
+    {.name = "6.1", .mbps = 8'355'840, .frame_mbs = 139'264, .kbps = 480'000, .cpb = 480'000},
+    {.name = "6.2", .mbps = 16'711'680, .frame_mbs = 139'264, .kbps = 800'000, .cpb = 800'000},
+}};
+
 } // namespace
+
+std::string_view h264_level(std::uint32_t width, std::uint32_t height, FrameRate rate,
+                            std::uint32_t maxrate_kbps, std::uint32_t bufsize_kbps) noexcept {
+    constexpr std::uint64_t kMbSize = 16;
+    const std::uint64_t width_mbs = (std::uint64_t{width} + kMbSize - 1) / kMbSize;
+    const std::uint64_t height_mbs = (std::uint64_t{height} + kMbSize - 1) / kMbSize;
+    const std::uint64_t frame_mbs = width_mbs * height_mbs;
+    const std::uint64_t den = std::max<std::uint32_t>(rate.den, 1);
+    for (const Level& level : kLevels) {
+        // A frame's sides are bounded too: neither may be over sqrt(8 x MaxFS) macroblocks.
+        const std::uint64_t side_bound = 8 * level.frame_mbs;
+        if (frame_mbs <= level.frame_mbs && width_mbs * width_mbs <= side_bound &&
+            height_mbs * height_mbs <= side_bound && frame_mbs * rate.num <= level.mbps * den &&
+            maxrate_kbps <= level.kbps && bufsize_kbps <= level.cpb) {
+            return level.name;
+        }
+    }
+    return kLevels.back().name;
+}
+
+std::uint32_t scaled_width(std::uint32_t source_width, std::uint32_t source_height,
+                           std::uint32_t height) noexcept {
+    if (source_height == 0) {
+        return 0;
+    }
+    // As scale_eval.c: av_rescale(height, width, source_height x 2) x 2, rounding half away.
+    const std::uint64_t den = std::uint64_t{source_height} * 2;
+    const std::uint64_t halves = ((std::uint64_t{height} * source_width) + (den / 2)) / den;
+    return static_cast<std::uint32_t>(halves * 2);
+}
 
 std::uint32_t gop_frames(FrameRate rate) noexcept {
     // round(4 * num / den) in integers: (2 * 4 * num + den) / (2 * den).
@@ -219,9 +272,15 @@ Args transcode_args(const std::filesystem::path& input, const std::filesystem::p
         // at the target rate.
         const std::uint32_t maxrate = target * 107 / 100;
         const std::uint32_t bufsize = target * 3 / 2;
-        args.insert(args.end(),
-                    {"-map", "[v" + std::to_string(i + 1) + "o]", "-c" + v, "libx264", "-b" + v,
-                     kbps(target), "-maxrate" + v, kbps(maxrate), "-bufsize" + v, kbps(bufsize)});
+        // Each rung states the level its own size and the source's rate need: a 1080p60 is
+        // twice the macroblocks a second 4.0 allows, and a decoder may refuse a stream that
+        // exceeds what it says it is. The frame rate is the source's; nothing resamples it.
+        const std::uint32_t width = scaled_width(media.width, media.height, ladder[i].height);
+        const std::string_view level =
+            h264_level(width, ladder[i].height, media.frame_rate, maxrate, bufsize);
+        args.insert(args.end(), {"-map", "[v" + std::to_string(i + 1) + "o]", "-c" + v, "libx264",
+                                 "-b" + v, kbps(target), "-maxrate" + v, kbps(maxrate),
+                                 "-bufsize" + v, kbps(bufsize), "-level" + v, std::string(level)});
     }
     if (media.has_audio) {
         for (std::size_t i = 0; i < ladder.size(); ++i) {
@@ -239,10 +298,9 @@ Args transcode_args(const std::filesystem::path& input, const std::filesystem::p
     // player's combined audio+video buffer only covers where both do, so no segment was ever
     // fully buffered, and a rung switch that re-appends one over buffered media reads as an
     // append that made no progress (hls.js's bufferAppendNoProgress).
-    args.insert(args.end(),
-                {"-preset", "veryfast", "-profile:v", "main", "-level", "4.0", "-pix_fmt",
-                 "yuv420p", "-bf", "0", "-sc_threshold", "0", "-g", gop, "-keyint_min", gop,
-                 "-force_key_frames", "expr:gte(t,n_forced*" + segment + ")"});
+    args.insert(args.end(), {"-preset", "veryfast", "-profile:v", "main", "-pix_fmt", "yuv420p",
+                             "-bf", "0", "-sc_threshold", "0", "-g", gop, "-keyint_min", gop,
+                             "-force_key_frames", "expr:gte(t,n_forced*" + segment + ")"});
 
     std::string streams;
     for (std::size_t i = 0; i < ladder.size(); ++i) {

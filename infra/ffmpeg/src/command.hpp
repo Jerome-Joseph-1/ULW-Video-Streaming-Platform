@@ -21,6 +21,20 @@ inline constexpr std::uint32_t kSegmentSeconds = 4;
 // Frames per segment: round(fps x 4), computed on the rational so 30000/1001 gives 120.
 [[nodiscard]] std::uint32_t gop_frames(core::ports::FrameRate rate) noexcept;
 
+// The lowest H.264 level from 4.0 up whose limits hold a Main-profile stream of this size, rate
+// and VBV (ITU-T H.264 Table A-1): frame size in macroblocks, macroblocks per second, peak
+// bitrate and buffer. 4.0 is the floor because it is what every rung was labelled before, and
+// what it holds (1080p30) is what nearly every upload is. Past 6.2, the highest level, it is
+// 6.2: x264 warns and encodes, as it did for a 1080p60 labelled 4.0.
+[[nodiscard]] std::string_view h264_level(std::uint32_t width, std::uint32_t height,
+                                          core::ports::FrameRate rate, std::uint32_t maxrate_kbps,
+                                          std::uint32_t bufsize_kbps) noexcept;
+
+// The width scale=-2:height gives a source of this size: the height's share of it, rounded to
+// the nearest even number.
+[[nodiscard]] std::uint32_t scaled_width(std::uint32_t source_width, std::uint32_t source_height,
+                                         std::uint32_t height) noexcept;
+
 // argv, program name first.
 using Args = std::vector<std::string>;
 

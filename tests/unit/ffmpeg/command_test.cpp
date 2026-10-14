@@ -15,6 +15,8 @@ using core::ports::FrameRate;
 using core::ports::MediaInfo;
 using infra::ffmpeg::Args;
 using infra::ffmpeg::gop_frames;
+using infra::ffmpeg::h264_level;
+using infra::ffmpeg::scaled_width;
 using infra::ffmpeg::transcode_args;
 
 MediaInfo media(std::uint32_t height, bool audio = true, FrameRate rate = {.num = 30, .den = 1}) {
@@ -80,6 +82,8 @@ TEST(TranscodeArgs, ReproduceTheSpecCommandForAFullLadder) {
                         "5350k",
                         "-bufsize:v:0",
                         "7500k",
+                        "-level:v:0",
+                        "4.0",
                         "-map",
                         "[v2o]",
                         "-c:v:1",
@@ -90,6 +94,8 @@ TEST(TranscodeArgs, ReproduceTheSpecCommandForAFullLadder) {
                         "2996k",
                         "-bufsize:v:1",
                         "4200k",
+                        "-level:v:1",
+                        "4.0",
                         "-map",
                         "[v3o]",
                         "-c:v:2",
@@ -100,6 +106,8 @@ TEST(TranscodeArgs, ReproduceTheSpecCommandForAFullLadder) {
                         "856k",
                         "-bufsize:v:2",
                         "1200k",
+                        "-level:v:2",
+                        "4.0",
                         "-map",
                         "a:0",
                         "-map",
@@ -118,8 +126,6 @@ TEST(TranscodeArgs, ReproduceTheSpecCommandForAFullLadder) {
                         "veryfast",
                         "-profile:v",
                         "main",
-                        "-level",
-                        "4.0",
                         "-pix_fmt",
                         "yuv420p",
                         "-bf",
@@ -210,6 +216,64 @@ TEST(TranscodeArgs, RungsBelow360pGetTheirOwnHeightAndName) {
     EXPECT_EQ(after(args, "-var_stream_map"), "v:0,a:0,name:240p");
     EXPECT_EQ(after(args, "-maxrate:v:0"), "570k");
     EXPECT_EQ(after(args, "-bufsize:v:0"), "799k");
+}
+
+TEST(H264Level, FitsTheMacroblockRateOfTheSize) {
+    // 1080p: 120 x 68 = 8160 macroblocks a frame; 4.0 allows 245,760 a second.
+    EXPECT_EQ(h264_level(1920, 1080, {.num = 30, .den = 1}, 5350, 7500), "4.0");
+    EXPECT_EQ(h264_level(1920, 1080, {.num = 30000, .den = 1001}, 5350, 7500), "4.0");
+    // 489,600 a second at 60 fps, and 408,000 at 50: 4.2's 522,240 holds both.
+    EXPECT_EQ(h264_level(1920, 1080, {.num = 60, .den = 1}, 5350, 7500), "4.2");
+    EXPECT_EQ(h264_level(1920, 1080, {.num = 60000, .den = 1001}, 5350, 7500), "4.2");
+    EXPECT_EQ(h264_level(1920, 1080, {.num = 50, .den = 1}, 5350, 7500), "4.2");
+    EXPECT_EQ(h264_level(1920, 1080, {.num = 120, .den = 1}, 5350, 7500), "5.1");
+    // 720p60 is 3600 x 60 = 216,000: still 4.0.
+    EXPECT_EQ(h264_level(1280, 720, {.num = 60, .den = 1}, 2996, 4200), "4.0");
+    EXPECT_EQ(h264_level(640, 360, {.num = 240, .den = 1}, 856, 1200), "4.0");
+}
+
+TEST(H264Level, FitsTheFrameSizeAndItsSides) {
+    // 2560x1080 is 160 x 68 = 10,880 macroblocks, past 4.2's 8704 a frame.
+    EXPECT_EQ(h264_level(2560, 1080, {.num = 24, .den = 1}, 5350, 7500), "5.0");
+    // 300 x 27 = 8100 macroblocks fit 4.0's 8192 a frame, but a side of 300 is past
+    // sqrt(8 x 8192) = 256 and 4.2's sqrt(8 x 8704) = 263; 5.0's is 420.
+    EXPECT_EQ(h264_level(4800, 432, {.num = 24, .den = 1}, 5350, 7500), "5.0");
+}
+
+TEST(H264Level, FitsTheBitrateAndBuffer) {
+    EXPECT_EQ(h264_level(640, 360, {.num = 30, .den = 1}, 30'000, 7500), "4.1");
+    EXPECT_EQ(h264_level(640, 360, {.num = 30, .den = 1}, 5350, 30'000), "4.1");
+}
+
+TEST(H264Level, PastTheHighestLevelIsTheHighestLevel) {
+    EXPECT_EQ(h264_level(1920, 1080, {.num = 90'000, .den = 1}, 5350, 7500), "6.2");
+    EXPECT_EQ(h264_level(1920, 1080, {.num = 30, .den = 0}, 5350, 7500), "4.0");
+}
+
+TEST(ScaledWidth, IsTheHeightsShareRoundedToEven) {
+    EXPECT_EQ(scaled_width(1920, 1080, 720), 1280U);
+    EXPECT_EQ(scaled_width(1920, 1080, 360), 640U);
+    // 360 x 4/3 = 480; 1080 x 9/16 = 607.5, to 608.
+    EXPECT_EQ(scaled_width(1440, 1080, 360), 480U);
+    EXPECT_EQ(scaled_width(1080, 1920, 1080), 608U);
+    EXPECT_EQ(scaled_width(1920, 0, 360), 0U);
+}
+
+TEST(TranscodeArgs, EachRungStatesTheLevelItsSizeAndRateNeed) {
+    const auto ladder = core::choose_ladder(1080);
+    const Args args =
+        transcode_args("in", "out", media(1080, true, {.num = 60, .den = 1}), ladder, 2);
+    EXPECT_EQ(after(args, "-level:v:0"), "4.2");
+    EXPECT_EQ(after(args, "-level:v:1"), "4.0");
+    EXPECT_EQ(after(args, "-level:v:2"), "4.0");
+    EXPECT_EQ(std::ranges::find(args, "-level"), args.end());
+    // A portrait 1080x1920 has 1080p as its 608x1080 rung: 38 x 68 = 2584 macroblocks.
+    const MediaInfo portrait{.width = 1080,
+                             .height = 1920,
+                             .frame_rate = {.num = 60, .den = 1},
+                             .duration = core::Millis{60'000},
+                             .has_audio = false};
+    EXPECT_EQ(after(transcode_args("in", "out", portrait, ladder, 2), "-level:v:0"), "4.0");
 }
 
 // What ffprobe 6.1 prints for probe_args on a 720p clip with audio.
