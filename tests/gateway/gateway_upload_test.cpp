@@ -1406,6 +1406,66 @@ TEST_P(GatewayUpload, AMalformedIdempotencyKeyIsRefused) {
               201);
 }
 
+// Two creates under one key at once make one upload: the one that loses the key to the other's
+// insert discards its store session and answers the winner's upload (ADR-0108).
+TEST_P(GatewayUpload, ConcurrentCreatesUnderOneIdempotencyKeyMakeOneUpload) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const std::string body =
+        R"({"filename":"race.mp4","size_bytes":3000000,"content_type":"video/mp4"})";
+    std::vector<std::string> answers(4);
+    std::vector<std::thread> clients;
+    clients.reserve(answers.size());
+    for (std::string& answer : answers) {
+        clients.emplace_back([&gw, &body, &answer] {
+            HttpClient c(gw.endpoint());
+            const auto r =
+                c.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)),
+                          {{"Idempotency-Key", "race-1"}});
+            answer = r && r->status == 201 ? r->body : "failed";
+        });
+    }
+    for (std::thread& t : clients) {
+        t.join();
+    }
+    for (const std::string& answer : answers) {
+        EXPECT_EQ(answer, answers.front());
+    }
+    EXPECT_NE(answers.front(), "failed");
+    HttpClient c(gw.endpoint());
+    const auto listed = c.request("GET", "/api/v1/videos", kAlice);
+    ASSERT_TRUE(listed);
+    EXPECT_EQ(core::json::parse(listed->body)->find("videos")->as_array()->size(), 1U);
+}
+
+// A key the catalog cannot look up is the catalog's outage, retried by the client like any
+// other; nothing is created meanwhile.
+TEST_P(GatewayUpload, AnIdempotencyKeyLookupDuringACatalogOutageIsA503) {
+    GatewayUnderTest gw(over_transport({.backend = Backend::Fake, .chunk = kMiB}));
+    const std::string body = R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
+    gw.fail_catalog(core::ports::CatalogError::Unavailable);
+    HttpClient c(gw.endpoint());
+    const auto r = c.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)),
+                             {{"Idempotency-Key", "k-1"}});
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 503);
+    gw.fail_catalog(std::nullopt);
+    HttpClient d(gw.endpoint());
+    EXPECT_EQ(d.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)),
+                        {{"Idempotency-Key", "k-1"}})
+                  ->status,
+              201);
+}
+
+TEST_P(GatewayUpload, ACreateBodyOverItsLimitIsRefusedBeforeItIsRead) {
+    const GatewayUnderTest gw(over_transport());
+    const std::string body(5000, ' ');
+    HttpClient c(gw.endpoint());
+    const auto r = c.request("POST", "/api/v1/uploads", kAlice, std::as_bytes(std::span(body)),
+                             {{"Idempotency-Key", "big-1"}});
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 413);
+}
+
 // A catalog that is down is a 503 on every route that needs it, so clients retry; a row it
 // cannot read is a 500, which they must not. Nothing an outage refused is half done after it.
 TEST_P(GatewayUpload, ACatalogOutageIsA503AndAnUnreadableRowA500OnEveryRoute) {
