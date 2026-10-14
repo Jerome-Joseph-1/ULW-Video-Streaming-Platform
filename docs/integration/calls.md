@@ -13,7 +13,9 @@ answers with a short-lived ticket (ADR-0050, ADR-0087). A group chat has a call 
 members ([Group calls](#group-calls), ADR-0095). The client then connects with the
 LiveKit JS SDK using that ticket, and LiveKit owns ICE, DTLS-SRTP, RTP and congestion control
 from there. TURN credentials come from LiveKit itself, in its answer to the SDK's join
-(ADR-0037): neither the service nor client code handles them.
+(ADR-0037): neither the service nor client code handles them. A deployment may use an external
+TURN service instead of STUNner (ADR-0109); its tickets then carry `ice_servers`, which the client
+passes to the SDK ([step 4](#the-flow)).
 
 ## Which rooms have a call
 
@@ -75,6 +77,7 @@ from there. TURN credentials come from LiveKit itself, in its answer to the SDK'
    | `url` | LiveKit's signalling endpoint; the SDK connects to `<url>/rtc` |
    | `token` | Admits this user and device to this call, once |
    | `expires_at` | Unix seconds, 60 s after issue: connect before then |
+   | `ice_servers` | Only where the deployment uses an external TURN service (ADR-0109): the relays this device must reach LiveKit through, as `RTCIceServer` objects (`urls`, and `username` and `credential` for TURN). Absent otherwise |
    | `call` | The call this ticket belongs to: the one it started ringing, or the one it answered or rejoined. Absent when there is none: nobody else is on the room's member list, or the call you were answering ended while you asked (then do not connect) |
 
 4. Connect with the LiveKit JS SDK (`livekit-client`; the call suite pins 2.22.3), before
@@ -86,9 +89,17 @@ from there. TURN credentials come from LiveKit itself, in its answer to the SDK'
    room.on(RoomEvent.TrackSubscribed, (track) => attach(track));        // the other member
    room.on(RoomEvent.ParticipantDisconnected, () => showCallEnded());
    room.on(RoomEvent.Disconnected, () => offerToRejoin());
-   await room.connect(ticket.url, ticket.token);
+   await room.connect(ticket.url, ticket.token, ticket.ice_servers ? {
+     // An external TURN service (ADR-0109): its relays, and nothing but its relays. LiveKit
+     // admits media only from them, and the SDK prefers these to its join response's.
+     rtcConfig: { iceServers: ticket.ice_servers, iceTransportPolicy: 'relay' },
+   } : undefined);
    await room.localParticipant.enableCameraAndMicrophone();
    ```
+
+   The `ice_servers` credentials last as long as the deployment configures (4 hours by
+   default) and are not renewed mid-call: a call longer than that drops its relay, and the
+   client comes back with a new ticket (step 6), which carries fresh ones.
 
    The ticket is used once. After the connect LiveKit keeps the connection's credential fresh
    itself, and the SDK reconnects with it after a network change; do not store the ticket.

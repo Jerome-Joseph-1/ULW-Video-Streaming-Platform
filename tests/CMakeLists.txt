@@ -813,6 +813,13 @@ target_link_libraries(sfu_unit_tests PRIVATE ulw::sfu_livekit ulw::auth ulw::tes
 target_include_directories(sfu_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src
     ${PROJECT_SOURCE_DIR}/tests)
 
+# External TURN (ADR-0109): its settings, both providers' credentials, and the media port that
+# carries them.
+ulw_add_test_suite(turn_unit_tests unit
+    unit/turn/turn_test.cpp)
+target_link_libraries(turn_unit_tests PRIVATE ulw::turn ulw::test_http_server ulw::os)
+target_include_directories(turn_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
+
 # How the stream service starts packagers: as child processes, and as Jobs through a scripted
 # Kubernetes API server.
 ulw_add_test_suite(packagers_unit_tests unit

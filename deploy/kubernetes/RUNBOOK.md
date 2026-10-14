@@ -665,6 +665,7 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `VIDEO_GATEWAY_IMAGE_TAG`, `VIDEO_WORKER_IMAGE_TAG`, `CHAT_IMAGE_TAG`, `LIVE_PACKAGER_IMAGE_TAG` | Which build runs: `main`, a commit SHA, or `<sha>@sha256:<digest>` (4a) | each image's tag |
 | `IMAGE_PULL_POLICY` | `Always` for a moving tag, `IfNotPresent` for a pinned one | the four images' pull policy |
 | `TURN_PORT` | STUNner's public UDP port (step 7) | the TURN listener, and the port LiveKit hands clients |
+| `TURN_PROVIDER`, `TURN_URLS`, `TURN_KEY_ID`, `TURN_TTL_SECONDS`, `MEDIA_PUBLIC_IP`, `MEDIA_UDP_PORT` | With `components/external-turn` only: the external TURN service in place of STUNner, and where its relays reach LiveKit (step 7, "External TURN") | chat's and the gateway's `ULW_TURN_*`; LiveKit's `--node-ip` and UDP port; the published media port |
 | `VIDEO_GATEWAY_SECRET`, `VIDEO_WORKER_SECRET`, `CHAT_SECRET`, `SFU_SECRET`, `LIVE_PACKAGER_SECRET` | The names of the Secrets of step 3, 7 and 9 | every `secretKeyRef`; the one Secret besides its own stream's a packager may read |
 | `LIVE_MAX_STREAMS`, `LIVE_BROADCASTER_CLAIM` | With `components/live-streams` only: how many streams run at once, and who may start one (`<claim>=<value>`, empty for every signed-in user; step 9) | `ULW_LIVE_MAX_STREAMS`, `ULW_LIVE_BROADCASTER_CLAIM` |
 
@@ -674,7 +675,8 @@ into the manifests; read it to see exactly where. What `config.env` does not cov
 counts, resources, the per-client limits, an extra hostname, a hop count) you change with
 kustomize patches in your overlay, as `overlays/production` patches the worker's and egress's
 resources. Live streams are a component of their own (`components/live-streams`, step 9),
-listed after `operator-config` in an overlay that runs them.
+listed after `operator-config` in an overlay that runs them, and so is an external TURN service
+(`components/external-turn`, step 7).
 
 Your overlay can live in your own repository instead, against a pinned commit of this one:
 
@@ -1190,6 +1192,106 @@ livekit`; STUNner then relays to nothing and calls stop), then take the plane ou
 as in "Install" so the next apply does not bring it back. The operator removes the stunnerd
 Deployment and Service when its Gateway goes. If nothing else uses STUNner, delete
 `cluster/stunner/*.yaml` and the CRDs last.
+
+### External TURN (optional)
+
+The steps above relay every call through STUNner, on a UDP port open to the whole internet on
+the node's address. `components/external-turn` hands the relaying to a TURN service outside the
+cluster instead (docs/adr/0109): Cloudflare Realtime TURN (`TURN_PROVIDER=cloudflare`), or any
+TURN server that checks the TURN REST API's time-limited credentials against a secret it shares
+with you (`TURN_PROVIDER=hmac`: coturn with `use-auth-secret`, eturnal). Chat, and the gateway for
+live streams, then put the service's ICE servers, with credentials for that device, in every
+ticket (`ULW_TURN_MODE=external`), and clients relay through them (docs/integration/calls.md,
+step 4; docs/integration/live.md, "Publishing"). Ship clients that pass `ice_servers` before you
+switch: one that ignores them cannot connect afterwards.
+
+**What it does and does not remove.** No port is open to the whole internet any more, and
+STUNner, its operator and `stunner-secrets` are not needed. But LiveKit cannot be a TURN client
+itself, so the service's relays still reach it on one UDP port (`MEDIA_UDP_PORT`) of the node's
+public address (`MEDIA_PUBLIC_IP`), which the component admits from the provider's relay ranges
+only. And that address is not hidden: LiveKit sends it, as its ICE candidate, to every
+participant, since their relay needs it. A flood from outside the provider's ranges is dropped at
+the node; one big enough to fill the node's link needs no open port at all. Only a public
+address that is not the website's (a second address on the node, or LiveKit on another host)
+takes the site out of that path.
+
+**Provider credentials.** For Cloudflare: in the dashboard, Realtime, TURN Server, create a TURN
+key; `TURN_KEY_ID` in `config.env` is its id, and its API token goes in the Secret below. For
+hmac: the shared secret of your TURN server (coturn's `static-auth-secret`, at least 16 bytes),
+and `TURN_URLS`, the URIs clients use (`turn:turn.example.com:3478?transport=udp,turns:turn.example.com:5349?transport=tcp`).
+Leave the other provider's key empty (`TURN_URLS` for Cloudflare, `TURN_KEY_ID` for hmac): chat
+and the gateway refuse to start with both, rather than guess.
+
+Per environment, add to the realtime plane's Secret (`SFU_SECRET`) whichever the provider takes;
+`TURN_HOST` and `TURN_SECRET` are no longer read:
+
+```sh
+kubectl -n "$NS" patch secret sfu-secrets --type merge -p "$(jq -n --rawfile t <(printf '%s' "$TOKEN") \
+  '{stringData: {EXTERNAL_TURN_API_TOKEN: $t}}')"            # cloudflare
+# or, for hmac: {stringData: {EXTERNAL_TURN_SHARED_SECRET: $s}}
+```
+
+**The media port.** In `config.env`: `MEDIA_PUBLIC_IP`, the node's public IPv4 address (Cloudflare
+relays allocate IPv4 only), and `MEDIA_UDP_PORT`, one per environment on a shared node (the
+examples: 7882 for staging, 7883 for production). The component publishes it as a LoadBalancer
+Service, `livekit-media`, with `externalTrafficPolicy: Local` and `loadBalancerSourceRanges`, and
+a NetworkPolicy admitting the same ranges. The ranges shipped are Cloudflare's published IPv4
+ranges (https://www.cloudflare.com/ips-v4); Cloudflare does not publish its relays' ranges apart,
+so check that a relay address falls inside them (below). Another provider's relay ranges replace
+both lists with a patch in your overlay (`validate-manifests.sh` fails if the two differ). On the
+node's own firewall, open UDP `MEDIA_UDP_PORT` from the same ranges only, and close `TURN_PORT`.
+
+**Turning it on.** In the overlay:
+
+```yaml
+components:
+  - ../../components/operator-config
+  - ../../components/external-turn
+```
+
+then apply as in step 4. An overlay apply does not delete what it no longer renders: remove
+STUNner's Gateway and route yourself, after the new pods are ready (calls in progress drop and
+reconnect through the new path):
+
+```sh
+kubectl -n "$NS" rollout status deployment/livekit deployment/chat
+kubectl -n "$NS" delete udproutes.stunner.l7mp.io livekit
+kubectl -n "$NS" delete gateway stunner
+```
+
+STUNner's cluster-wide parts (`cluster/stunner`, `stunner-secrets`) can go once no environment
+uses them (as in "Rollback" above).
+
+**Verify.**
+
+```sh
+kubectl -n "$NS" logs deploy/chat | grep -m1 '"msg":"listening"'   # "turn":"external cloudflare" (or hmac)
+kubectl -n "$NS" get svc livekit-media                              # EXTERNAL-IP the node's, PORT(S) MEDIA_UDP_PORT/UDP
+kubectl -n "$NS" get gateway stunner                                # NotFound
+```
+
+A call ticket (as in "Verify" above) now has `ice_servers`. From a machine outside the cluster,
+take the TURN entry's `username` and `credential` from one and allocate with them:
+
+```sh
+TURN_USERNAME=<username> TURN_PASSWORD=<credential> \
+  tests/cluster/turn_probe.py turn.cloudflare.com 3478 --permit "$MEDIA_PUBLIC_IP"
+```
+
+Expect `allocate` a success and `permit` a success; `allocate.relayed` is the address that
+service's relays send to LiveKit from, which must be inside the Service's source ranges (run it a
+few times: each allocation may come from another relay). Then a call between two members on
+different networks must connect and carry media, and `kubectl -n "$NS" logs deploy/livekit`
+shows ICE pairs whose remote side is a relay address.
+
+**Rollback.** Remove the component from the overlay and apply: STUNner's Gateway and route
+return, LiveKit names STUNner again, and tickets lose `ice_servers`. Put `TURN_HOST` and
+`TURN_SECRET` back in the Secret first if you removed them, reopen `TURN_PORT`, and delete the
+media Service and policy, which the apply leaves behind:
+
+```sh
+kubectl -n "$NS" delete service/livekit-media networkpolicy/livekit-media
+```
 
 ## 8. Signing key rotation
 

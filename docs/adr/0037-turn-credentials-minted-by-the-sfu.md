@@ -1,6 +1,6 @@
 # 0037. STUNner runs in front of LiveKit with time-windowed credentials the SFU mints
 
-Status: Accepted, amended by 0088 (STUNner's manifests are under `deploy/kubernetes`, the TURN secret one per cluster)
+Status: Accepted, amended by 0088 (STUNner's manifests are under `deploy/kubernetes`, the TURN secret one per cluster) and 0109 (an external TURN service may replace STUNner; its ICE servers then come in each ticket)
 Date: 2026-09-29
 Amends: ADR-0013's "Long-term credentials are static" (the credentials are now time-windowed)
 

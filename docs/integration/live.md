@@ -117,13 +117,14 @@ Cache-Control: no-store
 
 The stream's owner gets a **publisher ticket** from the stream service: the first with the
 stream, and a fresh one from `POST /api/v1/live/{id}/ticket` ([Starting a
-stream](#starting-a-stream)). The ticket has three fields:
+stream](#starting-a-stream)). The ticket has these fields:
 
 | Field | Meaning |
 |---|---|
 | `url` | The WHIP endpoint, `https://<media host>/whip/v1`. |
 | `token` | The bearer token for one WHIP request. |
 | `expires_at` | Unix seconds, 60 s after issue. |
+| `ice_servers` | Only where the platform uses an external TURN service (ADR-0109): the relays to publish through, as `RTCIceServer` objects (`urls`, and `username` and `credential` for TURN). Absent otherwise. |
 
 The client then speaks WHIP to `url` (ADR-0053), and asks the stream service for a **fresh
 ticket before every request after the POST**: each PATCH, an ICE restart, the DELETE. A ticket
@@ -150,6 +151,13 @@ handed out earlier. Nothing else of the platform is between the client and the m
   `setRemoteDescription(answer)`, and PATCH the candidates as they come (RFC 9725 sections 4.3.1
   and 4.6). An encoder that puts all its candidates in the offer (GStreamer's `whipsink`) works
   only where it reaches the media server without TURN.
+- **ICE servers from the ticket.** Where the ticket has `ice_servers` (an external TURN service,
+  ADR-0109), use those and not the `Link` headers, which then name only a public STUN server:
+  `new RTCPeerConnection({iceServers: ticket.ice_servers, iceTransportPolicy: 'relay'})`, and
+  trickle as above. The media server admits media only from the TURN service's relays, so a
+  publisher that does not relay cannot connect. Their credentials last as long as the platform
+  configures (4 hours by default); a stream longer than that reconnects with a fresh ticket.
+  Encoders that take ICE servers only from the `Link` headers (OBS) cannot publish in this mode.
 - **One source per stream.** Every ticket for a stream names the same publisher. A second POST
   replaces the running session, which the server disconnects; it never adds a second source.
   It is not a clean continuation either: viewers may see the new session after a jump, or the

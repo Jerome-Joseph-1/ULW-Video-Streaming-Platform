@@ -109,6 +109,15 @@ constexpr std::array kSettings{
     // LiveKit's webhooks (ADR-0093).
     ops::Setting{.env = "ULW_LIVE_WEBHOOK_PORT", .key = "live.webhook_port"},
     ops::Setting{.env = "ULW_LIVE_PUBLISHER_GRACE_SECONDS", .key = "live.publisher_grace_seconds"},
+    // An external TURN service for publishers (ADR-0109), as chat reads it for calls.
+    ops::Setting{.env = "ULW_TURN_MODE", .key = "live.turn_mode"},
+    ops::Setting{.env = "ULW_TURN_PROVIDER", .key = "live.turn_provider"},
+    ops::Setting{.env = "ULW_TURN_URLS", .key = "live.turn_urls"},
+    ops::Setting{.env = "ULW_TURN_SHARED_SECRET", .key = "live.turn_shared_secret", .secret = true},
+    ops::Setting{.env = "ULW_TURN_KEY_ID", .key = "live.turn_key_id"},
+    ops::Setting{.env = "ULW_TURN_KEY_API_TOKEN", .key = "live.turn_key_api_token", .secret = true},
+    ops::Setting{.env = "ULW_TURN_API_URL", .key = "live.turn_api_url"},
+    ops::Setting{.env = "ULW_TURN_TTL_SECONDS", .key = "live.turn_ttl_seconds"},
     // Not a setting: passed on to a packager the gateway starts as a process.
     ops::Setting{.env = "PATH", .key = ""},
 };
@@ -683,6 +692,12 @@ std::expected<void, ConfigError> load_live_limits(const EnvLookup& env, LiveConf
 
 std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config) {
     LiveConfig& live = config.live;
+    // Checked whether or not streams are on: components/external-turn sets it for the whole
+    // realtime plane, and streams may come later (components/live-streams).
+    auto turn = infra::turn::load_config(env);
+    if (!turn) {
+        return error(turn.error().variable, turn.error().reason);
+    }
     auto api = lookup(env, "LIVEKIT_API_URL");
     if (!api) {
         // Off: nothing else of it may be set, or a deployment would believe it publishes.
@@ -749,6 +764,7 @@ std::expected<void, ConfigError> load_live(const EnvLookup& env, Config& config)
     live.livekit_api_key = std::move(*key);
     live.livekit_api_secret = std::move(*secret);
     live.packager_srt = std::move(*srt);
+    live.turn = std::move(*turn);
     return {};
 }
 

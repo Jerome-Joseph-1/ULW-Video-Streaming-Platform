@@ -76,3 +76,11 @@ condition = "AND"
 paths = ['''^deploy/[a-z0-9-]+/compose\.yaml$''']
 regexTarget = "line"
 regexes = ['''^\s*[A-Z_]+_URL:\s*jdbc:postgresql://[a-z0-9-]+:[0-9]+/[a-z0-9_]+\s*$''']
+
+# The external TURN tests' credentials (ADR-0109): a shared secret made up for the tests, the
+# HMAC-SHA1 vector computed from it, and Cloudflare-shaped usernames and tokens fed to a scripted
+# server. None admits anyone to a relay.
+[[allowlists]]
+description = "external TURN test credentials"
+targetRules = ["generic-api-key"]
+paths = ['''^tests/unit/turn/turn_test\.cpp$''']

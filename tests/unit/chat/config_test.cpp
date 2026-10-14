@@ -146,6 +146,30 @@ TEST_F(ChatConfigTest, CallsAreOffUnlessTheLiveKitKeyIsSetAndThenNeedAllFour) {
     }
 }
 
+TEST_F(ChatConfigTest, ExternalTurnRidesWithCallsAndIsOffByDefault) {
+    env["LIVEKIT_API_URL"] = "http://livekit:7880";
+    env["LIVEKIT_CLIENT_URL"] = "wss://media.example.test";
+    env["LIVEKIT_API_KEY"] = "test-key";
+    env["LIVEKIT_API_SECRET"] = "test-only-livekit-secret-0123456789abcdef";
+    auto config = load();
+    ASSERT_TRUE(config && config->calls);
+    EXPECT_FALSE(config->calls->turn) << "self-hosted unless asked";
+
+    env["ULW_TURN_MODE"] = "external";
+    env["ULW_TURN_PROVIDER"] = "hmac";
+    env["ULW_TURN_URLS"] = "turn:relay.example.com:3478?transport=udp";
+    EXPECT_EQ(refused_variable(), "ULW_TURN_SHARED_SECRET");
+    env["ULW_TURN_SHARED_SECRET"] = "turn-shared-secret-0123456789";
+    config = load();
+    ASSERT_TRUE(config) << config.error().variable;
+    ASSERT_TRUE(config->calls && config->calls->turn);
+    EXPECT_EQ(config->calls->turn->provider, infra::turn::Provider::Hmac);
+
+    // Relays for tickets that are never issued would only hide a missing LiveKit secret.
+    env.erase("LIVEKIT_API_KEY");
+    EXPECT_EQ(refused_variable(), "ULW_TURN_MODE");
+}
+
 TEST_F(ChatConfigTest, StayingRootIsAnExplicitChoiceAndTheUserToBecomeOptional) {
     const auto defaults = load();
     ASSERT_TRUE(defaults);

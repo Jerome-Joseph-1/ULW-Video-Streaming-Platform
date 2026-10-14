@@ -538,6 +538,26 @@ TEST(Envelope, RepliesAreTheDocumentedShapes) {
         out,
         R"({"type":"ticket","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","url":"wss://media.example.test","token":"eyJ.a.b","expires_at":1790000060})");
     out.clear();
+    // With an external TURN service (ADR-0109), the relays as RTCIceServer objects.
+    chat::write_ticket(out, room(),
+                       {.endpoint = "wss://m",
+                        .credential = "t",
+                        .expires_at = core::WallTime{},
+                        .ice_servers = {{.urls = {"stun:stun.example.test:3478"},
+                                         .username = {},
+                                         .credential = {}},
+                                        {.urls = {"turn:relay.example.test:3478?transport=udp",
+                                                  "turns:relay.example.test:443?transport=tcp"},
+                                         .username = "1790000000:d",
+                                         .credential = "c="}}},
+                       std::nullopt);
+    EXPECT_EQ(
+        out,
+        R"({"type":"ticket","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","url":"wss://m","token":"t","expires_at":0,)"
+        R"("ice_servers":[{"urls":["stun:stun.example.test:3478"]},)"
+        R"({"urls":["turn:relay.example.test:3478?transport=udp","turns:relay.example.test:443?transport=tcp"],)"
+        R"("username":"1790000000:d","credential":"c="}]})");
+    out.clear();
     chat::write_call_error(out, "unavailable", room(), core::Millis{2000});
     EXPECT_EQ(
         out,

@@ -36,10 +36,27 @@ enum class MediaError : std::uint8_t {
 // endpoint to connect to and a credential that admits exactly that participant to exactly
 // that room until `expires_at`. The client runs WebRTC, offer and answer included, against the
 // media server; the credential is the only thing the signalling path hands it.
+// A STUN or TURN server as WebRTC's RTCIceServer names it: its URIs ("turn:host:3478?
+// transport=udp", "turns:host:5349", "stun:host:3478") and, for TURN, the credential pair that
+// admits this one client until it expires.
+struct IceServer {
+    std::vector<std::string> urls;
+    std::string username;
+    std::string credential;
+
+    friend bool operator==(const IceServer&, const IceServer&) = default;
+};
+
 struct MediaTicket {
     std::string endpoint;
     std::string credential;
     WallTime expires_at;
+    // The relays the client must reach the media server through, when an external TURN service
+    // carries the media (ADR-0109); empty when the media server names its own relay in its join
+    // response (ADR-0037). The initializer lets designated initializers that predate it leave it
+    // out.
+    // NOLINTNEXTLINE(readability-redundant-member-init)
+    std::vector<IceServer> ice_servers{};
 };
 
 // One connected device in a room, as the media server reports it. A group call's owner reads the

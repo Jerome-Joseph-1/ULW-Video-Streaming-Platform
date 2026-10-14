@@ -2,6 +2,7 @@
 
 #include "core/models/ids.hpp"
 #include "core/util/time.hpp"
+#include "infra/turn/turn.hpp"
 #include "net/ip_address.hpp"
 #include "net/reactor_factory.hpp"
 
@@ -36,6 +37,10 @@ struct CallsConfig {
     std::string client_url;
     std::string api_key;
     std::string api_secret;
+    // ULW_TURN_MODE=external and its provider (ADR-0109): every ticket then carries the ICE
+    // servers of a TURN service outside the cluster. Unset: LiveKit names the cluster's own
+    // relay in its join response (ADR-0037).
+    std::optional<infra::turn::Config> turn;
 };
 
 // Chat's service API (ADR-0096): a listener of its own for the operator's backend, which manages

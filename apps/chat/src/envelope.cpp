@@ -2,6 +2,7 @@
 
 #include "core/util/json.hpp"
 #include "infra/auth/base64url.hpp"
+#include "infra/turn/turn.hpp"
 
 #include "live_chat.hpp"
 #include "presence_room.hpp"
@@ -846,6 +847,10 @@ void write_ticket(std::string& out, const core::RoomId& room,
         out += R"(,"call":")";
         out += call->to_string();
         out += '"';
+    }
+    if (!ticket.ice_servers.empty()) {
+        out += ',';
+        infra::turn::append_ice_servers(out, ticket.ice_servers);
     }
     out += '}';
 }

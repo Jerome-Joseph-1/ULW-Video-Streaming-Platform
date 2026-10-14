@@ -6,6 +6,7 @@
 #include "http/ascii.hpp"
 #include "http/origin.hpp"
 #include "infra/auth/token_extractor.hpp"
+#include "infra/turn/turn.hpp"
 #include "net/socket.hpp"
 
 #include <algorithm>
@@ -1670,6 +1671,10 @@ void append_ticket(std::string& json, const core::ports::MediaTicket& ticket) {
     core::json::append_string(json, ticket.credential);
     json += R"(,"expires_at":)";
     json += std::to_string(unix_seconds(ticket.expires_at));
+    if (!ticket.ice_servers.empty()) {
+        json += ',';
+        infra::turn::append_ice_servers(json, ticket.ice_servers);
+    }
     json += '}';
 }
 

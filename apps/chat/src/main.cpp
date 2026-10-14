@@ -7,6 +7,7 @@
 #include "infra/postgres/message_store.hpp"
 #include "infra/postgres/room_store.hpp"
 #include "infra/sfu/livekit/livekit_sfu.hpp"
+#include "infra/turn/turn.hpp"
 #include "net/offload_pool.hpp"
 #include "net/signals.hpp"
 #include "net/socket.hpp"
@@ -103,6 +104,9 @@ struct Services {
     // Calls (ADR-0050), when configured: LiveKit's server API on its own libcurl multi. The
     // server's call handler holds media rooms of the SFU and is destroyed first.
     std::unique_ptr<infra::curl::Multi> sfu_multi;
+    // An external TURN service's credentials (ADR-0109), which the SFU's tickets carry: it
+    // outlives the SFU, and its calls run on the SFU's multi.
+    std::unique_ptr<core::ports::ITurnCredentials> turn;
     std::unique_ptr<core::ports::ISfu> sfu;
     std::unique_ptr<chat::ChatServer> server;
     std::unique_ptr<net::SignalWatcher> signals;
@@ -145,6 +149,10 @@ std::expected<void, std::string> make_sfu(const chat::Config& config, Services& 
         return std::unexpected(std::string(infra::sfu::livekit::to_string(sfu.error())));
     }
     s.sfu = std::move(*sfu);
+    if (calls.turn) {
+        s.turn = infra::turn::make_credentials(*s.reactor, *s.sfu_multi, s.clock, *calls.turn);
+        s.sfu = infra::turn::make_relayed_sfu(std::move(s.sfu), *s.turn);
+    }
     return {};
 }
 
@@ -193,6 +201,11 @@ std::string calls_text(const chat::Config& config) {
     std::string out;
     core::json::append_string(out, config.calls ? config.calls->client_url : "off");
     return out;
+}
+
+// Which relay calls go through (ADR-0109): STUNner, named by LiveKit, or an external service.
+std::string_view turn_text(const chat::Config& config) noexcept {
+    return infra::turn::describe(config.calls ? config.calls->turn : std::nullopt);
 }
 
 // The key directory (ADR-0102) on the database the stores use. Two sessions: a claim's fetches
@@ -406,10 +419,11 @@ int run() {
     chat::log_event(
         R"("level":"info","msg":"listening","version":"{}","git":"{}","node":"{}","port":{},)"
         R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}","calls":{},)"
-        R"("self_service":{},"service_port":{})",
+        R"("turn":"{}","self_service":{},"service_port":{})",
         info.version, info.git_sha, config->node.view(), config->port, config->node_address,
         net::to_string(choice->kind), choice->fell_back_from_io_uring ? " (fallback)" : "", keys,
-        jemalloc.empty() ? "default" : "jemalloc ", jemalloc, calls, config->self_service,
+        jemalloc.empty() ? "default" : "jemalloc ", jemalloc, calls, turn_text(*config),
+        config->self_service,
         config->service_api.transform([](const chat::ServiceApiConfig& api) { return api.port; })
             .value_or(std::uint16_t{0}));
 

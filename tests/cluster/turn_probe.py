@@ -5,12 +5,19 @@ can equally be run from any machine against a real TURN server.
 
     turn_probe.py HOST PORT                  a Binding request only
     TURN_SECRET=... turn_probe.py HOST PORT [--user U] [--permit IP] [--forbid IP]
+    TURN_USERNAME=... TURN_PASSWORD=... turn_probe.py HOST PORT [--permit IP] [--forbid IP]
 
 With TURN_SECRET in its environment (STUNner's ephemeral auth shared secret, ADR-0037; never
 on the command line, where shell history and the process list keep it) it also allocates a relay
 with a credential minted from it, asks for a permission to each --permit and --forbid peer,
 releases the allocation, and tries two allocations that must fail: a wrong password and a
 correctly signed credential that has expired.
+
+With TURN_USERNAME and TURN_PASSWORD instead (a credential an external TURN service issued,
+ADR-0109: one entry of a ticket's ice_servers, or Cloudflare's generate-ice-servers answer), it
+allocates once with that credential and asks for the permissions, and nothing else: it cannot
+mint a wrong or expired one. The report's "relayed" address is where that service's relays
+send from, which the node's firewall must admit on LiveKit's media port.
 
 Each exchange uses a fresh socket, so each allocation has its own 5-tuple.
 """
@@ -106,9 +113,10 @@ def allocate(sock, username, password):
     return response, key, signed
 
 
-def turn(host, port, secret, user, permit, forbid):
+def relay(host, port, username, password, permit, forbid):
+    """Allocates with the given credential, reports the mapped and relayed addresses and the
+    permissions asked for, and releases the allocation."""
     report = {}
-    username, password = stun.ephemeral_credentials(secret, user, time.time() + WINDOW_S)
     with fresh(host, port) as sock:
         local = sock.getsockname()[:2]
         response, key, signed = allocate(sock, username, password)
@@ -130,6 +138,12 @@ def turn(host, port, secret, user, permit, forbid):
             released = transact(sock, stun.REFRESH,
                                 [(stun.LIFETIME, (0).to_bytes(4, "big"))] + signed, key=key)
             report["release"] = outcome(released, key)
+    return report
+
+
+def turn(host, port, secret, user, permit, forbid):
+    username, password = stun.ephemeral_credentials(secret, user, time.time() + WINDOW_S)
+    report = relay(host, port, username, password, permit, forbid)
     with fresh(host, port) as sock:
         response, _, _ = allocate(sock, username, password + "x")
         report["wrong_password"] = outcome(response)
@@ -153,9 +167,13 @@ def main(argv):
     try:
         report = {"binding": binding(args.host, args.port)}
         secret = os.environ.get("TURN_SECRET")
+        username, password = os.environ.get("TURN_USERNAME"), os.environ.get("TURN_PASSWORD")
         if secret:
             report.update(turn(args.host, args.port, secret, args.user, args.permit,
                                args.forbid))
+        elif username and password:
+            report.update(relay(args.host, args.port, username, password, args.permit,
+                                args.forbid))
     except NoAnswer as e:
         sys.exit(f"turn_probe: {e}")
     json.dump(report, sys.stdout, indent=2)
