@@ -121,6 +121,29 @@ TEST_F(GatewayStreams, TicketsGoToTheOwnerAlone) {
         404);
 }
 
+TEST_F(GatewayStreams, ATicketCarriesTheExternalRelaysItWasIssuedWith) {
+    const std::string id = create();
+    EXPECT_EQ(send("POST", "/api/v1/live/" + id + "/ticket", kAlice).body.find("ice_servers"),
+              std::string::npos)
+        << "none without an external TURN service";
+    gw.with_live([](LiveFakes& f) {
+        f.sfu.ice_servers = {{.urls = {"turn:relay.example.test:3478?transport=udp"},
+                              .username = "1767240000:d",
+                              .credential = "c="}};
+    });
+    const HttpResponse r = send("POST", "/api/v1/live/" + id + "/ticket", kAlice);
+    ASSERT_EQ(r.status, 200) << r.body;
+    const core::json::Value doc = json_of(r);
+    const core::json::Value* servers = doc.find("ice_servers");
+    ASSERT_NE(servers, nullptr) << r.body;
+    ASSERT_EQ(servers->as_array()->size(), 1U);
+    const core::json::Value& server = servers->as_array()->front();
+    EXPECT_EQ(text_at(server, "username"), "1767240000:d");
+    EXPECT_EQ(text_at(server, "credential"), "c=");
+    EXPECT_EQ(server.find("urls")->as_array()->front().as_string(),
+              "turn:relay.example.test:3478?transport=udp");
+}
+
 TEST_F(GatewayStreams, TheOwnerGoesLiveAndAnyoneSeesIt) {
     const std::string id = create();
     EXPECT_EQ(send("POST", "/api/v1/live/" + id + "/start", kBob).status, 404);

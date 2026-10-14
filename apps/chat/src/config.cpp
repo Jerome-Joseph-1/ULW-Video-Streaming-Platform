@@ -193,11 +193,22 @@ std::expected<ClientLimits, ConfigError> client_limits(const EnvLookup& env) {
 // without LiveKit leaves out (its secret does not exist), so the URLs alone, which an overlay may
 // set for every environment, configure nothing. The adapter checks the values (make_sfu).
 std::expected<std::optional<CallsConfig>, ConfigError> calls_config(const EnvLookup& env) {
+    auto turn = infra::turn::load_config(env);
+    if (!turn) {
+        return error(turn.error().variable, turn.error().reason);
+    }
     auto key = lookup(env, "LIVEKIT_API_KEY");
     if (!key) {
+        if (turn->has_value()) {
+            return error("ULW_TURN_MODE", "external, but LIVEKIT_API_KEY is not set");
+        }
         return std::nullopt;
     }
-    CallsConfig out{.api_url = {}, .client_url = {}, .api_key = std::move(*key), .api_secret = {}};
+    CallsConfig out{.api_url = {},
+                    .client_url = {},
+                    .api_key = std::move(*key),
+                    .api_secret = {},
+                    .turn = std::move(*turn)};
     const std::array<std::pair<std::string_view, std::string*>, 3> required{{
         {"LIVEKIT_API_URL", &out.api_url},
         {"LIVEKIT_CLIENT_URL", &out.client_url},

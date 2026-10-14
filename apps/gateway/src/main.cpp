@@ -9,6 +9,7 @@
 #include "infra/sfu/livekit/livekit_sfu.hpp"
 #include "infra/storage/fs_store.hpp"
 #include "infra/storage/s3_store.hpp"
+#include "infra/turn/turn.hpp"
 #include "net/offload_pool.hpp"
 #include "net/signals.hpp"
 #include "net/socket.hpp"
@@ -131,6 +132,9 @@ struct Services {
     // LiveKit and the Kubernetes API get a multi of their own, as key fetches do, so that no
     // upload holding the store's connections delays a ticket.
     std::unique_ptr<infra::curl::Multi> live_multi;
+    // An external TURN service's credentials (ADR-0109), which the SFU's tickets carry: it
+    // outlives the SFU, and its calls run on the stream service's multi.
+    std::unique_ptr<core::ports::ITurnCredentials> turn;
     std::unique_ptr<core::ports::ISfu> sfu;
     std::unique_ptr<core::ports::IPackagers> packagers;
     std::unique_ptr<infra::postgres::PgLiveStreams> live_store;
@@ -307,6 +311,10 @@ std::expected<void, std::string> make_live(const gateway::Config& config, Servic
         return std::unexpected(std::string(infra::sfu::livekit::to_string(sfu.error())));
     }
     s.sfu = std::move(*sfu);
+    if (live.turn) {
+        s.turn = infra::turn::make_credentials(*s.reactor, *s.live_multi, s.clock, *live.turn);
+        s.sfu = infra::turn::make_relayed_sfu(std::move(s.sfu), *s.turn);
+    }
     if (live.runtime == gateway::PackagerRuntime::Process) {
         auto packagers = infra::packagers::ProcessPackagers::create(
             *s.reactor, {.binary = live.packager_binary, .environment = live.packager_environment});

@@ -3,6 +3,26 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-14: tickets may carry an external TURN service's ICE servers
+
+<!-- infra/turn/src/relayed_sfu.cpp (make_relayed_sfu), infra/turn/src/config.cpp (load_config, append_ice_servers), apps/chat/src/envelope.cpp (write_ticket), apps/gateway/src/connection.cpp (append_ticket), deploy/kubernetes/components/external-turn/kustomization.yaml, docs/adr/0109-an-external-turn-service-as-an-alternative-to-stunner.md -->
+
+Additive (versioning rule 1): a new optional field in call tickets and publisher tickets, present
+only where the operator turns the external TURN mode on. Main only (v1.1 and later). No migration.
+
+| Before | Now |
+|---|---|
+| A ticket was `url`, `token`, `expires_at` (and `call`); LiveKit's join response named STUNner as the relay | Unchanged by default. With `ULW_TURN_MODE=external` (components/external-turn), every ticket also carries `ice_servers`, the external TURN service's relays with credentials for that device ([Calls](calls.md#the-flow), [Publishing](live.md#publishing)) |
+
+What to do:
+
+- **Clients:** when a ticket has `ice_servers`, pass them as `rtcConfig: {iceServers:
+  ticket.ice_servers, iceTransportPolicy: 'relay'}` to `room.connect` (calls) or to the
+  `RTCPeerConnection` (WHIP publishers), and ask for a new ticket when a call outlives them.
+  Do it now, before your operator switches: a client that ignores them cannot connect once
+  the switch is made.
+- **Operators:** nothing unless you turn it on (RUNBOOK.md, step 7, "External TURN").
+
 ## 2026-10-13: a create can carry an Idempotency-Key
 
 <!-- apps/gateway/src/connection.cpp (on_head, start_create, on_keyed, on_created), infra/postgres/src/upload_catalog.cpp (kCreateUpload, kFindKeyedUpload), migrations/0021_upload_requests.sql, docs/adr/0108-a-creates-idempotency-key-names-one-upload.md -->

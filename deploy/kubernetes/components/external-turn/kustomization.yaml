@@ -1,0 +1,324 @@
+# An external TURN service in place of STUNner (docs/adr/0109, RUNBOOK.md step 7, "External
+# TURN"). An overlay lists this after components/operator-config to turn it on:
+#   components:
+#     - ../../components/operator-config
+#     - ../../components/external-turn
+# Without it, STUNner relays the media (ADR-0013, ADR-0037), as before.
+#
+# What it changes: STUNner's Gateway and UDPRoute are gone, so neither STUNner's operator
+# (cluster/stunner) nor stunner-secrets is needed, and LiveKit no longer names a relay in its join
+# response. Chat (and the gateway, for live streams) instead put the provider's ICE servers in
+# every ticket, credentials minted for that participant (ULW_TURN_MODE=external). LiveKit cannot
+# be a TURN client itself, so the provider's relays reach it on one UDP port on the node's public
+# address, admitted from the provider's relay ranges only (media.yaml). Every value here is an
+# example that the replacements below fill from config.env, and the secrets come from the
+# realtime plane's Secret (SFU_SECRET).
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - media.yaml
+patches:
+  # No STUNner: nothing relays inside the cluster, and no TURN port is open to everyone.
+  - target:
+      kind: Gateway
+      name: stunner
+    patch: |-
+      $patch: delete
+      apiVersion: gateway.networking.k8s.io/v1
+      kind: Gateway
+      metadata:
+        name: stunner
+  - target:
+      kind: UDPRoute
+      name: livekit
+    patch: |-
+      $patch: delete
+      apiVersion: stunner.l7mp.io/v1
+      kind: UDPRoute
+      metadata:
+        name: livekit
+  # LiveKit advertises the node's public address (and, for egress inside the cluster, its pod
+  # address too) on MEDIA_UDP_PORT, and names no relay: the tickets carry the provider's. The
+  # configuration is base/livekit's with only rtc changed (validate-manifests.sh checks it).
+  - target:
+      kind: Deployment
+      name: livekit
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: livekit
+        namespace: ulw
+      spec:
+        template:
+          spec:
+            containers:
+              - name: livekit
+                args: ["--node-ip=$(MEDIA_PUBLIC_IP)"]
+                ports:
+                  - name: rtc-udp
+                    containerPort: 7882
+                    protocol: UDP
+                # In this order: Kubernetes expands $(NAME) only from the variables listed
+                # before it, and LIVEKIT_CONFIG reads all of them. The unchanged ones are named
+                # here only to keep their place.
+                env:
+                  - name: POD_IP
+                  - name: LIVEKIT_KEYS
+                  - name: LIVEKIT_API_KEY
+                  - name: REDIS_PASSWORD
+                  - name: TURN_HOST
+                    $patch: delete
+                  - name: TURN_SECRET
+                    $patch: delete
+                  - name: TURN_PORT
+                    $patch: delete
+                  # The node's public IPv4 address, MEDIA_PUBLIC_IP in config.env: the address the
+                  # provider's relays send to, and so the only one browsers' relays may reach.
+                  - name: MEDIA_PUBLIC_IP
+                    value: 203.0.113.10
+                  - name: MEDIA_UDP_PORT
+                    value: "7882"
+                  - name: LIVEKIT_CONFIG
+                    value: |
+                      port: 7880
+                      rtc:
+                        # Every participant's media on one UDP port, which media.yaml publishes
+                        # on the node's address to the TURN provider's relays alone. No ICE over
+                        # TCP and no public address discovery: the address is --node-ip.
+                        udp_port: $(MEDIA_UDP_PORT)
+                        tcp_port: 0
+                        use_external_ip: false
+                        # The pod's address as well as the public one: egress, the recorder of a
+                        # live stream, joins from inside the cluster and reaches the pod
+                        # directly. Browsers' relays cannot use it (providers refuse private
+                        # peers), and STUNner's mode advertised it anyway.
+                        advertise_internal_ip: true
+                        # No turn_servers: each ticket carries the external service's ICE
+                        # servers, with a credential for that participant (docs/adr/0109).
+                      room:
+                        # Rooms exist only because the call service opened them.
+                        auto_create: false
+                      # LiveKit reaches egress, the recorder of a live stream, only through Redis
+                      # (docs/adr/0053).
+                      redis:
+                        address: livekit-redis:6379
+                        password: $(REDIS_PASSWORD)
+                      api:
+                        # ListParticipants from the room itself, not from its copy in Redis, which can
+                        # keep a stale snapshot of a participant (deploy/local/compose.yaml says how).
+                        enable_psrpc_for_get_list_participants: true
+                      # Room and participant events to the gateway's stream service, signed with the
+                      # key it shares (docs/adr/0093): on the gateway's webhook listener, in this
+                      # namespace, which only this pod may reach and no route exposes
+                      # (components/live-streams/hooks.yaml). Without that component nothing listens
+                      # there: each send fails and is dropped, which changes nothing else.
+                      webhook:
+                        api_key: $(LIVEKIT_API_KEY)
+                        urls:
+                          - http://video-gateway-hooks:8081/livekit/webhook
+                      logging:
+                        level: info
+  # Chat puts the provider's ICE servers in every call ticket.
+  - target:
+      kind: Deployment
+      name: chat
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: chat
+        namespace: ulw
+      spec:
+        template:
+          spec:
+            containers:
+              - name: chat
+                env:
+                  - name: ULW_TURN_MODE
+                    value: external
+                  - name: ULW_TURN_PROVIDER
+                    value: cloudflare
+                  - name: ULW_TURN_URLS
+                    value: ""
+                  - name: ULW_TURN_KEY_ID
+                    value: ""
+                  - name: ULW_TURN_TTL_SECONDS
+                    value: "14400"
+                  - name: ULW_TURN_SHARED_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: sfu-secrets
+                        key: EXTERNAL_TURN_SHARED_SECRET
+                        optional: true
+                  - name: ULW_TURN_KEY_API_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: sfu-secrets
+                        key: EXTERNAL_TURN_API_TOKEN
+                        optional: true
+  # The gateway does the same for a live stream's publisher; with live streams off it reads the
+  # settings and uses none of them.
+  - target:
+      kind: Deployment
+      name: video-gateway
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: video-gateway
+        namespace: ulw
+      spec:
+        template:
+          spec:
+            containers:
+              - name: gateway
+                env:
+                  - name: ULW_TURN_MODE
+                    value: external
+                  - name: ULW_TURN_PROVIDER
+                    value: cloudflare
+                  - name: ULW_TURN_URLS
+                    value: ""
+                  - name: ULW_TURN_KEY_ID
+                    value: ""
+                  - name: ULW_TURN_TTL_SECONDS
+                    value: "14400"
+                  - name: ULW_TURN_SHARED_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: sfu-secrets
+                        key: EXTERNAL_TURN_SHARED_SECRET
+                        optional: true
+                  - name: ULW_TURN_KEY_API_TOKEN
+                    valueFrom:
+                      secretKeyRef:
+                        name: sfu-secrets
+                        key: EXTERNAL_TURN_API_TOKEN
+                        optional: true
+
+replacements:
+  # This component's own resources, in the overlay's namespace.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NAMESPACE
+    targets:
+      - select:
+          kind: Service
+          name: livekit-media
+        fieldPaths:
+          - metadata.namespace
+      - select:
+          kind: NetworkPolicy
+          name: livekit-media
+        fieldPaths:
+          - metadata.namespace
+  # The node's public address, which LiveKit advertises.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.MEDIA_PUBLIC_IP
+    targets:
+      - select:
+          kind: Deployment
+          name: livekit
+        fieldPaths:
+          - spec.template.spec.containers.[name=livekit].env.[name=MEDIA_PUBLIC_IP].value
+  # The media port: where LiveKit listens, what it advertises, and what the node publishes.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.MEDIA_UDP_PORT
+    targets:
+      - select:
+          kind: Deployment
+          name: livekit
+        fieldPaths:
+          - spec.template.spec.containers.[name=livekit].env.[name=MEDIA_UDP_PORT].value
+          - spec.template.spec.containers.[name=livekit].ports.[name=rtc-udp].containerPort
+      - select:
+          kind: Service
+          name: livekit-media
+        fieldPaths:
+          - spec.ports.[name=rtc-udp].port
+  # The provider, its URIs (hmac), its key's id (cloudflare) and the credentials' lifetime, the
+  # same for chat and the gateway.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.TURN_PROVIDER
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_TURN_PROVIDER].value
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_TURN_PROVIDER].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.TURN_URLS
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_TURN_URLS].value
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_TURN_URLS].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.TURN_KEY_ID
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_TURN_KEY_ID].value
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_TURN_KEY_ID].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.TURN_TTL_SECONDS
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_TURN_TTL_SECONDS].value
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_TURN_TTL_SECONDS].value
+  # The realtime plane's Secret, which holds the provider's secret or token.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.SFU_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_TURN_SHARED_SECRET].valueFrom.secretKeyRef.name
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_TURN_KEY_API_TOKEN].valueFrom.secretKeyRef.name
+      - select:
+          kind: Deployment
+          name: video-gateway
+        fieldPaths:
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_TURN_SHARED_SECRET].valueFrom.secretKeyRef.name
+          - spec.template.spec.containers.[name=gateway].env.[name=ULW_TURN_KEY_API_TOKEN].valueFrom.secretKeyRef.name

@@ -596,7 +596,7 @@ TEST(DescriptorBudget, TwoDescriptorsPerConnectionAfterTheReserve) {
     EXPECT_FALSE(gateway::check_descriptor_budget(limits, 0));
 }
 
-TEST_F(ConfigTest, OnlyTheConnectionStringTheStoreKeysAndLiveKitsSecretAreSecret) {
+TEST_F(ConfigTest, OnlyTheConnectionStringTheStoreKeysAndTheMediaSecretsAreSecret) {
     for (const ops::Setting& s : gateway::settings()) {
         const bool store_key =
             s.env == "ULW_S3_ACCESS_KEY_ID" || s.env == "ULW_S3_SECRET_ACCESS_KEY";
@@ -604,9 +604,11 @@ TEST_F(ConfigTest, OnlyTheConnectionStringTheStoreKeysAndLiveKitsSecretAreSecret
         // packager the gateway starts: nobody configures either.
         EXPECT_EQ(s.key.empty(), store_key || s.env == "KUBERNETES_SERVICE_HOST" || s.env == "PATH")
             << s.env;
-        EXPECT_EQ(s.secret,
-                  store_key || s.env == "ULW_DATABASE_URL" || s.env == "LIVEKIT_API_SECRET")
-            << s.env;
+        // LiveKit's secret, and the external TURN service's (ADR-0109).
+        const bool media_secret = s.env == "LIVEKIT_API_SECRET" ||
+                                  s.env == "ULW_TURN_SHARED_SECRET" ||
+                                  s.env == "ULW_TURN_KEY_API_TOKEN";
+        EXPECT_EQ(s.secret, store_key || s.env == "ULW_DATABASE_URL" || media_secret) << s.env;
     }
 }
 
@@ -772,6 +774,37 @@ TEST_F(LiveConfigTest, TheKubernetesRuntimeRefusesWhatCouldNotWork) {
     env["ULW_STORAGE"] = "fs";
     env["ULW_FS_ROOT"] = "/srv/ulw";
     EXPECT_EQ(refused_variable(), "ULW_LIVE_PACKAGER");
+}
+
+TEST_F(LiveConfigTest, PublishersTakeAnExternalTurnService) {
+    live("process");
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->live.turn) << "self-hosted unless asked";
+    env["ULW_TURN_MODE"] = "external";
+    env["ULW_TURN_PROVIDER"] = "cloudflare";
+    env["ULW_TURN_KEY_ID"] = "0123abcd";
+    EXPECT_EQ(refused_variable(), "ULW_TURN_KEY_API_TOKEN");
+    env["ULW_TURN_KEY_API_TOKEN"] = "token-of-the-key";
+    config = load();
+    ASSERT_TRUE(config) << config.error().variable;
+    ASSERT_TRUE(config->live.turn);
+    EXPECT_EQ(config->live.turn->provider, infra::turn::Provider::Cloudflare);
+    // Streams off: checked, and unused. The realtime plane's setting reaches every service
+    // that could issue a ticket, whether or not this one does yet.
+    live("process");
+    std::erase_if(env, [](const auto& e) { return e.first.starts_with("LIVEKIT_"); });
+    std::erase_if(env, [](const auto& e) { return e.first.starts_with("ULW_LIVE_"); });
+    env["ULW_TURN_MODE"] = "external";
+    env["ULW_TURN_PROVIDER"] = "cloudflare";
+    env["ULW_TURN_KEY_ID"] = "0123abcd";
+    env["ULW_TURN_KEY_API_TOKEN"] = "token-of-the-key";
+    config = load();
+    ASSERT_TRUE(config) << config.error().variable;
+    EXPECT_FALSE(config->live.enabled);
+    EXPECT_FALSE(config->live.turn);
+    env["ULW_TURN_PROVIDER"] = "twilio";
+    EXPECT_EQ(refused_variable(), "ULW_TURN_PROVIDER");
 }
 
 TEST_F(LiveConfigTest, EveryLiveSettingIsChecked) {

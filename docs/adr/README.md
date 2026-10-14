@@ -40,7 +40,7 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0034](0034-rtp-and-rtcp-read-in-place.md) | RTP and RTCP are read in place, for tooling and tests | Accepted |
 | [0035](0035-node-channel-over-framed-tcp.md) | The node channel is framed TCP on the reactor | Accepted |
 | [0036](0036-chat-server-client-edge.md) | chat_server's client edge: envelope, limits and allocation failure | Accepted |
-| [0037](0037-turn-credentials-minted-by-the-sfu.md) | STUNner runs in front of LiveKit with time-windowed credentials the SFU mints | Accepted, amended by 0088 |
+| [0037](0037-turn-credentials-minted-by-the-sfu.md) | STUNner runs in front of LiveKit with time-windowed credentials the SFU mints | Accepted, amended by 0088 and 0109 |
 | [0038](0038-single-use-key-packages-in-postgres.md) | Single-use key packages in Postgres, with a replenish signal | Accepted, amended by 0102 |
 | [0039](0039-json-logs-metrics-and-readiness-off-the-loop.md) | JSON logs, metrics and readiness, none of them waiting on the loop | Accepted |
 | [0040](0040-layered-configuration-with-a-toml-subset.md) | Layered configuration from a TOML subset, the environment and flags | Accepted |
@@ -112,3 +112,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0106](0106-deleting-a-video-mid-upload-aborts-the-upload.md) | Deleting a video mid-upload aborts its upload, and cancelling an upload deletes its video | Accepted |
 | [0107](0107-maintenance-lines-release-patches-of-older-versions.md) | Maintenance lines release patches of older versions from release/vX.Y branches | Accepted |
 | [0108](0108-a-creates-idempotency-key-names-one-upload.md) | A create's Idempotency-Key names one upload per owner, kept in its own table | Accepted |
+| [0109](0109-an-external-turn-service-as-an-alternative-to-stunner.md) | An external TURN service as an alternative to STUNner, with credentials in each ticket | Accepted |

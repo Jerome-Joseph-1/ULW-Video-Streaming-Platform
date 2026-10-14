@@ -271,6 +271,8 @@ public:
     std::map<std::string, std::string> relays;
     std::size_t tickets = 0;
     core::WallTime ticket_expiry{std::chrono::seconds(1767225660)};
+    // What an external TURN service would add to every ticket (ADR-0109); none by default.
+    std::vector<core::ports::IceServer> ice_servers;
 
 private:
     class Room final : public core::ports::IMediaRoom {
@@ -288,7 +290,8 @@ private:
                                : core::ports::MediaTicket{
                                      .endpoint = "https://media.example.test/whip/v1",
                                      .credential = "ticket-" + std::to_string(++sfu_.tickets),
-                                     .expires_at = sfu_.ticket_expiry};
+                                     .expires_at = sfu_.ticket_expiry,
+                                     .ice_servers = sfu_.ice_servers};
             sfu_.later_.post(
                 [done = std::move(done), answer = std::move(answer)]() mutable noexcept {
                     done(std::move(answer));

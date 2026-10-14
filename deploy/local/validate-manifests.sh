@@ -31,6 +31,27 @@ render "$root/deploy/stunner" >"$manifests/stunner.yaml"
 for overlay in staging production; do
     render "$kube/overlays/$overlay" >"$manifests/$overlay.yaml"
 done
+# Each example overlay with components/external-turn listed after operator-config, as RUNBOOK.md
+# (step 7, "External TURN") has an operator list it: a copy of the overlay whose paths point back
+# at the tree.
+external_turn() {
+    local dir=$manifests/external-$1 rel
+    mkdir "$dir"
+    rel=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$kube" \
+        "$dir")
+    sed -e "s#\.\./\.\./#$rel/#g" -e "s#^      - config.env#      - $rel/overlays/$1/config.env#" \
+        -e "s#^  - $rel/components/operator-config\$#&\n  - $rel/components/external-turn#" \
+        "$kube/overlays/$1/kustomization.yaml" >"$dir/kustomization.yaml"
+    grep -q "components/external-turn" "$dir/kustomization.yaml"
+    render "$dir"
+    rm -r "$dir"
+}
+for overlay in staging production; do
+    external_turn "$overlay" >"$manifests/external-turn-$overlay.yaml"
+done
+python3 "$here/check-external-turn.py" "$kube/base/livekit/deployment.yaml" \
+    "$manifests/staging.yaml" "$manifests/production.yaml" \
+    --external "$manifests/external-turn-staging.yaml" "$manifests/external-turn-production.yaml"
 # As RUNBOOK.md (step 9) fills it with envsubst, from the overlay's config.env and a sample
 # stream, for exactly these variables ($(POD_IP) stays as written); in Python, since envsubst
 # is not on every machine that runs this.

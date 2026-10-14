@@ -1,5 +1,6 @@
 #pragma once
 
+#include "infra/turn/turn.hpp"
 #include "net/reactor_factory.hpp"
 
 #include "gateway.hpp"
@@ -63,6 +64,9 @@ struct LiveConfig {
     // publisher's comings and goings are followed.
     std::uint16_t webhook_port = 0;
     WatchSettings watch;
+    // ULW_TURN_MODE=external and its provider (ADR-0109): a publisher's ticket then carries the
+    // ICE servers of a TURN service outside the cluster, as a call member's does.
+    std::optional<infra::turn::Config> turn;
 };
 
 struct Config {
