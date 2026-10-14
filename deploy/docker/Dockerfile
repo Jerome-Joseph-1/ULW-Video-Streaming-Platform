@@ -121,15 +121,16 @@ ENTRYPOINT ["/usr/local/bin/chat_server"]
 FROM ${DEBIAN} AS ffmpeg-runtime
 ARG ULW_SANDBOX_FFMPEG
 ARG ULW_SANDBOX_FFPROBE
-# 20261013: librsvg2-2 2.60.0+dfsg-1+deb13u1 (CVE-2026-96889, ffmpeg's dependency) in
-# debian-security since 20261012T204506Z; every pin below is unchanged.
-ENV DEBIAN_SNAPSHOT=20261013T000000Z
+# 20261014T070000Z: libcurl4t64 8.14.1-2+deb13u7 (CVE-2026-8286, CVE-2026-8927) in
+# debian-security since 20261014T061051Z; librsvg2-2 2.60.0+dfsg-1+deb13u1 (CVE-2026-96889,
+# ffmpeg's dependency) since 20261012T204506Z; every other pin below is unchanged.
+ENV DEBIAN_SNAPSHOT=20261014T070000Z
 RUN --mount=type=bind,source=deploy/docker/apt-install-debian.sh,target=/usr/local/sbin/apt-install-debian \
     --mount=type=secret,id=ca-bundle,mode=0444 \
     apt-install-debian \
         ca-certificates=20250419 \
         openssl=3.5.7-1~deb13u3 \
-        libcurl4t64=8.14.1-2+deb13u5 \
+        libcurl4t64=8.14.1-2+deb13u7 \
         libpq5=17.11-0+deb13u1 \
         libssl3t64=3.5.7-1~deb13u3 \
         openssl-provider-legacy=3.5.7-1~deb13u3 \
