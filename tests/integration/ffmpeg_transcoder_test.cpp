@@ -145,6 +145,23 @@ TEST_F(TranscoderTest, KeyframesLineUpAcrossRungsAndThePlaylistsFollowTheRules) 
     EXPECT_EQ(entries(out()), (std::vector<std::string>{"360p", "720p", "master.m3u8"}));
 }
 
+TEST_F(TranscoderTest, A1080p60RungStatesTheLevelItNeeds) {
+    const auto media = transcode({.size = "1920x1080", .rate = "60", .seconds = 2});
+    ASSERT_EQ(ladder_.size(), 3U);
+    EXPECT_TRUE(transcoder_.verify(out(), media, ladder_, {}));
+    // 1080p60 is 489,600 macroblocks a second, past 4.0 (40) and within 4.2 (42, 0x2a); the
+    // 720p60 and 360p60 rungs are within 4.0.
+    const std::string master = read_text(out() / "master.m3u8");
+    const auto codecs_of = [&](std::string_view uri) {
+        const std::size_t at = master.find("\n" + std::string(uri));
+        const std::size_t tag = master.rfind("#EXT-X-STREAM-INF:", at);
+        return master.substr(tag, at - tag);
+    };
+    EXPECT_NE(codecs_of("1080p/index.m3u8").find("avc1.4d402a"), std::string::npos) << master;
+    EXPECT_NE(codecs_of("720p/index.m3u8").find("avc1.4d4028"), std::string::npos) << master;
+    EXPECT_NE(codecs_of("360p/index.m3u8").find("avc1.4d4028"), std::string::npos) << master;
+}
+
 TEST_F(TranscoderTest, A480pSourceIsNeverUpscaled) {
     const auto media = transcode({.size = "854x480", .rate = "25", .seconds = 3});
     ASSERT_EQ(ladder_.size(), 1U);
