@@ -60,6 +60,8 @@ public:
     PgUploadCatalog(PgUploadCatalog&&) = delete;
     PgUploadCatalog& operator=(PgUploadCatalog&&) = delete;
 
+    void find_keyed_upload(const core::UserId& owner, const std::string& key,
+                           core::ports::CatalogCallback<core::ports::KeyedUpload> done) override;
     void create_upload(core::ports::NewUpload upload,
                        core::ports::CatalogCallback<void> done) override;
     void find_upload(const core::UploadId& id,

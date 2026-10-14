@@ -96,7 +96,8 @@ protected:
                                    .expires_at = std::chrono::floor<std::chrono::microseconds>(
                                        clock.wall_now() + std::chrono::hours(24))},
             .backend_ref = "ingest-7f3a",
-            .object_key = *core::StorageKey::parse("uploads/" + video.to_string())};
+            .object_key = *core::StorageKey::parse("uploads/" + video.to_string()),
+            .request = std::nullopt};
     }
 
     template <class T, class Start> CatalogResult<T> call(Start start) {
@@ -396,6 +397,44 @@ TEST_P(CatalogTest, AbortIsIdempotentButCannotUndoACommit) {
     ASSERT_TRUE(commit(*catalog, committed));
     EXPECT_EQ(abort(committed).error(), CatalogError::Conflict);
     EXPECT_EQ(abort(new_upload()).error(), CatalogError::NotFound);
+}
+
+// ADR-0108: an Idempotency-Key names one upload per owner. A second create under it makes
+// nothing; the statement retried after its answer was lost still succeeds.
+TEST_P(CatalogTest, AnIdempotencyKeyNamesOneUploadPerOwner) {
+    NewUpload first = new_upload();
+    first.request =
+        core::ports::UploadRequestKey{.key = "trip-1", .fingerprint = "10\nvideo/mp4\nx"};
+    ASSERT_TRUE(create(*catalog, first));
+    EXPECT_TRUE(create(*catalog, first)) << "a retried statement";
+
+    NewUpload second = new_upload();
+    second.request = first.request;
+    EXPECT_EQ(create(*catalog, second).error(), CatalogError::Conflict);
+    EXPECT_EQ(video(second.video.id).error(), CatalogError::NotFound);
+    EXPECT_EQ(upload(second.upload.id).error(), CatalogError::NotFound);
+
+    const auto keyed = call<core::ports::KeyedUpload>(
+        [&](auto done) { catalog->find_keyed_upload(tester(), "trip-1", std::move(done)); });
+    ASSERT_TRUE(keyed);
+    EXPECT_EQ(keyed->video, first.video.id);
+    EXPECT_EQ(keyed->upload, first.upload.id);
+    EXPECT_EQ(keyed->chunk_size, kChunk);
+    EXPECT_EQ(keyed->fingerprint, "10\nvideo/mp4\nx");
+    EXPECT_EQ(call<core::ports::KeyedUpload>([&](auto done) {
+                  catalog->find_keyed_upload(tester(), "trip-2", std::move(done));
+              }).error(),
+              CatalogError::NotFound);
+
+    // Purged with its video, the key is free again.
+    auto conn = db->session();
+    ASSERT_TRUE(
+        conn.exec("DELETE FROM videos WHERE id = $1", Params{}.add_uuid(first.video.id.uuid())));
+    EXPECT_EQ(call<core::ports::KeyedUpload>([&](auto done) {
+                  catalog->find_keyed_upload(tester(), "trip-1", std::move(done));
+              }).error(),
+              CatalogError::NotFound);
+    EXPECT_TRUE(create(*catalog, second));
 }
 
 TEST_P(CatalogTest, ClaimReturnsTheUploadAndRefusesASecondGateway) {

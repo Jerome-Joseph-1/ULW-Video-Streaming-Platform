@@ -3,6 +3,23 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-13: a create can carry an Idempotency-Key
+
+<!-- apps/gateway/src/connection.cpp (on_head, start_create, on_keyed, on_created), infra/postgres/src/upload_catalog.cpp (kCreateUpload, kFindKeyedUpload), migrations/0021_upload_requests.sql, docs/adr/0108-a-creates-idempotency-key-names-one-upload.md -->
+
+Additive (versioning rule 1): a new optional request header, and a migration. Main only (v1.1
+and later); v0.2.x and v1.0.x do not have it.
+
+| Before | Now |
+|---|---|
+| A create retried after its answer was lost made a second video of the same file | With `Idempotency-Key: <key>`, a retry answers the first create's `video_id` and `upload_id`; the same key for another file is `409` `idempotency_key_reused` ([Create](uploads.md#create-post-apiv1uploads)) |
+
+What to do:
+
+- **Clients:** send a key per file on `POST /api/v1/uploads` and keep it until the upload is
+  committed; retry a create that timed out with the same key. Nothing changes without it.
+- **Operators:** migration 0021 must run after 0020 (RUNBOOK); deploy the gateway, which runs
+  migrations, as usual.
 ## 2026-10-13: a video mid-upload can be deleted, and cancelling an upload deletes its video
 
 <!-- infra/postgres/src/upload_catalog.cpp (kDeleteVideo, kAbortUpload), infra/postgres/src/upload_reaper.cpp (kDuePurges), apps/reaper/src/reaper.cpp (purge_videos), apps/gateway/src/connection.cpp (on_deleted, on_service_deleted), docs/adr/0106-deleting-a-video-mid-upload-aborts-the-upload.md -->

@@ -32,15 +32,37 @@ using core::ports::StoredUpload;
 constexpr Sql kBegin = "BEGIN";
 constexpr Sql kCommit = "COMMIT";
 
-// One statement is one transaction: the video and its upload exist together or not at all.
+// One statement is one transaction: the video and its upload exist together or not at all. With
+// an Idempotency-Key ($11, '' for none; ADR-0108) the key is taken first, and the video and its
+// upload are made only if this statement took it: a key the owner used already makes nothing.
+// The upload_requests row names the upload inserted after it; its foreign key is checked at the
+// statement's end. Answers whether the upload was made, and whether the key, as the statement
+// found it, already named this very upload (a retry of the statement after its answer was lost),
+// none for a key nobody held.
 constexpr Sql kCreateUpload = R"sql(
-WITH video AS (
-    INSERT INTO videos (id, owner_id, title) VALUES ($1, $2, $3)
-    RETURNING id)
-INSERT INTO uploads (id, video_id, owner_id, backend_ref, object_key, chunk_size, size_bytes,
-                     expires_at)
-SELECT $4, video.id, $5, $6, $7, $8, $9, timestamptz 'epoch' + $10 * interval '1 microsecond'
-  FROM video)sql";
+WITH keyed AS (
+    INSERT INTO upload_requests (owner_id, idempotency_key, upload_id, fingerprint)
+    SELECT $5, $11, $4, $12 WHERE $11 <> ''
+    ON CONFLICT (owner_id, idempotency_key) DO NOTHING
+    RETURNING 1),
+video AS (
+    INSERT INTO videos (id, owner_id, title)
+    SELECT $1, $2, $3 WHERE $11 = '' OR EXISTS (SELECT 1 FROM keyed)
+    RETURNING id),
+made AS (
+    INSERT INTO uploads (id, video_id, owner_id, backend_ref, object_key, chunk_size, size_bytes,
+                         expires_at)
+    SELECT $4, video.id, $5, $6, $7, $8, $9, timestamptz 'epoch' + $10 * interval '1 microsecond'
+      FROM video
+    RETURNING 1)
+SELECT (SELECT count(*) FROM made),
+       (SELECT upload_id = $4 FROM upload_requests WHERE owner_id = $5 AND idempotency_key = $11))sql";
+
+// The upload a key names, and what its create asked for: none once the upload is gone.
+constexpr Sql kFindKeyedUpload = R"sql(
+SELECT u.video_id, u.id, u.chunk_size, r.fingerprint
+  FROM upload_requests r JOIN uploads u ON u.id = r.upload_id
+ WHERE r.owner_id = $1 AND r.idempotency_key = $2)sql";
 
 // Timestamps travel as integer microseconds since the epoch: exact, and free of DateStyle and
 // TimeZone settings.
@@ -321,6 +343,23 @@ std::optional<core::VideoState> parse_video_state(std::string_view text) noexcep
         return core::VideoState::Failed;
     }
     return std::nullopt;
+}
+
+CatalogResult<core::ports::KeyedUpload> decode_keyed(const Result& rows) {
+    if (rows.rows() == 0) {
+        return std::unexpected(CatalogError::NotFound);
+    }
+    const auto video = domain_at<core::VideoId>(rows, 0, 0);
+    const auto upload = domain_at<core::UploadId>(rows, 0, 1);
+    const auto chunk = rows.get(0, 2).and_then(parse_uint64);
+    const auto fingerprint = rows.get(0, 3);
+    if (!video || !upload || !chunk || !fingerprint) {
+        return std::unexpected(CatalogError::Corrupt);
+    }
+    return core::ports::KeyedUpload{.video = *video,
+                                    .upload = *upload,
+                                    .chunk_size = *chunk,
+                                    .fingerprint = std::string{*fingerprint}};
 }
 
 CatalogResult<StoredUpload> decode_upload(const Result& row) {
@@ -682,16 +721,28 @@ public:
                                        .add_text(upload_.object_key.view())
                                        .add_int(as_int(upload.chunk_size))
                                        .add_int(as_int(upload.size_bytes))
-                                       .add_int(micros_since_epoch(upload.expires_at))};
+                                       .add_int(micros_since_epoch(upload.expires_at))
+                                       .add_text(request_key())
+                                       .add_text(request_fingerprint())};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
         // Ids are UUIDv7 minted by the caller, so a row that already exists is this very
         // request, replayed after its reply was lost.
-        if (outcome || outcome.error() == DbError::Duplicate) {
+        if (!outcome) {
+            done_(outcome.error() == DbError::Duplicate ? CatalogResult<void>{}
+                                                        : failure<void>(outcome.error()));
+            return std::nullopt;
+        }
+        const auto made = outcome->get(0, 0).and_then(parse_uint64);
+        const auto ours = outcome->get(0, 1).and_then(parse_bool);
+        if (!made) {
+            done_(std::unexpected(CatalogError::Corrupt));
+        } else if (*made == 1 || (ours && *ours)) {
             done_({});
         } else {
-            done_(failure<void>(outcome.error()));
+            // The key names another upload, or one a concurrent create took first.
+            done_(std::unexpected(CatalogError::Conflict));
         }
         return std::nullopt;
     }
@@ -699,8 +750,42 @@ public:
     void abandon(DbError error) noexcept override { done_(failure<void>(error)); }
 
 private:
+    // Views of the strings this operation owns: a conditional with "" in one arm would make a
+    // temporary std::string, which Params would outlive (it binds views).
+    [[nodiscard]] std::string_view request_key() const noexcept {
+        return upload_.request ? std::string_view{upload_.request->key} : std::string_view{};
+    }
+    [[nodiscard]] std::string_view request_fingerprint() const noexcept {
+        return upload_.request ? std::string_view{upload_.request->fingerprint}
+                               : std::string_view{};
+    }
+
     NewUpload upload_;
     CatalogCallback<void> done_;
+};
+
+// Owns the owner and the key it binds, for the statement's later iterations.
+class KeyedQuery final : public Operation {
+public:
+    KeyedQuery(const core::UserId& owner, std::string key, Query::Done done) noexcept
+        : owner_(owner), key_(std::move(key)), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = kFindKeyedUpload,
+                         .params = Params{}.add_text(owner_.view()).add_text(key_)};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        done_(std::move(outcome));
+        return std::nullopt;
+    }
+
+    void abandon(DbError error) noexcept override { done_(std::unexpected(error)); }
+
+private:
+    core::UserId owner_;
+    std::string key_;
+    Query::Done done_;
 };
 
 // Owns the owner it binds: the statement goes out on a later iteration, and again after a
@@ -1096,6 +1181,15 @@ PgUploadCatalog::~PgUploadCatalog() = default;
 
 void PgUploadCatalog::create_upload(NewUpload upload, CatalogCallback<void> done) {
     impl_->main_pool().submit(std::make_unique<CreateUpload>(std::move(upload), std::move(done)));
+}
+
+void PgUploadCatalog::find_keyed_upload(const core::UserId& owner, const std::string& key,
+                                        CatalogCallback<core::ports::KeyedUpload> done) {
+    impl_->main_pool().submit(std::make_unique<KeyedQuery>(
+        owner, key, [done = std::move(done)](Outcome outcome) mutable noexcept {
+            done(outcome ? decode_keyed(*outcome)
+                         : failure<core::ports::KeyedUpload>(outcome.error()));
+        }));
 }
 
 void PgUploadCatalog::find_upload(const core::UploadId& id, CatalogCallback<StoredUpload> done) {

@@ -27,7 +27,7 @@ uppercase included, is `404`. Any other method on these paths is `405` with an `
 
 ### Create: `POST /api/v1/uploads`
 
-<!-- apps/gateway/src/connection.cpp (on_head, start_create, on_created), core/src/content_type.cpp, core/src/video.cpp, core/include/core/models/upload.hpp -->
+<!-- apps/gateway/src/connection.cpp (on_head, start_create, on_keyed, on_created), infra/postgres/src/upload_catalog.cpp (kCreateUpload, kFindKeyedUpload), migrations/0021_upload_requests.sql, core/src/content_type.cpp, core/src/video.cpp, core/include/core/models/upload.hpp -->
 
 Request body, JSON, with a `Content-Length` of 1 to 4096 bytes:
 
@@ -59,6 +59,15 @@ Response `201`, `application/json`:
 | `upload_id` | The upload, for the other endpoints on this page |
 | `chunk_size` | 8388608 (8 MiB). Send chunks of exactly this size, except the last. |
 | `durable_offset` | Always 0 |
+
+**Retrying a create** (ADR-0108). Send an `Idempotency-Key` header, 1 to 255 visible ASCII
+characters (`!` to `~`) that you choose per file, for example a UUID you store with it. A create
+retried with the same key, after its answer was lost or timed out, answers `201` with the same
+`video_id`, `upload_id` and `chunk_size` as the first, and makes no second video; continue with
+`HEAD` to learn the offset ([Resuming](#resuming)). The key is yours alone, and names that upload
+for as long as it exists. Under a key you used for another file (a different `filename`,
+`size_bytes` or `content_type`) the answer is `409` `{"error":"idempotency_key_reused"}`. A
+malformed key is `400`. Without the header every create makes a new video.
 
 ### Who may upload
 

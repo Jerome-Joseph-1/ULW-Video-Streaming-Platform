@@ -106,6 +106,8 @@ private:
         std::uint64_t size = 0;
         core::ContentType type;
         core::StorageKey key;
+        // The request's Idempotency-Key and what it asked for (ADR-0108).
+        std::optional<core::ports::UploadRequestKey> request;
     };
 
     // Fields ordered largest first so the struct packs without holes.
@@ -121,6 +123,8 @@ private:
         std::optional<OwnVideoQuery> own_video_query;
         std::optional<PendingCreate> create;
         std::optional<core::ports::Claims> claims;
+        // A create's Idempotency-Key header, checked for shape at the head (ADR-0108).
+        std::optional<std::string> idempotency_key;
         // A live stream's status, held while the playlist says whether it has ended.
         std::optional<core::ports::LiveStream> stream;
         // PATCH /api/v1/videos/{id}: what the owner asked for, held while the catalog says
@@ -189,6 +193,8 @@ private:
     void on_parse(http::ParseResult result) noexcept;
     void advance() noexcept;
     [[nodiscard]] http::HeadVerdict authenticate_head(const http::RequestHead& head) noexcept;
+    [[nodiscard]] std::optional<http::Status>
+    check_json_head(RouteId route, const http::RequestHead& head) noexcept;
     void authenticate() noexcept;
 
     void start_create() noexcept;
@@ -249,6 +255,13 @@ private:
     void submit(ControlOp op) noexcept;
     void start_job(ControlJob job) noexcept;
     void on_created(ControlJob job) noexcept;
+    // The upload the create's Idempotency-Key names, answered as its create was; `retried` after
+    // this request lost the race for the key.
+    void find_keyed(bool retried) noexcept;
+    void on_keyed(std::uint64_t request, bool retried,
+                  core::ports::CatalogResult<core::ports::KeyedUpload> keyed) noexcept;
+    void respond_created(const core::VideoId& video, const core::UploadId& upload,
+                         std::uint64_t chunk) noexcept;
     void on_committed(ControlJob job) noexcept;
     [[nodiscard]] static core::ports::IngestId ingest_id(const core::ports::StoredUpload& s);
     void on_offset(ControlJob job) noexcept;

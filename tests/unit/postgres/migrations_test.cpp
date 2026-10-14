@@ -186,4 +186,24 @@ TEST(BundledMigrations, TheStreamVisibilityMigrationAltersOnlyLiveStreams) {
     FAIL() << "no live_stream_visibility migration";
 }
 
+// 0021 (ADR-0108) only creates the keys' table and its index: nothing existing is altered,
+// scanned or written.
+TEST(BundledMigrations, TheUploadRequestsMigrationOnlyCreatesItsTable) {
+    for (const auto& m : bundled_migrations()) {
+        if (m.name != "upload_requests") {
+            continue;
+        }
+        const std::string_view sql{m.sql};
+        EXPECT_NE(sql.find("\nCREATE TABLE upload_requests"), std::string_view::npos);
+        EXPECT_NE(sql.find("\nCREATE INDEX upload_requests_upload ON upload_requests"),
+                  std::string_view::npos);
+        for (const std::string_view other : {"\nALTER", "\nUPDATE", "\nDELETE", "\nINSERT",
+                                             "\nDROP", " ON uploads", " ON videos"}) {
+            EXPECT_EQ(sql.find(other), std::string_view::npos) << other;
+        }
+        return;
+    }
+    FAIL() << "no upload_requests migration";
+}
+
 } // namespace

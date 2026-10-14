@@ -590,6 +590,17 @@ SELECT id, owner_id, state, visibility, visibility_room FROM live_streams WHERE 
 UPDATE live_streams SET visibility = 'unlisted', visibility_room = NULL WHERE id = '<stream>';
 ```
 
+**Migration 0021 (a create's Idempotency-Key, docs/adr/0108) comes after 0020.** It creates
+`upload_requests`, empty, with a foreign key to `uploads`: until the migration commits, writes to
+`uploads` (creates, progress, commits) wait, for moments; reads go on. The gateway's role needs
+`SELECT` and `INSERT` on it; the purge removes its rows through the cascade. To see which upload
+a key names, as the gateway's role:
+
+```sql
+SELECT upload_id, fingerprint, created_at FROM upload_requests
+ WHERE owner_id = '<user>' AND idempotency_key = '<key>';
+```
+
 A change made in SQL reaches every gateway within 5 s.
 
 The NetworkPolicies allow ports, not addresses, because Postgres and the store often run outside

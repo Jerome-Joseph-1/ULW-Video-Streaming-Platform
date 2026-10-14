@@ -111,3 +111,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0105](0105-a-live-streams-visibility-is-set-by-the-product-and-enforced-here.md) | A live stream's visibility is set by the operator's backend or its owner and enforced here, before the playlist cache, from a short-lived answer per stream and per room member | Accepted |
 | [0106](0106-deleting-a-video-mid-upload-aborts-the-upload.md) | Deleting a video mid-upload aborts its upload, and cancelling an upload deletes its video | Accepted |
 | [0107](0107-maintenance-lines-release-patches-of-older-versions.md) | Maintenance lines release patches of older versions from release/vX.Y branches | Accepted |
+| [0108](0108-a-creates-idempotency-key-names-one-upload.md) | A create's Idempotency-Key names one upload per owner, kept in its own table | Accepted |
