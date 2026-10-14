@@ -301,6 +301,76 @@ TEST_F(TurnTest, CloudflaresRefusalsAndOutagesAreTold) {
     }
 }
 
+TEST_F(TurnTest, CloudflareUnreachableIsUnavailableAndAProtocolItCannotSpeakIsRefused) {
+    Config config{};
+    config.provider = Provider::Cloudflare;
+    config.key_id = "0123abcd";
+    config.api_token = "token-of-the-key";
+    // Nothing listens on port 1 of this machine.
+    config.api_url = "http://127.0.0.1:1";
+    issuer = infra::turn::make_credentials(*reactor, *multi, clock, config);
+    Servers servers = issue();
+    ASSERT_FALSE(servers);
+    EXPECT_EQ(servers.error(), MediaError::Unavailable);
+    // A scheme libcurl does not speak: the request cannot be made at all.
+    config.api_url = "gopherx://127.0.0.1";
+    issuer = infra::turn::make_credentials(*reactor, *multi, clock, config);
+    servers = issue();
+    ASSERT_FALSE(servers);
+    EXPECT_EQ(servers.error(), MediaError::Refused);
+}
+
+TEST(ParseCloudflare, RefusesEntriesOfTheWrongShape) {
+    for (const std::string_view body :
+         {R"({"iceServers":[{"username":"u","credential":"c"}]})",
+          R"({"iceServers":[{"urls":"turn:t:3478","username":1,"credential":"c"}]})",
+          R"({"iceServers":[{"urls":{"a":1},"username":"u","credential":"c"}]})",
+          R"({"iceServers":"turn:t:3478"})"}) {
+        EXPECT_FALSE(infra::turn::detail::parse_cloudflare(body)) << body;
+    }
+    // Only port 53: an entry with nothing left is dropped, and with it the only relay.
+    EXPECT_FALSE(infra::turn::detail::parse_cloudflare(
+        R"({"iceServers":{"urls":"turn:t:53?transport=udp","username":"u","credential":"c"}})"));
+    // An IPv6 host's last colon is inside its brackets when it names no port.
+    const auto bracketed = infra::turn::detail::parse_cloudflare(
+        R"({"iceServers":[{"urls":["turn:[2001:db8::53]"],"username":"u","credential":"c"}]})");
+    ASSERT_TRUE(bracketed);
+    EXPECT_EQ(bracketed->front().urls.size(), 1U);
+}
+
+TEST(TurnConfig, DescribesItsModeWithoutACredential) {
+    EXPECT_EQ(infra::turn::describe(std::nullopt), "self-hosted");
+    Config config{};
+    EXPECT_EQ(infra::turn::describe(config), "external hmac");
+    config.provider = Provider::Cloudflare;
+    EXPECT_EQ(infra::turn::describe(config), "external cloudflare");
+}
+
+TEST(TurnConfig, RefusesWhatTheOtherProviderTakes) {
+    auto env = cloudflare_env();
+    env["ULW_TURN_URLS"] = "turn:relay.example.com:3478";
+    EXPECT_EQ(error_variable(env), "ULW_TURN_URLS");
+    env = cloudflare_env();
+    env.erase("ULW_TURN_KEY_ID");
+    EXPECT_EQ(error_variable(env), "ULW_TURN_KEY_ID");
+    env = hmac_env();
+    std::string many;
+    for (int i = 0; i < 17; ++i) {
+        many += (i == 0 ? "" : ",") + std::string("turn:relay.example.com:3478");
+    }
+    env["ULW_TURN_URLS"] = many;
+    EXPECT_EQ(error_variable(env), "ULW_TURN_URLS");
+    env = hmac_env();
+    env.erase("ULW_TURN_URLS");
+    EXPECT_EQ(error_variable(env), "ULW_TURN_URLS");
+}
+
+TEST(AppendIceServers, WritesNothingForNoServers) {
+    std::string out = "x";
+    infra::turn::append_ice_servers(out, {});
+    EXPECT_EQ(out, "x");
+}
+
 // A media server that admits whoever it is told to.
 class FakeRoom final : public IMediaRoom {
 public:
@@ -319,11 +389,15 @@ public:
         done_ = std::move(done);
         timer_ = reactor_.arm_timer(core::Millis{0}, handler_);
     }
-    void participants(core::ports::ParticipantsDone /*done*/) override {}
+    // The rest answer at once, which the port forbids but the wrapper does not care about.
+    void participants(core::ports::ParticipantsDone done) override {
+        done(std::vector<core::ports::MediaParticipant>{});
+    }
     void relay(const core::UserId& /*user*/, const core::DeviceId& /*device*/,
-               const core::ports::MediaRelay& /*target*/,
-               core::ports::RelayDone /*done*/) override {}
-    void close(core::ports::MediaDone /*done*/) override {}
+               const core::ports::MediaRelay& target, core::ports::RelayDone done) override {
+        done("relay-of-" + target.stream);
+    }
+    void close(core::ports::MediaDone done) override { done({}); }
 
 private:
     struct Handler final : net::ITimerHandler {
@@ -350,21 +424,29 @@ private:
 
 class FakeSfu final : public ISfu {
 public:
-    FakeSfu(net::IReactor& reactor, std::optional<MediaError> refuse) noexcept
-        : reactor_(reactor), refuse_(refuse) {}
+    FakeSfu(net::IReactor& reactor, std::optional<MediaError> refuse,
+            std::optional<MediaError> refuse_open = std::nullopt) noexcept
+        : reactor_(reactor), refuse_(refuse), refuse_open_(refuse_open) {}
     // Opens synchronously, which the port forbids but the wrapper does not care about.
     void open_room(const core::RoomId& /*room*/, MediaGeneration /*generation*/,
                    MediaRoomKind /*kind*/, std::uint16_t /*max_participants*/,
                    OpenDone done) override {
+        if (refuse_open_) {
+            done(std::unexpected(*refuse_open_));
+            return;
+        }
         done(std::unique_ptr<IMediaRoom>(std::make_unique<FakeRoom>(reactor_, refuse_)));
     }
     void present(const core::RoomId& /*room*/, MediaGeneration /*generation*/,
                  const core::UserId& /*user*/, const core::DeviceId& /*device*/,
-                 core::ports::PresenceDone /*done*/) override {}
+                 core::ports::PresenceDone done) override {
+        done(true);
+    }
 
 private:
     net::IReactor& reactor_;
     std::optional<MediaError> refuse_;
+    std::optional<MediaError> refuse_open_;
 };
 
 // Counts what it is asked for, and answers with one relay or a failure.
@@ -422,6 +504,53 @@ TEST_F(RelayedSfuTest, ARefusedJoinIssuesNoCredential) {
     ASSERT_FALSE(ticket);
     EXPECT_EQ(ticket.error(), MediaError::Refused);
     EXPECT_EQ(turn.issued, 0);
+}
+
+TEST_F(RelayedSfuTest, EverythingButJoinIsTheMediaServersOwn) {
+    CountingIssuer turn(std::nullopt);
+    auto sfu =
+        infra::turn::make_relayed_sfu(std::make_unique<FakeSfu>(*reactor, std::nullopt), turn);
+    std::optional<std::expected<bool, MediaError>> present;
+    sfu->present(*core::RoomId::parse(kRoom), MediaGeneration{1}, *core::UserId::parse("caller"),
+                 *core::DeviceId::parse(kDevice),
+                 [&](std::expected<bool, MediaError> r) noexcept { present = r; });
+    ASSERT_TRUE(present && *present);
+    EXPECT_TRUE(**present);
+
+    std::unique_ptr<IMediaRoom> room;
+    sfu->open_room(*core::RoomId::parse(kRoom), MediaGeneration{1}, MediaRoomKind::Stream, 2,
+                   [&](std::expected<std::unique_ptr<IMediaRoom>, MediaError> r) noexcept {
+                       room = std::move(*r);
+                   });
+    ASSERT_TRUE(room);
+    bool listed = false;
+    room->participants(
+        [&](std::expected<std::vector<core::ports::MediaParticipant>, MediaError> r) noexcept {
+            listed = r.has_value();
+        });
+    EXPECT_TRUE(listed);
+    std::optional<std::string> relay;
+    room->relay(*core::UserId::parse("caller"), *core::DeviceId::parse(kDevice),
+                core::ports::MediaRelay{
+                    .stream = "s", .passphrase = "p", .keyframe_interval = core::Seconds{2}},
+                [&](std::expected<std::string, MediaError> r) noexcept { relay = r.value_or(""); });
+    EXPECT_EQ(relay, "relay-of-s");
+    bool closed = false;
+    room->close([&](std::expected<void, MediaError> r) noexcept { closed = r.has_value(); });
+    EXPECT_TRUE(closed);
+    EXPECT_EQ(turn.issued, 0) << "only a join issues credentials";
+}
+
+TEST_F(RelayedSfuTest, ARoomThatCannotOpenIsReportedAsItWas) {
+    CountingIssuer turn(std::nullopt);
+    auto sfu = infra::turn::make_relayed_sfu(
+        std::make_unique<FakeSfu>(*reactor, std::nullopt, MediaError::Refused), turn);
+    std::optional<MediaError> error;
+    sfu->open_room(*core::RoomId::parse(kRoom), MediaGeneration{1}, MediaRoomKind::Call, 2,
+                   [&](std::expected<std::unique_ptr<IMediaRoom>, MediaError> r) noexcept {
+                       error = r ? std::nullopt : std::optional(r.error());
+                   });
+    EXPECT_EQ(error, MediaError::Refused);
 }
 
 TEST_F(RelayedSfuTest, ATicketWithoutItsRelaysIsNotIssued) {

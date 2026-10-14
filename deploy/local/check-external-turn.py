@@ -11,8 +11,14 @@ self-hosted render: nothing of the external mode is there.
 """
 import re
 import sys
+from pathlib import Path
 
 import yaml
+
+# tools/pathguard.py, which keeps each path given on the command line inside the repository
+# and the temporary directories.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "tools"))
+from pathguard import inside  # noqa: E402
 
 REFERENCE = re.compile(r"\$\(([A-Z_][A-Z0-9_]*)\)")
 
@@ -96,7 +102,11 @@ def main(argv):
     if "--external" not in argv:
         sys.exit(__doc__)
     split = argv.index("--external")
-    base_path, self_hosted, external = argv[0], argv[1:split], argv[split + 1:]
+    if split == 0:
+        sys.exit(__doc__)
+    paths = [inside(p) for p in argv[:split]]
+    base_path, self_hosted = paths[0], paths[1:]
+    external = [inside(p) for p in argv[split + 1:]]
     base = livekit_config(container(load(base_path)[0], "livekit"))
     errors = []
     for path in self_hosted:

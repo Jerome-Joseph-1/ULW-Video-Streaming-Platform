@@ -22,7 +22,10 @@ core::ports::IceServer hmac_server(const std::vector<std::string>& urls, std::st
     username += name;
     std::array<unsigned char, EVP_MAX_MD_SIZE> mac{};
     unsigned int mac_size = 0;
-    HMAC(EVP_sha1(), secret.data(), static_cast<int>(secret.size()),
+    // SHA-1 because the credential format is HMAC-SHA1: it is what coturn, eturnal and LiveKit
+    // check (RFC 5389's long-term mechanism and the TURN REST API draft). An HMAC key-derivation
+    // use, not a collision-sensitive one; the credential's strength is the secret's.
+    HMAC(EVP_sha1(), secret.data(), static_cast<int>(secret.size()), // NOSONAR(cpp:S4790)
          reinterpret_cast<const unsigned char*>(username.data()), username.size(), mac.data(),
          &mac_size);
     // 4 output bytes for every 3 input bytes, rounded up, and the terminator EVP writes.
