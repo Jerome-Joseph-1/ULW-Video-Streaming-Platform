@@ -711,20 +711,19 @@ public:
         const core::VideoRecord& video = upload_.video;
         const core::UploadRecord& upload = upload_.upload;
         return Statement{.sql = kCreateUpload,
-                         .params =
-                             Params{}
-                                 .add_uuid(video.id.uuid())
-                                 .add_text(video.owner.view())
-                                 .add_text(video.title)
-                                 .add_uuid(upload.id.uuid())
-                                 .add_text(upload.owner.view())
-                                 .add_text(upload_.backend_ref)
-                                 .add_text(upload_.object_key.view())
-                                 .add_int(as_int(upload.chunk_size))
-                                 .add_int(as_int(upload.size_bytes))
-                                 .add_int(micros_since_epoch(upload.expires_at))
-                                 .add_text(upload_.request ? upload_.request->key : "")
-                                 .add_text(upload_.request ? upload_.request->fingerprint : "")};
+                         .params = Params{}
+                                       .add_uuid(video.id.uuid())
+                                       .add_text(video.owner.view())
+                                       .add_text(video.title)
+                                       .add_uuid(upload.id.uuid())
+                                       .add_text(upload.owner.view())
+                                       .add_text(upload_.backend_ref)
+                                       .add_text(upload_.object_key.view())
+                                       .add_int(as_int(upload.chunk_size))
+                                       .add_int(as_int(upload.size_bytes))
+                                       .add_int(micros_since_epoch(upload.expires_at))
+                                       .add_text(request_key())
+                                       .add_text(request_fingerprint())};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -751,6 +750,16 @@ public:
     void abandon(DbError error) noexcept override { done_(failure<void>(error)); }
 
 private:
+    // Views of the strings this operation owns: a conditional with "" in one arm would make a
+    // temporary std::string, which Params would outlive (it binds views).
+    [[nodiscard]] std::string_view request_key() const noexcept {
+        return upload_.request ? std::string_view{upload_.request->key} : std::string_view{};
+    }
+    [[nodiscard]] std::string_view request_fingerprint() const noexcept {
+        return upload_.request ? std::string_view{upload_.request->fingerprint}
+                               : std::string_view{};
+    }
+
     NewUpload upload_;
     CatalogCallback<void> done_;
 };
