@@ -581,8 +581,11 @@ jobs:
       - name: GStreamer version
         id: gstreamer
         run: echo "version=$(pkg-config --modversion gstreamer-webrtc-1.0)" >>"$GITHUB_OUTPUT"
+      # The cache holds a test harness this job runs and nothing more: ci publishes nothing, and
+      # publish-images builds the images from a clean checkout (ADR-0107: release/v* pushes run
+      # this workflow too, which is why zizmor reads it as a release).
       - name: Restore the whipsink build
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0 # zizmor: ignore[cache-poisoning]
         with:
           path: tests/call/.whipsink
           key: whipsink-gst${{ steps.gstreamer.outputs.version }}-${{ hashFiles('tests/call/whipsink/*', 'tests/call/fetch-whipsink.sh') }}
