@@ -139,6 +139,43 @@ std::expected<std::optional<T>, ConfigError> bounded(const EnvLookup& env, std::
     return *value;
 }
 
+std::expected<std::optional<NotifyConfig>, ConfigError> notify_config(const EnvLookup& env) {
+    auto url = lookup(env, "ULW_NOTIFY_URL");
+    auto secret = lookup(env, "ULW_NOTIFY_SECRET");
+    const auto interval = bounded<std::uint32_t>(env, "ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS", 5,
+                                                 3'600);
+    if (!interval) {
+        return std::unexpected(interval.error());
+    }
+    if (!url) {
+        if (secret) {
+            return error("ULW_NOTIFY_SECRET", "set, but ULW_NOTIFY_URL is not");
+        }
+        if (*interval) {
+            return error("ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS", "set, but ULW_NOTIFY_URL is not");
+        }
+        return std::nullopt;
+    }
+    const std::string_view text = *url;
+    const bool scheme = text.starts_with("http://") || text.starts_with("https://");
+    const std::size_t host_at = text.find("://") + 3;
+    if (!scheme || host_at >= text.size() || text[host_at] == '/' ||
+        text.find_first_of(" \t\r\n") != std::string_view::npos) {
+        return error("ULW_NOTIFY_URL", "expected an http:// or https:// URL");
+    }
+    if (!secret) {
+        return error("ULW_NOTIFY_SECRET", "not set, but ULW_NOTIFY_URL is");
+    }
+    if (secret->size() < kMinNotifySecretBytes) {
+        return error("ULW_NOTIFY_SECRET", "shorter than 32 bytes");
+    }
+    NotifyConfig out{.url = std::move(*url), .secret = std::move(*secret)};
+    if (*interval) {
+        out.message_interval = core::Millis{std::int64_t{**interval} * 1'000};
+    }
+    return out;
+}
+
 std::expected<ClientLimits, ConfigError> client_limits(const EnvLookup& env) {
     // No more than the node's 1280 connections (chat::Limits): past it a per-client limit would
     // never be reached.
@@ -400,6 +437,10 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!calls) {
         return std::unexpected(std::move(calls.error()));
     }
+    auto notify = notify_config(env);
+    if (!notify) {
+        return std::unexpected(std::move(notify.error()));
+    }
     Config config{.node = *node,
                   .port = port,
                   .node_address = std::move(*node_address),
@@ -423,6 +464,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .client_limits = std::move(*limits),
                   .calls = std::move(*calls),
                   .service_api = std::nullopt,
+                  .notify = std::move(*notify),
                   .run_as_user = lookup(env, "ULW_RUN_AS_USER").value_or(""),
                   .allow_root = false,
                   .self_service = false};

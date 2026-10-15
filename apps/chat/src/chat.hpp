@@ -14,6 +14,7 @@
 #include "call_bell.hpp"
 #include "chat_service.hpp"
 #include "key_directory.hpp"
+#include "notify.hpp"
 #include "presence.hpp"
 #include "service_api.hpp"
 #include "token_bucket.hpp"
@@ -134,6 +135,11 @@ struct Deps {
     // answers that come back after the server is gone are dropped.
     core::ports::IDeviceRegistry* registry = nullptr;
     core::ports::IE2eeDeliveryService* key_packages = nullptr;
+    // The notification hook (ADR-0111); null when ULW_NOTIFY_URL is unset, and nothing is
+    // written or sent. Started by the server, stopped by its drain; must outlive it.
+    Notifier* notifier = nullptr;
+    // Where the notifier's events go, for its counters; set with the notifier.
+    const HookSender* hook = nullptr;
 };
 
 struct Counters {
@@ -267,7 +273,7 @@ public:
     // run_once.
     void reap() noexcept;
     [[nodiscard]] bool finished() const noexcept {
-        return draining_ && released_ && sessions_.size() == 0;
+        return draining_ && released_ && forgotten_ && sessions_.size() == 0;
     }
     // /readyz: not draining, and the room plane reaches the database.
     [[nodiscard]] bool ready() const noexcept { return !draining_ && deps_.router.healthy(); }
@@ -353,6 +359,8 @@ private:
     net::Slab<Session> sessions_;
     bool draining_ = false;
     bool released_ = false;
+    // The notifier's rows are gone from the registry, or there is none.
+    bool forgotten_ = false;
     net::TimerId drain_timer_;
 };
 

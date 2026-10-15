@@ -507,6 +507,16 @@ TEST_P(ChatSessionTest, AnUpgradeNeedsAValidToken) {
     EXPECT_TRUE(open_as("alice"));
 }
 
+// ADR-0111: a socket names its device in the upgrade, or none; anything else is refused.
+TEST_P(ChatSessionTest, AnUpgradeMayNameItsDeviceAndOneThatIsNotAUuidIsRefused) {
+    const std::string bearer = "Authorization: Bearer user.alice\r\n";
+    EXPECT_TRUE(WsClient::connect(node_->port(), "/rt?device=01a0eb86-6cca-7dce-84cc-3bb47615f001",
+                                  bearer, nullptr));
+    std::string line;
+    EXPECT_FALSE(WsClient::connect(node_->port(), "/rt?device=phone", bearer, &line));
+    EXPECT_EQ(line, "HTTP/1.1 400 Bad Request");
+}
+
 TEST_P(ChatSessionTest, TheCookieCountsOnlyFromAnAllowedPage) {
     const std::string cookie = "Cookie: auth_token=user.alice\r\n";
     EXPECT_EQ(refusal(cookie), "HTTP/1.1 403 Forbidden");
@@ -1483,5 +1493,20 @@ TEST_P(ChatSessionTest, BehindATrustedProxyAnUpgradeAnswered401Or403GivesItsAddr
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatSessionTest,
                          ::testing::Values(net::ReactorKind::IoUring, net::ReactorKind::Epoll),
                          ulw::test::reactor_name);
+
+TEST(DeviceOf, NamesTheDeviceOnlyWhenTheQueryGivesOneUuidForIt) {
+    const auto phone = core::DeviceId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f001");
+    ASSERT_TRUE(phone);
+    EXPECT_EQ(chat::device_of("/rt"), std::nullopt);
+    EXPECT_EQ(chat::device_of("/rt?"), std::nullopt);
+    EXPECT_EQ(chat::device_of("/rt?v=2"), std::nullopt);
+    EXPECT_EQ(chat::device_of("/rt?device=01a0eb86-6cca-7dce-84cc-3bb47615f001"), *phone);
+    EXPECT_EQ(chat::device_of("/rt?v=2&device=01a0eb86-6cca-7dce-84cc-3bb47615f001&x"), *phone);
+    EXPECT_FALSE(chat::device_of("/rt?device="));
+    EXPECT_FALSE(chat::device_of("/rt?device"));
+    EXPECT_FALSE(chat::device_of("/rt?device=phone"));
+    EXPECT_FALSE(chat::device_of("/rt?device=01a0eb86-6cca-7dce-84cc-3bb47615f001&device="
+                                 "01a0eb86-6cca-7dce-84cc-3bb47615f001"));
+}
 
 } // namespace

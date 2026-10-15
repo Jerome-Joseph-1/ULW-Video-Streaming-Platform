@@ -125,6 +125,12 @@ void Session::route(const http::RequestHead& head) noexcept {
     if (!*upgrade_) {
         return;
     }
+    const auto device = device_of(head.target);
+    if (!device) {
+        refusal_ = http::Status::BadRequest;
+        return;
+    }
+    device_ = *device;
     // Behind a trusted proxy the client is the one it names, held to its address's limit until
     // this upgrade is answered, as the gateway holds a request until it is authenticated
     // (ADR-0052): after that the user's own cap governs.
@@ -161,6 +167,34 @@ void Session::route(const http::RequestHead& head) noexcept {
     }
     token_ = *token;
     authenticate();
+}
+
+std::expected<std::optional<core::DeviceId>, std::monostate>
+device_of(std::string_view target) noexcept {
+    const std::size_t q = target.find('?');
+    if (q == std::string_view::npos) {
+        return std::nullopt;
+    }
+    std::string_view query = target.substr(q + 1);
+    std::optional<core::DeviceId> device;
+    while (!query.empty()) {
+        const std::size_t amp = query.find('&');
+        const std::string_view pair = query.substr(0, amp);
+        query = amp == std::string_view::npos ? std::string_view{} : query.substr(amp + 1);
+        const std::size_t eq = pair.find('=');
+        if (pair.substr(0, eq) != "device") {
+            continue;
+        }
+        if (device || eq == std::string_view::npos) {
+            return std::unexpected(std::monostate{});
+        }
+        const auto id = core::DeviceId::parse(pair.substr(eq + 1));
+        if (!id) {
+            return std::unexpected(std::monostate{});
+        }
+        device = *id;
+    }
+    return device;
 }
 
 core::MonoTime token_deadline(core::MonoTime now, core::WallTime wall_now,
@@ -381,6 +415,10 @@ void Session::accept_upgrade(const codec::ws::UpgradeResponse& response) {
         presence_ = server_.presence().attach(*this, *user_);
         bell_ = server_.bell().attach(*this, *user_);
         directory_ = server_.directory().attach(*this, *user_);
+        if (Notifier* notifier = server_.deps().notifier; notifier != nullptr) {
+            notifier->opened(*user_, device_);
+            notified_ = true;
+        }
     }
     phase_ = Phase::Open;
     ++server_.counters().upgrades;
@@ -827,6 +865,9 @@ void Session::close() noexcept {
     }
     if (directory_) {
         server_.directory().detach(*directory_);
+    }
+    if (notified_) {
+        server_.deps().notifier->closed(*user_, device_);
     }
     release_request_hold();
     if (peer_hold_) {

@@ -937,4 +937,85 @@ TEST(CallNoticeCodec, ANoticeComesBackAsItWasSentAndAnythingElseIsRefused) {
     EXPECT_FALSE(chat::decode_notice(unknown_event));
 }
 
+// What a ring's watcher heard, as "event:users[:by]" (ADR-0111).
+class RecordingWatcher final : public chat::IRingWatcher {
+public:
+    void observed(const chat::CallEvent& event) noexcept override {
+        std::string line = std::to_string(static_cast<int>(event.event)) + ":";
+        for (std::size_t i = 0; i < event.users.size(); ++i) {
+            line += (i == 0 ? "" : ",") + std::string(event.users[i].view());
+        }
+        if (event.by) {
+            line += ":" + std::string(event.by->view());
+        }
+        lines.push_back(line);
+        events.push_back(event);
+    }
+    std::vector<std::string> take() {
+        events.clear();
+        return std::exchange(lines, {});
+    }
+    std::vector<std::string> lines;
+    std::vector<chat::CallEvent> events;
+};
+
+TEST_F(RingerTest, TheWatcherHearsTheFirstRingWithWhomItRangAndHowItEndsOnceEach) {
+    RecordingWatcher watcher;
+    ringer_.watch(&watcher);
+    const CallId call = ring();
+    ASSERT_EQ(watcher.events.size(), 1U);
+    EXPECT_EQ(watcher.events[0].call, call);
+    EXPECT_EQ(watcher.events[0].caller, user("alice"));
+    EXPECT_EQ(watcher.events[0].kind, chat::CallKind::Direct);
+    EXPECT_EQ(watcher.events[0].expires_at, clock_.wall_now() + chat::RingLimits{}.ring_timeout);
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"0:bob"});
+    // Announced again to every device, but not news to the watcher.
+    clock_.advance(chat::RingLimits{}.announce_every);
+    ringer_.tick();
+    EXPECT_FALSE(plane_.take().empty());
+    EXPECT_TRUE(watcher.take().empty());
+    ASSERT_TRUE(ringer_.ticketed(room_id(), user("bob"), std::nullopt));
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"1::bob"});
+    ASSERT_TRUE(ringer_.signal(room_id(), user("alice"), CallSignal::End, call));
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"5::alice"});
+}
+
+TEST_F(RingerTest, TheWatcherHearsWhoMissedARingAndWhoDeclinedOrCancelledOne) {
+    RecordingWatcher watcher;
+    ringer_.watch(&watcher);
+    ring();
+    watcher.take();
+    clock_.advance(chat::RingLimits{}.ring_timeout);
+    ringer_.tick();
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"4:bob"});
+    const CallId declined = ring();
+    watcher.take();
+    ASSERT_TRUE(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, declined));
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"2::bob"});
+    // bob calls back: alice was declined, bob may ring her.
+    const auto back = ringer_.ticketed(room_id(), user("bob"), kPair);
+    ASSERT_TRUE(back && *back);
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"0:alice"});
+    ASSERT_TRUE(ringer_.signal(room_id(), user("bob"), CallSignal::Cancel, **back));
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"3::bob"});
+    ringer_.watch(nullptr);
+    ring();
+    EXPECT_TRUE(watcher.take().empty());
+}
+
+TEST_F(GroupRingerTest, TheWatcherHearsOnlyThoseStillRungMissAGroupCallThatGoesOn) {
+    RecordingWatcher watcher;
+    ringer_.watch(&watcher);
+    const CallId call = ring_group();
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"0:bob,carol,dave"});
+    ASSERT_EQ(join("bob"), call);
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"1::bob"});
+    clock_.advance(chat::RingLimits{}.ring_timeout);
+    ringer_.tick();
+    EXPECT_EQ(watcher.take(), std::vector<std::string>{"4:carol,dave"});
+    // Leaving is not an event of the ring's.
+    ASSERT_TRUE(ringer_.signal(room_id(), user("bob"), CallSignal::Leave, call));
+    EXPECT_TRUE(watcher.take().empty());
+}
+
 } // namespace

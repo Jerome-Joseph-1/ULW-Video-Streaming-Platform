@@ -5,6 +5,7 @@
 #include "infra/curl/multi.hpp"
 #include "infra/postgres/e2ee_directory.hpp"
 #include "infra/postgres/message_store.hpp"
+#include "infra/postgres/notify_store.hpp"
 #include "infra/postgres/room_store.hpp"
 #include "infra/sfu/livekit/livekit_sfu.hpp"
 #include "infra/turn/turn.hpp"
@@ -26,6 +27,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
@@ -108,6 +110,13 @@ struct Services {
     // outlives the SFU, and its calls run on the SFU's multi.
     std::unique_ptr<core::ports::ITurnCredentials> turn;
     std::unique_ptr<core::ports::ISfu> sfu;
+    // The notification hook (ADR-0111), when ULW_NOTIFY_URL is set: the connectivity registry,
+    // and the events' sender on its own libcurl multi. The server's sessions tell the notifier
+    // as they close, so it outlives the server.
+    std::unique_ptr<infra::postgres::PgNotifyStore> notify_store;
+    std::unique_ptr<infra::curl::Multi> notify_multi;
+    std::unique_ptr<chat::HookSender> hook;
+    std::unique_ptr<chat::Notifier> notifier;
     std::unique_ptr<chat::ChatServer> server;
     std::unique_ptr<net::SignalWatcher> signals;
 
@@ -376,6 +385,31 @@ int run() {
         return *code;
     }
 
+    if (config->notify) {
+        core::ports::NotifyTiming timing;
+        timing.message_interval = config->notify->message_interval;
+        auto notify_store = infra::postgres::PgNotifyStore::create(
+            *s.reactor, *s.offload, {.conninfo = config->database_url, .timing = timing});
+        if (!notify_store) {
+            return fail("ULW_DATABASE_URL", "not a connection string this server can use",
+                        kBadConfig);
+        }
+        s.notify_store = std::move(*notify_store);
+        auto multi = infra::curl::Multi::create(*s.reactor);
+        if (!multi) {
+            return fail("ULW_NOTIFY_URL", "libcurl multi for the hook failed to start");
+        }
+        s.notify_multi = std::move(*multi);
+        s.hook = std::make_unique<chat::HookSender>(*s.reactor, *s.notify_multi, s.clock,
+                                                    config->notify->url, config->notify->secret);
+        // This run's tag in the registry: another run of the same pod is another node there.
+        std::array<std::byte, sizeof(std::uint64_t)> tag{};
+        s.random.fill(tag);
+        s.notifier = std::make_unique<chat::Notifier>(*s.reactor, *s.notify_store, *s.hook,
+                                                      s.clock, s.random,
+                                                      std::bit_cast<std::uint64_t>(tag));
+    }
+
     s.room_log = std::make_unique<chat::RoomLog>(config->node);
     s.router = std::make_unique<rt::RoomRouter>(*s.reactor, *s.store, s.clock, s.random,
                                                 rt::RouterConfig{.self = config->node,
@@ -397,7 +431,9 @@ int run() {
                    .random = s.random,
                    .sfu = s.sfu.get(),
                    .registry = s.directory.get(),
-                   .key_packages = s.directory.get()},
+                   .key_packages = s.directory.get(),
+                   .notifier = s.notifier.get(),
+                   .hook = s.hook.get()},
         chat::Access{.cookie = config->auth_cookie, .allowed_origins = config->allowed_origins},
         chat_limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.server);
@@ -419,13 +455,14 @@ int run() {
     chat::log_event(
         R"("level":"info","msg":"listening","version":"{}","git":"{}","node":"{}","port":{},)"
         R"("node_address":"{}","reactor":"{}{}","keys":{},"allocator":"{}{}","calls":{},)"
-        R"("turn":"{}","self_service":{},"service_port":{})",
+        R"("turn":"{}","self_service":{},"service_port":{},"notify":{})",
         info.version, info.git_sha, config->node.view(), config->port, config->node_address,
         net::to_string(choice->kind), choice->fell_back_from_io_uring ? " (fallback)" : "", keys,
         jemalloc.empty() ? "default" : "jemalloc ", jemalloc, calls, turn_text(*config),
         config->self_service,
         config->service_api.transform([](const chat::ServiceApiConfig& api) { return api.port; })
-            .value_or(std::uint16_t{0}));
+            .value_or(std::uint16_t{0}),
+        config->notify ? "true" : "false");
 
     while (!s.server->finished()) {
         s.reactor->run_once(kLoopTick);

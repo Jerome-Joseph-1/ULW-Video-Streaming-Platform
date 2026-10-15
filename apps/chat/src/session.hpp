@@ -24,6 +24,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <variant>
 #include <vector>
 
 namespace chat {
@@ -34,6 +35,12 @@ namespace chat {
 // Close code for a socket whose token expired: reconnect with a fresh token
 // (docs/integration/chat.md). In the range RFC 6455 section 7.4.2 leaves to applications.
 inline constexpr codec::ws::CloseCode kTokenExpired{4001};
+
+// The device a socket names in its upgrade's query, `/rt?device=<uuid>` (ADR-0111): nullopt when
+// it names none; an error when the value is not a UUID or is given twice. Other parameters are
+// ignored.
+[[nodiscard]] std::expected<std::optional<core::DeviceId>, std::monostate>
+device_of(std::string_view target) noexcept;
 
 // When a socket opened at `now` (monotonic) with a token that expires at `expires_at` stops
 // being accepted: exp plus kTokenClockSkew, on the monotonic clock. A token that outlives what
@@ -145,6 +152,9 @@ private:
     bool request_complete_ = false;
     bool paused_ = false;
     std::optional<core::UserId> user_;
+    // What the upgrade named (device_of), told to the notifier with the user.
+    std::optional<core::DeviceId> device_;
+    bool notified_ = false;
     net::IpAddress peer_;
     // ADR-0076: the direct peer's connection, for the socket's life; a forwarded client's
     // upgrade, until it is answered; and the user's open socket, from the upgrade on.

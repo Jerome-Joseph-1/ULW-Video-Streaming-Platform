@@ -780,6 +780,9 @@ void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageK
         answer(*c->client, reason(result.error()), room, key);
         return;
     }
+    if (message_watcher_ != nullptr) {
+        message_watcher_->message(room, c->user, *result);
+    }
     try {
         std::string out;
         write_sent(out, room, key, *result);

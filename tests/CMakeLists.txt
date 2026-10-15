@@ -487,12 +487,13 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/memory_store_access_test.cpp
     unit/chat/named_rooms_test.cpp
     unit/chat/notify_sender_test.cpp
+    unit/chat/notify_test.cpp
     unit/chat/presence_test.cpp
     unit/chat/ring_test.cpp
     unit/chat/service_api_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
-target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os
+target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::notify_memory ulw::os
     ulw::test_http_server ulw::e2ee_directory_memory)
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 

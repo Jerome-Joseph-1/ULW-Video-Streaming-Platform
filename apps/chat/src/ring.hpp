@@ -89,6 +89,29 @@ public:
     [[nodiscard]] virtual bool owns(const core::RoomId& room) const noexcept = 0;
 };
 
+// What a ring's watcher hears (ADR-0111): each call's first Ringing and how its ring ends, once
+// per event, not per member; not its re-announcements, nor a group call's Left and Moved.
+struct CallEvent {
+    RingEvent event = RingEvent::Ringing;
+    core::RoomId room;
+    CallId call;
+    CallKind kind = CallKind::Direct;
+    core::UserId caller;
+    // Ringing: the members rung. Missed: who missed it (a group call that goes on: only those
+    // still rung when it rang out). Otherwise empty.
+    std::vector<core::UserId> users;
+    // As CallNotice::by.
+    std::optional<core::UserId> by;
+    core::WallTime expires_at;
+};
+
+// Told of a ring's events on the room's owner, from inside the ringer: must not call back into it.
+class IRingWatcher {
+public:
+    virtual ~IRingWatcher() = default;
+    virtual void observed(const CallEvent& event) noexcept = 0;
+};
+
 // The most rings a room may be allowed per window: what each room's history has room for.
 inline constexpr std::size_t kMaxRingsPerWindow = 16;
 // A group call rings at most this many other members, the first of its member list in id order
@@ -279,6 +302,8 @@ public:
     // out of it (ADR-0095). Not told of a call the caller ended, nor of one a deposed owner drops.
     using GroupEnded = std::move_only_function<void(const core::RoomId&) noexcept>;
     void on_group_ended(GroupEnded hook) noexcept { group_ended_ = std::move(hook); }
+    // Who hears each call's events (ADR-0111); nullptr: nobody, the default.
+    void watch(IRingWatcher* watcher) noexcept { watcher_ = watcher; }
     // Whether anyone is connected to the call's media room: nobody ends it (call_ended), and
     // nullopt (the SFU did not answer) asks again at the next check.
     // `asked` false: the SFU was not asked (nothing to ask with yet, or the media generation
@@ -359,6 +384,10 @@ private:
     // Tells every member of the call, the caller included, on every node they are connected to.
     void announce(const core::RoomId& room, const Call& call, RingEvent event,
                   const std::optional<core::UserId>& by) noexcept;
+    // The watcher, of an event of the call; `users` as CallEvent::users.
+    void observe(const core::RoomId& room, const Call& call, RingEvent event,
+                 const std::optional<core::UserId>& by,
+                 std::vector<core::UserId> users = {}) noexcept;
     // Tells one member.
     void tell(const core::RoomId& room, const Call& call, const core::UserId& to, RingEvent event,
               const std::optional<core::UserId>& by,
@@ -384,6 +413,7 @@ private:
     // Group calls due an occupancy check, until the call handler takes them.
     std::vector<std::pair<core::RoomId, CallId>> checks_;
     GroupEnded group_ended_;
+    IRingWatcher* watcher_ = nullptr;
 };
 
 } // namespace chat

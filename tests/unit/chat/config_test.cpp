@@ -428,4 +428,40 @@ TEST_F(ChatConfigTest, AllowedOriginsAreExactSchemeHostAndPort) {
     }
 }
 
+// ADR-0111: the hook is off unless its URL is set, and then needs its secret.
+TEST_F(ChatConfigTest, TheNotificationHookIsOffUnlessItsUrlIsSetAndThenNeedsASecret) {
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->notify);
+    env["ULW_NOTIFY_SECRET"] = "a-hook-secret-of-at-least-32-bytes!!";
+    EXPECT_EQ(refused_variable(), "ULW_NOTIFY_SECRET");
+    env.erase("ULW_NOTIFY_SECRET");
+    env["ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS"] = "60";
+    EXPECT_EQ(refused_variable(), "ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS");
+    env.erase("ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS");
+    env["ULW_NOTIFY_URL"] = "http://askedin-push.askedin.svc:8080/ulw/events";
+    EXPECT_EQ(refused_variable(), "ULW_NOTIFY_SECRET");
+    env["ULW_NOTIFY_SECRET"] = "too-short";
+    EXPECT_EQ(refused_variable(), "ULW_NOTIFY_SECRET");
+    env["ULW_NOTIFY_SECRET"] = "a-hook-secret-of-at-least-32-bytes!!";
+    config = load();
+    ASSERT_TRUE(config) << config.error().variable << ": " << config.error().reason;
+    ASSERT_TRUE(config->notify);
+    EXPECT_EQ(config->notify->url, "http://askedin-push.askedin.svc:8080/ulw/events");
+    EXPECT_EQ(config->notify->message_interval, core::Millis{30'000});
+    env["ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS"] = "60";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->notify->message_interval, core::Millis{60'000});
+    for (const char* bad : {"4", "3601", "x"}) {
+        env["ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS") << bad;
+    }
+    env.erase("ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS");
+    for (const char* bad : {"askedin-push:8080", "ftp://push/events", "http://", "https:///x"}) {
+        env["ULW_NOTIFY_URL"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_NOTIFY_URL") << bad;
+    }
+}
+
 } // namespace

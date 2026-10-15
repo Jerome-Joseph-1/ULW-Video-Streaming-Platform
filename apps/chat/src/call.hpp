@@ -223,6 +223,8 @@ public:
     [[nodiscard]] bool enabled() const noexcept { return sfu_ != nullptr; }
     [[nodiscard]] const CallCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] const RingCounters& ring_counters() const noexcept { return ringer_.counters(); }
+    // Who hears the events of the calls this node owns (ADR-0111); nullptr: nobody.
+    void watch_rings(IRingWatcher* watcher) noexcept { ringer_.watch(watcher); }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
     // Calls ringing or answered in the rooms this node owns.
     [[nodiscard]] std::size_t calls() const noexcept { return ringer_.calls(); }
