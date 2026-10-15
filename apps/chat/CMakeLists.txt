@@ -10,6 +10,7 @@ ulw_add_library(chat_lib
     src/live_chat.cpp
     src/membership.cpp
     src/named_rooms.cpp
+    src/notify_sender.cpp
     src/presence.cpp
     src/presence_room.cpp
     src/ring.cpp

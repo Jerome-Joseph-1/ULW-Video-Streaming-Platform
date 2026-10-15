@@ -486,6 +486,7 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/membership_test.cpp
     unit/chat/memory_store_access_test.cpp
     unit/chat/named_rooms_test.cpp
+    unit/chat/notify_sender_test.cpp
     unit/chat/presence_test.cpp
     unit/chat/ring_test.cpp
     unit/chat/service_api_test.cpp
