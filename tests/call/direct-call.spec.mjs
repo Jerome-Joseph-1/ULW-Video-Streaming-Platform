@@ -8,9 +8,10 @@
 // resumes. Every ticket comes from chat_server; LiveKit's key is only in chat's environment
 // (docs/integration/calls.md, ADR-0087).
 import { chromium, expect, test } from '@playwright/test';
+import { spawn } from 'node:child_process';
 import { createHmac, randomUUID } from 'node:crypto';
 
-import { startChat } from './chat-stack.mjs';
+import { freePort, startChat } from './chat-stack.mjs';
 import { servePage } from './peers.mjs';
 
 // Frames and seconds of play that show media is decoding, not merely arriving: the fake camera
@@ -222,23 +223,52 @@ test('a direct chat call, asked for on chat and connected in the browser', async
 // With an external TURN service (ULW_TURN_MODE=external, ADR-0109) every ticket names the relays
 // its device reaches LiveKit through, the answering member's too, whose ticket the room's owner
 // on the other node issues: the ticket crosses between the nodes as the owner's answer, which
-// must keep them. hmac credentials (the TURN REST API's) are checked against the secret here;
-// no TURN server runs, so nothing connects.
-test('in external TURN mode a rung and answered call hands both members its relays',
+// must keep them. A coturn on loopback checks the TURN REST API's credentials (hmac) against the
+// shared secret, as an operator's would; both browsers connect with nothing but the ticket's
+// relays (iceTransportPolicy "relay", as docs/integration/calls.md has a client do), so media
+// that decodes went through it.
+async function startTurn(secret) {
+  const port = await freePort();
+  const relayLow = await freePort();
+  const child = spawn('turnserver', ['-n', '--no-cli', '--no-tls', '--no-dtls', '--fingerprint',
+    '--listening-ip=127.0.0.1', '--relay-ip=127.0.0.1', `--listening-port=${port}`,
+    '--use-auth-secret', `--static-auth-secret=${secret}`, '--realm=ulw.test',
+    // LiveKit is on loopback here; coturn refuses loopback peers unless told.
+    '--allow-loopback-peers', `--min-port=${relayLow}`, `--max-port=${relayLow + 50}`,
+    '--log-file=stdout', '--simple-log'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let output = '';
+  for (const stream of [child.stdout, child.stderr]) stream.on('data', (c) => { output += c; });
+  const exited = new Promise((resolve) => child.on('exit', resolve));
+  await expect.poll(() => child.exitCode === null && output.includes('Total General servers'),
+    { message: 'coturn did not start', timeout: 10_000 }).toBe(true);
+  return {
+    url: `turn:127.0.0.1:${port}?transport=udp`,
+    output: () => output,
+    async stop() { child.kill('SIGTERM'); await exited; },
+  };
+}
+
+test('in external TURN mode a rung and answered call is relayed through the ticket\'s TURN server',
   async ({}, info) => {
     const pageServer = await servePage('direct-call.html');
     const origin = `http://127.0.0.1:${pageServer.address().port}`;
     const secret = randomUUID() + randomUUID();
-    const urls = ['turn:127.0.0.1:3478?transport=udp', 'turns:127.0.0.1:5349?transport=tcp'];
+    let turn;
     let chat;
     let browser;
     try {
+      turn = await startTurn(secret);
+      const urls = [turn.url];
       chat = await startChat({ origin, env: {
         ULW_TURN_MODE: 'external', ULW_TURN_PROVIDER: 'hmac', ULW_TURN_URLS: urls.join(','),
         ULW_TURN_SHARED_SECRET: secret } });
       for (const node of chat.nodes) expect(node.output).toContain('"turn":"external hmac"');
       const [nodeA, nodeB] = chat.nodes;
-      browser = await chromium.launch({ executablePath: process.env.ULW_E2E_CHROME });
+      browser = await chromium.launch({
+        executablePath: process.env.ULW_E2E_CHROME,
+        args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream',
+          '--autoplay-policy=no-user-gesture-required'],
+      });
       const client = async (user, node) => {
         const context = await browser.newContext();
         await context.addCookies([{ name: 'auth_token', value: chat.mint(user),
@@ -250,11 +280,13 @@ test('in external TURN mode a rung and answered call hands both members its rela
         return { user, page, device: randomUUID() };
       };
       const ask = (c, cmd) => c.page.evaluate((x) => window.command(x), cmd);
-      const alice = await client('alice', nodeA);
-      const bob = await client('bob', nodeB);
-      const { room } = await ask(alice, { type: 'open_direct', user: 'bob' });
+      // Not alice and bob: a direct chat's room is its pair's, and LiveKit may still hold the
+      // first test's room of that name, full.
+      const alice = await client('erin', nodeA);
+      const bob = await client('frank', nodeB);
+      const { room } = await ask(alice, { type: 'open_direct', user: 'frank' });
       expect(room).toBeTruthy();
-      expect(await ask(bob, { type: 'open_direct', user: 'alice' }))
+      expect(await ask(bob, { type: 'open_direct', user: 'erin' }))
         .toMatchObject({ type: 'direct', room });
       for (const c of [alice, bob]) {
         expect(await ask(c, { type: 'join', room, kind: 'direct' }))
@@ -277,27 +309,44 @@ test('in external TURN mode a rung and answered call hands both members its rela
       const tickets = () =>
         Promise.all(chat.nodes.map((n) => chat.metric(n, 'call_tickets_total')));
       const before = await tickets();
-      const ring = await ask(alice, { type: 'call', room, device: alice.device });
-      expect(ring).toMatchObject({ type: 'ticket', room, url: process.env.LIVEKIT_CLIENT_URL });
-      expectRelays(ring, alice.device);
-      await expect.poll(() => bob.page.evaluate(([r, id]) => window.chatFrames.filter((f) =>
-        f.type === 'call_ringing' && f.room === r && f.call === id).length, [room, ring.call]),
-      { message: 'bob never rang', timeout: 10_000 }).not.toBe(0);
-      const answered = await ask(bob, { type: 'call', room, device: bob.device,
-        answer: ring.call });
-      expect(answered).toMatchObject({ type: 'ticket', room, call: ring.call });
-      expectRelays(answered, bob.device);
-      // The room's owner issued both: one of them crossed between the nodes.
-      const issued = (await tickets()).map((n, i) => n - before[i]);
-      expect(issued.toSorted()).toEqual([0, 2]);
+      let ring;
+      let answered;
+      await test.step('alice rings, bob answers, and both tickets carry the relay', async () => {
+        ring = await ask(alice, { type: 'call', room, device: alice.device });
+        expect(ring).toMatchObject({ type: 'ticket', room, url: process.env.LIVEKIT_CLIENT_URL });
+        expectRelays(ring, alice.device);
+        await expect.poll(() => bob.page.evaluate(([r, id]) => window.chatFrames.filter((f) =>
+          f.type === 'call_ringing' && f.room === r && f.call === id).length, [room, ring.call]),
+        { message: 'bob never rang', timeout: 10_000 }).not.toBe(0);
+        answered = await ask(bob, { type: 'call', room, device: bob.device, answer: ring.call });
+        expect(answered).toMatchObject({ type: 'ticket', room, call: ring.call });
+        expectRelays(answered, bob.device);
+        // The room's owner issued both: one of them crossed between the nodes.
+        const issued = (await tickets()).map((n, i) => n - before[i]);
+        expect(issued.toSorted()).toEqual([0, 2]);
+      });
+
+      await test.step('both connect through the relay alone and decode each other', async () => {
+        alice.identity = await alice.page.evaluate((t) => window.connectCall(t), ring);
+        bob.identity = await bob.page.evaluate((t) => window.connectCall(t), answered);
+        await expectDecoding(alice.page, bob.identity);
+        await expectDecoding(bob.page, alice.identity);
+        for (const c of [alice, bob]) {
+          const local = (await c.page.evaluate(() => window.selectedPaths())).map((p) => p.local);
+          expect(local.length, `${c.user} has no selected pair`).toBeGreaterThan(0);
+          expect(local, `${c.user} is not relayed`).toEqual(local.map(() => 'relay'));
+        }
+      });
     } catch (e) {
       if (chat) {
         await info.attach('chat-nodes.log', { body: chat.output(), contentType: 'text/plain' });
       }
+      if (turn) await info.attach('coturn.log', { body: turn.output(), contentType: 'text/plain' });
       throw e;
     } finally {
       await browser?.close();
       pageServer.close();
       await chat?.stop();
+      await turn?.stop();
     }
   });

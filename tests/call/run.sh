@@ -55,6 +55,11 @@ if [[ -n $needs_harness && ! -x $ULW_CALL_HARNESS ]]; then
     exit 1
 fi
 if [[ -n $needs_chat ]]; then
+    # direct-call.spec.mjs relays one call through a coturn of its own (external TURN mode).
+    if ! command -v turnserver >/dev/null; then
+        echo "run.sh: turnserver missing; install coturn" >&2
+        exit 1
+    fi
     for target in apps/chat/chat_server apps/migrate/ulw_migrate tools/devtoken/ulw_devtoken; do
         if [[ ! -x $build/$target ]]; then
             echo "run.sh: $build/$target missing; build the ${target##*/} target" >&2

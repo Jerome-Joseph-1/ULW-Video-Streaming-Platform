@@ -3,6 +3,17 @@
 <head>
 <meta charset="utf-8">
 <title>ULW call client</title>
+<script>
+  // Every peer connection the SDK makes, for the selected candidate pairs below.
+  window.peerConnections = [];
+  const Native = window.RTCPeerConnection;
+  window.RTCPeerConnection = class extends Native {
+    constructor(...args) {
+      super(...args);
+      window.peerConnections.push(this);
+    }
+  };
+</script>
 <script src="/livekit-client.umd.js"></script>
 </head>
 <body>
@@ -55,7 +66,7 @@
   // Remote tracks by participant identity and kind, each attached to an element so that it plays
   // (and decodes) as a call's would.
   window.remote = {};
-  window.connectCall = async ({ url, token }) => {
+  window.connectCall = async ({ url, token, ice_servers: iceServers }) => {
     // Moved to a new generation: the old room is left first (LiveKit is closing it anyway).
     if (window.room) await window.room.disconnect();
     // Off so that the receiver always gets the published layer: the decode checks below want
@@ -80,7 +91,11 @@
       if (window.remote[p.identity]) delete window.remote[p.identity][track.kind];
     });
     room.on(RoomEvent.Disconnected, (reason) => note('disconnected', { reason }));
-    await room.connect(url, token);
+    // As docs/integration/calls.md has a client do: a ticket's relays (an external TURN service,
+    // ADR-0109), and nothing but them.
+    await room.connect(url, token, iceServers ? {
+      rtcConfig: { iceServers, iceTransportPolicy: 'relay' },
+    } : undefined);
     await room.localParticipant.enableCameraAndMicrophone();
     return room.localParticipant.identity;
   };
@@ -136,6 +151,23 @@
         framesDecoded: inbound.framesDecoded ?? 0,
         totalSamplesReceived: inbound.totalSamplesReceived ?? 0,
       };
+    }
+    return out;
+  };
+
+  // The candidate types of each live connection's selected pair: "relay" on the local side means
+  // the media goes through TURN.
+  window.selectedPaths = async () => {
+    const out = [];
+    for (const pc of window.peerConnections.filter((c) => c.connectionState !== 'closed')) {
+      const stats = new Map();
+      (await pc.getStats()).forEach((s) => stats.set(s.id, s));
+      for (const s of stats.values()) {
+        if (s.type !== 'transport' || !s.selectedCandidatePairId) continue;
+        const pair = stats.get(s.selectedCandidatePairId);
+        out.push({ local: stats.get(pair.localCandidateId).candidateType,
+                   remote: stats.get(pair.remoteCandidateId).candidateType });
+      }
     }
     return out;
   };

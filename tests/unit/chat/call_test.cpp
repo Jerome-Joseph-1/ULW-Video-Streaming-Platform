@@ -1766,6 +1766,8 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
     const auto relayed_back = chat::decode_answer(chat::encode_answer(relayed));
     ASSERT_TRUE(relayed_back && relayed_back->ticket);
     EXPECT_EQ(relayed_back->ticket->ice_servers, relayed.ticket->ice_servers);
+    // The whole ticket, so that a field the layout leaves out fails here.
+    EXPECT_EQ(*relayed_back->ticket, *relayed.ticket);
     EXPECT_EQ(relayed_back->call, call);
     const auto bytes = chat::encode_answer(relayed);
     for (std::size_t n = 0; n < bytes.size(); ++n) {
