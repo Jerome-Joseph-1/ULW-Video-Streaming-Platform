@@ -157,7 +157,9 @@ std::expected<std::optional<NotifyConfig>, ConfigError> notify_config(const EnvL
         return std::nullopt;
     }
     const std::string_view text = *url;
-    const bool scheme = text.starts_with("http://") || text.starts_with("https://");
+    // Plain HTTP is allowed: the receiver is inside the cluster, and every request is signed.
+    const bool scheme =
+        text.starts_with("http://") || text.starts_with("https://"); // NOSONAR(cpp:S5332)
     const std::size_t host_at = text.find("://") + 3;
     if (!scheme || host_at >= text.size() || text[host_at] == '/' ||
         text.find_first_of(" \t\r\n") != std::string_view::npos) {

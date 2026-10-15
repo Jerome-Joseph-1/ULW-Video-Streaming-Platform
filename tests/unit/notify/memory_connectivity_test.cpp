@@ -77,4 +77,10 @@ TEST(MemoryConnectivityTest, AFailingStoreAnswersUnavailable) {
     EXPECT_EQ(got->error(), core::ports::NotifyError::Unavailable);
 }
 
+TEST(NotifyError, EachErrorHasItsName) {
+    EXPECT_EQ(core::ports::to_string(core::ports::NotifyError::Unavailable),
+              "connectivity registry unavailable");
+    EXPECT_EQ(core::ports::to_string(core::ports::NotifyError::Corrupt), "corrupt record");
+}
+
 } // namespace

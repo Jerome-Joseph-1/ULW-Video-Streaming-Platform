@@ -6,6 +6,8 @@
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
 
+#include "call.hpp"
+#include "live_chat.hpp"
 #include "named_rooms.hpp"
 #include "service_api.hpp"
 #include "support/fake_clock.hpp"
@@ -107,6 +109,52 @@ public:
     void watch_members(core::ports::IMemberListener* /*listener*/) noexcept override {}
 };
 
+// The room plane as the service API's call operations use it (ADR-0111): a join, one ask of the
+// room's owner, a leave. The owner answers `answer`, at once or when told to.
+class FakeCallRooms final : public chat::IRooms {
+public:
+    void join(const core::RoomId& room, rt::IMember& /*member*/, rt::JoinCallback done) override {
+        ++joins;
+        joined_room = room;
+        done(join_result);
+    }
+    void leave(const core::RoomId& /*room*/, rt::IMember& /*member*/) noexcept override {
+        ++leaves;
+        held = nullptr;
+    }
+    void send(const core::RoomId& /*room*/, rt::IMember& /*from*/, const core::UserId& /*sender*/,
+              const rt::MessageKey& /*key*/, std::vector<std::byte> /*body*/,
+              rt::SendCallback done) override {
+        done(std::unexpected(rt::RouteError::Unavailable));
+    }
+    void ask_owner(const core::RoomId& /*room*/, rt::IMember& /*from*/,
+                   std::span<const std::byte> request, rt::OwnerAnswer done) override {
+        asked = chat::decode_request(request);
+        if (hold) {
+            held = std::move(done);
+            return;
+        }
+        done(answer);
+    }
+    void reply(chat::CallOutcome outcome) {
+        answer = chat::encode_answer({.outcome = outcome,
+                                      .ticket = std::nullopt,
+                                      .call = std::nullopt,
+                                      .caller = outcome == chat::CallOutcome::Done
+                                                    ? std::optional(user("alice"))
+                                                    : std::nullopt});
+    }
+
+    std::expected<std::uint64_t, rt::RouteError> join_result = 0;
+    std::expected<std::vector<std::byte>, rt::RouteError> answer;
+    bool hold = false;
+    rt::OwnerAnswer held;
+    std::optional<chat::CallAsk> asked;
+    std::optional<core::RoomId> joined_room;
+    int joins = 0;
+    int leaves = 0;
+};
+
 // One HTTP response as it came: status, the head's lines, the body.
 struct Answer {
     int status = 0;
@@ -187,7 +235,7 @@ protected:
         reactor_.reset();
     }
 
-    void start(const ServiceApiLimits& limits, bool down = false) {
+    void start(const ServiceApiLimits& limits, bool down = false, bool with_rooms = true) {
         clients_.clear();
         store_.reset();
         api_.reset();
@@ -202,7 +250,8 @@ protected:
             memory->watch_members(&heard_);
             store_ = std::move(memory);
         }
-        api_ = std::make_unique<ServiceApi>(*reactor_, clock_, verifier_, *store_, limits);
+        api_ = std::make_unique<ServiceApi>(*reactor_, clock_, verifier_, *store_, limits,
+                                            with_rooms ? &rooms_ : nullptr);
         auto listener = net::listen_tcp({.port = 0, .loopback_only = true});
         ASSERT_TRUE(listener);
         port_ = *net::local_port(listener->get());
@@ -281,6 +330,7 @@ protected:
     FakeClock clock_;
     ulw::test::FakeVerifier verifier_;
     Heard heard_;
+    FakeCallRooms rooms_;
     std::unique_ptr<net::IReactor> reactor_;
     std::unique_ptr<core::ports::IMessageStore> store_;
     std::unique_ptr<ServiceApi> api_;
@@ -734,6 +784,138 @@ TEST_F(ServiceApiTest, AClosedDirectChatListsNobodyAndClosingAgainChangesNothing
     EXPECT_NE(
         ask("open_direct", R"({"users":["bob","alice"]})").body.find(R"("added":["alice","bob"])"),
         std::string::npos);
+}
+
+// ADR-0111: a call declined for a member, or asked about, from a notification.
+constexpr std::string_view kCallRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
+constexpr std::string_view kCall = "01a0eb86-6cca-7dce-84cc-3bb47615fa00";
+
+std::string call_body(std::string_view user_field = R"(,"user":"bob")") {
+    return R"({"room":")" + std::string(kCallRoom) + R"(","call":")" + std::string(kCall) + '"' +
+           std::string(user_field) + "}";
+}
+
+TEST_F(ServiceApiTest, ADeclineIsTheMembersOwnAskedOfTheRoomsOwnerWhichTheApiThenLeaves) {
+    rooms_.reply(chat::CallOutcome::Done);
+    const Answer a = ask("decline_call", call_body());
+    EXPECT_EQ(a.status, 200) << a.body;
+    EXPECT_EQ(a.field("type"), "call_declined");
+    EXPECT_EQ(a.field("room"), kCallRoom);
+    EXPECT_EQ(a.field("call"), kCall);
+    EXPECT_EQ(a.field("by"), "bob");
+    ASSERT_TRUE(rooms_.asked);
+    const auto* decline = std::get_if<chat::CallSignalRequest>(&*rooms_.asked);
+    ASSERT_NE(decline, nullptr);
+    EXPECT_EQ(decline->user, user("bob"));
+    EXPECT_EQ(decline->signal, chat::CallSignal::Decline);
+    EXPECT_EQ(decline->call.to_string(), kCall);
+    EXPECT_EQ(rooms_.joined_room, *core::RoomId::parse(kCallRoom));
+    EXPECT_EQ(rooms_.joins, 1);
+    EXPECT_EQ(rooms_.leaves, 1) << "joined for the ask only";
+    EXPECT_EQ(api_->counters().changes, 1U);
+}
+
+TEST_F(ServiceApiTest, WhatTheOwnerRefusesIsAnsweredWithWhy) {
+    const std::vector<std::tuple<chat::CallOutcome, int, std::string_view>> cases{
+        {chat::CallOutcome::NoCall, 409, "no_call"},
+        {chat::CallOutcome::NotMember, 409, "not_member"},
+        {chat::CallOutcome::NotCallable, 409, "not_callable"},
+        {chat::CallOutcome::Disabled, 409, "calls_disabled"},
+        {chat::CallOutcome::Busy, 503, "unavailable"},
+        {chat::CallOutcome::Unavailable, 503, "unavailable"},
+    };
+    for (const auto& [outcome, status, reason] : cases) {
+        rooms_.reply(outcome);
+        const Answer a = ask("decline_call", call_body());
+        EXPECT_EQ(a.status, status) << reason;
+        EXPECT_EQ(a.field("reason"), reason);
+    }
+    EXPECT_EQ(rooms_.joins, rooms_.leaves);
+    // The owner out of reach, or a join that fails: retry.
+    rooms_.answer = std::unexpected(rt::RouteError::Unavailable);
+    EXPECT_EQ(ask("decline_call", call_body()).status, 503);
+    rooms_.answer = std::vector<std::byte>{std::byte{0}};
+    EXPECT_EQ(ask("decline_call", call_body()).status, 503) << "an answer nobody can read";
+    rooms_.reply(chat::CallOutcome::Done);
+    rooms_.join_result = std::unexpected(rt::RouteError::Unavailable);
+    EXPECT_EQ(ask("decline_call", call_body()).status, 503);
+    EXPECT_EQ(rooms_.joins, rooms_.leaves);
+}
+
+TEST_F(ServiceApiTest, ACallsStatusSaysWhetherItStillRingsForWhomeverItNames) {
+    const std::vector<std::pair<chat::CallOutcome, std::string_view>> cases{
+        {chat::CallOutcome::Ringing, "ringing"},
+        {chat::CallOutcome::Answered, "answered"},
+        {chat::CallOutcome::NoCall, "over"},
+    };
+    for (const auto& [outcome, status] : cases) {
+        rooms_.reply(outcome);
+        const Answer a = ask("call_status", call_body(""));
+        EXPECT_EQ(a.status, 200) << a.body;
+        EXPECT_EQ(a.field("type"), "call_status");
+        EXPECT_EQ(a.field("status"), status);
+        EXPECT_EQ(a.field("call"), kCall);
+    }
+    ASSERT_TRUE(rooms_.asked);
+    const auto* about = std::get_if<chat::CallStatusRequest>(&*rooms_.asked);
+    ASSERT_NE(about, nullptr);
+    EXPECT_EQ(about->user, std::nullopt);
+    rooms_.reply(chat::CallOutcome::Ringing);
+    EXPECT_EQ(ask("call_status", call_body()).field("status"), "ringing");
+    about = std::get_if<chat::CallStatusRequest>(&*rooms_.asked);
+    ASSERT_NE(about, nullptr);
+    EXPECT_EQ(about->user, user("bob"));
+    rooms_.reply(chat::CallOutcome::Disabled);
+    EXPECT_EQ(ask("call_status", call_body()).field("reason"), "calls_disabled");
+    EXPECT_EQ(api_->counters().reads, 4U);
+}
+
+TEST_F(ServiceApiTest, ACallAskThatIsNotOneOfTheApisIsRefusedBeforeAnythingIsAsked) {
+    const std::string live = chat::live_chat_room("stream-1").value().to_string();
+    const std::vector<std::pair<std::string, std::string_view>> cases{
+        {R"({"room":")" + std::string(kCallRoom) + R"(","user":"bob"})", "malformed"},
+        {R"({"room":")" + std::string(kCallRoom) + R"(","call":"x","user":"bob"})", "bad_call"},
+        {R"({"room":")" + live + R"(","call":")" + std::string(kCall) + R"(","user":"bob"})",
+         "bad_room"},
+        {R"({"room":")" + std::string(kCallRoom) + R"(","call":")" + std::string(kCall) +
+             R"(","user":"b o b"})",
+         "bad_user"},
+        {call_body(R"(,"user":"bob","extra":1)"), "malformed"},
+    };
+    for (const auto& [body, reason] : cases) {
+        for (const std::string_view op : {"decline_call", "call_status"}) {
+            const Answer a = ask(op, body);
+            EXPECT_EQ(a.status, 400) << op << " " << body;
+            EXPECT_EQ(a.field("reason"), reason) << op << " " << body;
+        }
+    }
+    EXPECT_EQ(ask("decline_call", call_body("")).field("reason"), "malformed")
+        << "a decline names its user";
+    EXPECT_EQ(rooms_.joins, 0);
+}
+
+TEST_F(ServiceApiTest, WithoutTheRoomPlaneACallAskIsUnavailable) {
+    start(roomy(), /*down=*/false, /*with_rooms=*/false);
+    const Answer a = ask("call_status", call_body());
+    EXPECT_EQ(a.status, 503);
+    EXPECT_EQ(a.field("reason"), "unavailable");
+}
+
+TEST_F(ServiceApiTest, AConnectionClosedBeforeTheOwnerAnswersLeavesTheRoom) {
+    rooms_.hold = true;
+    const int fd = connect();
+    const std::string bytes = request(path("decline_call"), call_body());
+    ASSERT_EQ(ulw::test::write_some(fd, std::as_bytes(std::span(bytes))), bytes.size());
+    ASSERT_TRUE(pump_until(*reactor_, [&] { return static_cast<bool>(rooms_.held); }));
+    // The request's time runs out (a request is not read further while it is answered): the
+    // connection closes, and the ask goes with the room it joined.
+    clock_.advance(ServiceApiLimits{}.request_timeout + core::Millis{200});
+    ASSERT_TRUE(pump_until(*reactor_, [&] {
+        api_->reap();
+        return rooms_.leaves == 1;
+    }));
+    EXPECT_FALSE(rooms_.held) << "the ask was dropped with the leave";
+    EXPECT_TRUE(peer_closed(fd));
 }
 
 } // namespace
