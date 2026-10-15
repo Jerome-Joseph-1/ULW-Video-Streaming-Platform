@@ -67,6 +67,11 @@ cannot hand them out.
   since its client could not reach the media. Tickets carry `ice_servers` as RTCIceServer
   objects; clients pass them as `rtcConfig.iceServers` with `iceTransportPolicy: "relay"`
   (`livekit-client` uses its own `rtcConfig.iceServers` over the join response's).
+- A call ticket reaches the asking node as the room's owner's answer (ADR-0087), and that answer
+  carries `ice_servers`: every server's URIs, username and credential, in call layout 3. Layout 2,
+  v1.1.0's, had no place for them, so the owner's relays were dropped on the way and no call
+  connected in external mode; v1.1.1 fixed it. A node of layout 2 refuses layout 3's answers and
+  the other way round, rather than hand a client a ticket without its relays.
 - `components/external-turn` turns it on in an overlay: it deletes STUNner's Gateway and UDPRoute
   (so neither STUNner's operator nor `stunner-secrets` is needed), runs LiveKit with
   `--node-ip=<MEDIA_PUBLIC_IP>`, `udp_port: <MEDIA_UDP_PORT>`, `advertise_internal_ip: true` (egress
@@ -98,6 +103,10 @@ cannot hand them out.
 - Each ticket costs one provider API call with `cloudflare` (none with `hmac`); its outage makes
   tickets `unavailable`, as LiveKit's does.
 - Two environments on one node need a `MEDIA_UDP_PORT` each, as they needed a `TURN_PORT` each.
+- Moving to layout 3 is a rolling update like layout 2's (ADR-0091): while nodes of both run, a
+  ticket or call move asked of an owner on the other layout is answered `unavailable` with
+  `retry_after_ms`, and the client asks again; once every node runs v1.1.1 or later, asks pass
+  as before, in either TURN mode. Turn external mode on only after that.
 - Reopen if LiveKit gains a TURN client for its own candidates (then no port is published at
   all), if a provider publishes its relay ranges (narrow the lists), or if the media plane moves
   to an address of its own.

@@ -218,3 +218,86 @@ test('a direct chat call, asked for on chat and connected in the browser', async
     await chat?.stop();
   }
 });
+
+// With an external TURN service (ULW_TURN_MODE=external, ADR-0109) every ticket names the relays
+// its device reaches LiveKit through, the answering member's too, whose ticket the room's owner
+// on the other node issues: the ticket crosses between the nodes as the owner's answer, which
+// must keep them. hmac credentials (the TURN REST API's) are checked against the secret here;
+// no TURN server runs, so nothing connects.
+test('in external TURN mode a rung and answered call hands both members its relays',
+  async ({}, info) => {
+    const pageServer = await servePage('direct-call.html');
+    const origin = `http://127.0.0.1:${pageServer.address().port}`;
+    const secret = randomUUID() + randomUUID();
+    const urls = ['turn:127.0.0.1:3478?transport=udp', 'turns:127.0.0.1:5349?transport=tcp'];
+    let chat;
+    let browser;
+    try {
+      chat = await startChat({ origin, env: {
+        ULW_TURN_MODE: 'external', ULW_TURN_PROVIDER: 'hmac', ULW_TURN_URLS: urls.join(','),
+        ULW_TURN_SHARED_SECRET: secret } });
+      for (const node of chat.nodes) expect(node.output).toContain('"turn":"external hmac"');
+      const [nodeA, nodeB] = chat.nodes;
+      browser = await chromium.launch({ executablePath: process.env.ULW_E2E_CHROME });
+      const client = async (user, node) => {
+        const context = await browser.newContext();
+        await context.addCookies([{ name: 'auth_token', value: chat.mint(user),
+          domain: '127.0.0.1', path: '/', httpOnly: true, sameSite: 'Lax' }]);
+        const page = await context.newPage();
+        page.on('pageerror', (e) => console.log(`${user}: ${e}`));
+        await page.goto(`${origin}/`);
+        await page.evaluate((url) => window.openChat(url), node.ws);
+        return { user, page, device: randomUUID() };
+      };
+      const ask = (c, cmd) => c.page.evaluate((x) => window.command(x), cmd);
+      const alice = await client('alice', nodeA);
+      const bob = await client('bob', nodeB);
+      const { room } = await ask(alice, { type: 'open_direct', user: 'bob' });
+      expect(room).toBeTruthy();
+      expect(await ask(bob, { type: 'open_direct', user: 'alice' }))
+        .toMatchObject({ type: 'direct', room });
+      for (const c of [alice, bob]) {
+        expect(await ask(c, { type: 'join', room, kind: 'direct' }))
+          .toMatchObject({ type: 'joined', room });
+      }
+
+      // Each ticket's one relay: the configured URIs, and a credential for that device alone
+      // that the secret derives (base64 of HMAC-SHA1 over "<expiry>:<device>").
+      const expectRelays = (ticket, device) => {
+        expect(ticket.ice_servers, JSON.stringify(ticket)).toHaveLength(1);
+        const [relay] = ticket.ice_servers;
+        expect(relay.urls).toEqual(urls);
+        const [expiry, name] = relay.username.split(':');
+        expect(name).toBe(device);
+        expect(Number(expiry)).toBeGreaterThan(Math.floor(Date.now() / 1000));
+        expect(relay.credential).toBe(
+          createHmac('sha1', secret).update(relay.username).digest('base64'));
+      };
+
+      const tickets = () =>
+        Promise.all(chat.nodes.map((n) => chat.metric(n, 'call_tickets_total')));
+      const before = await tickets();
+      const ring = await ask(alice, { type: 'call', room, device: alice.device });
+      expect(ring).toMatchObject({ type: 'ticket', room, url: process.env.LIVEKIT_CLIENT_URL });
+      expectRelays(ring, alice.device);
+      await expect.poll(() => bob.page.evaluate(([r, id]) => window.chatFrames.filter((f) =>
+        f.type === 'call_ringing' && f.room === r && f.call === id).length, [room, ring.call]),
+      { message: 'bob never rang', timeout: 10_000 }).not.toBe(0);
+      const answered = await ask(bob, { type: 'call', room, device: bob.device,
+        answer: ring.call });
+      expect(answered).toMatchObject({ type: 'ticket', room, call: ring.call });
+      expectRelays(answered, bob.device);
+      // The room's owner issued both: one of them crossed between the nodes.
+      const issued = (await tickets()).map((n, i) => n - before[i]);
+      expect(issued.toSorted()).toEqual([0, 2]);
+    } catch (e) {
+      if (chat) {
+        await info.attach('chat-nodes.log', { body: chat.output(), contentType: 'text/plain' });
+      }
+      throw e;
+    } finally {
+      await browser?.close();
+      pageServer.close();
+      await chat?.stop();
+    }
+  });

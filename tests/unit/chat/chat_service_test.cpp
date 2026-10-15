@@ -1616,6 +1616,44 @@ TEST_F(ChatServiceTest, ACallIsAskedOfTheRoomsOwnerAndItsTicketHandedToTheClient
     EXPECT_EQ(json->find("expires_at")->as_u64(), 1'790'000'060U);
 }
 
+// The owner's answer carries the ticket's relays to the asking node, and its frame to the
+// client names them (ADR-0109): without them a client of an external TURN service cannot reach
+// the media server.
+TEST_F(ChatServiceTest, ACallTicketsRelaysReachTheClientThroughTheOwnersAnswer) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    service_->call(a, {.room = room_id(), .device = *core::DeviceId::parse(kDevice)});
+    ASSERT_EQ(rooms_.asks.size(), 1U);
+    rooms_.asks[0].done(answer(
+        chat::CallOutcome::Ticket,
+        core::ports::MediaTicket{.endpoint = "wss://media.test",
+                                 .credential = "jwt",
+                                 .expires_at = core::WallTime{std::chrono::seconds{1'790'000'060}},
+                                 .ice_servers = {{.urls = {"turn:turn.test:3478?transport=udp",
+                                                           "turns:turn.test:5349?transport=tcp"},
+                                                  .username = "1790014400:alice",
+                                                  .credential = "c2VjcmV0"}}}));
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 1U);
+    const auto json = core::json::parse(got[0]);
+    ASSERT_TRUE(json);
+    EXPECT_EQ(json->find("type")->as_string(), "ticket");
+    const auto* servers = json->find("ice_servers");
+    ASSERT_TRUE(servers && servers->as_array());
+    ASSERT_EQ(servers->as_array()->size(), 1U);
+    const auto& server = servers->as_array()->front();
+    const auto* urls = server.find("urls")->as_array();
+    ASSERT_TRUE(urls);
+    ASSERT_EQ(urls->size(), 2U);
+    EXPECT_EQ((*urls)[0].as_string(), "turn:turn.test:3478?transport=udp");
+    EXPECT_EQ((*urls)[1].as_string(), "turns:turn.test:5349?transport=tcp");
+    EXPECT_EQ(server.find("username")->as_string(), "1790014400:alice");
+    EXPECT_EQ(server.find("credential")->as_string(), "c2VjcmV0");
+}
+
 TEST_F(ChatServiceTest, ACallsDeclineIsAskedOfTheOwnerAndAnsweredWithTheEventTheOthersHear) {
     FakeClient bob;
     const auto b = attach(bob, "bob");

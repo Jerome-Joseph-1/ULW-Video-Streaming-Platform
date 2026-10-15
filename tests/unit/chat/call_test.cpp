@@ -9,6 +9,7 @@
 #include <memory>
 #include <new>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -304,8 +305,12 @@ public:
         j.done(core::ports::MediaTicket{.endpoint = "wss://media.test",
                                         .credential = "jwt-for-" + j.user + "/" + j.device,
                                         .expires_at =
-                                            core::WallTime{std::chrono::seconds{1'790'000'060}}});
+                                            core::WallTime{std::chrono::seconds{1'790'000'060}},
+                                        .ice_servers = ice_servers});
     }
+
+    // The relays every ticket carries, as infra/turn's decorator adds them (ADR-0109).
+    std::vector<core::ports::IceServer> ice_servers;
 
     std::vector<Opening> opens;
     std::vector<Joined> joins;
@@ -422,6 +427,20 @@ TEST_F(CallHandlerTest, AMemberOfADirectChatGetsATicketForItsDeviceInTheRoomsCal
     EXPECT_EQ(answers_[0].ticket->credential, "jwt-for-alice/" + std::string(kDevice));
     EXPECT_EQ(answers_[0].ticket->expires_at, core::WallTime{std::chrono::seconds{1'790'000'060}});
     EXPECT_EQ(handler_->counters().tickets, 1U);
+}
+
+TEST_F(CallHandlerTest, ATicketsRelaysReachTheAskingNodeWithIt) {
+    sfu_.ice_servers = {
+        {.urls = {"turn:turn.test:3478?transport=udp", "turns:turn.test:5349?transport=tcp"},
+         .username = "1790014400:alice",
+         .credential = "c2VjcmV0"},
+        {.urls = {"stun:turn.test:3478"}, .username = "", .credential = ""}};
+    ask("alice", kDevice);
+    sfu_.open();
+    sfu_.issue();
+    ASSERT_EQ(answers_.size(), 1U);
+    ASSERT_TRUE(answers_[0].ticket);
+    EXPECT_EQ(answers_[0].ticket->ice_servers, sfu_.ice_servers);
 }
 
 TEST_F(CallHandlerTest, SomeoneNotOnTheMemberListIsRefusedAndTheSfuNeverHearsOfIt) {
@@ -1737,16 +1756,40 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
     cut.pop_back();
     EXPECT_FALSE(chat::decode_answer(cut));
 
-    // Layout 1, #132's, is another node's: neither its asks nor its answers are read.
-    auto old_ask = chat::encode_request(request);
-    old_ask[0] = std::byte{1};
-    EXPECT_FALSE(chat::decode_request(old_ask));
-    auto old_answer = chat::encode_answer(rung);
-    old_answer[0] = std::byte{1};
-    EXPECT_FALSE(chat::decode_answer(old_answer));
+    // A ticket keeps its relays, every field of each; one cut short is not read.
+    chat::CallAnswer relayed = rung;
+    relayed.ticket->ice_servers = {
+        {.urls = {"turn:turn.test:3478?transport=udp", "turns:turn.test:5349?transport=tcp"},
+         .username = "1790014400:alice",
+         .credential = std::string(300, 'c')},
+        {.urls = {"stun:turn.test:3478"}, .username = "", .credential = ""}};
+    const auto relayed_back = chat::decode_answer(chat::encode_answer(relayed));
+    ASSERT_TRUE(relayed_back && relayed_back->ticket);
+    EXPECT_EQ(relayed_back->ticket->ice_servers, relayed.ticket->ice_servers);
+    EXPECT_EQ(relayed_back->call, call);
+    const auto bytes = chat::encode_answer(relayed);
+    for (std::size_t n = 0; n < bytes.size(); ++n) {
+        EXPECT_FALSE(chat::decode_answer(std::span(bytes).first(n))) << n;
+    }
+    // A list longer than the layout counts is not sent cut: the answer is unreadable.
+    chat::CallAnswer too_long = rung;
+    too_long.ticket->ice_servers.resize(70'000);
+    EXPECT_FALSE(chat::decode_answer(chat::encode_answer(too_long)));
+
+    // Layouts 1 (#132's) and 2 (#181's, which drops a ticket's relays) are other nodes': neither
+    // their asks nor their answers are read.
+    for (const auto layout : {std::byte{1}, std::byte{2}}) {
+        auto other_ask = chat::encode_request(request);
+        other_ask[0] = layout;
+        EXPECT_FALSE(chat::decode_request(other_ask));
+        auto other_answer = chat::encode_answer(relayed);
+        other_answer[0] = layout;
+        EXPECT_FALSE(chat::decode_answer(other_answer));
+    }
+
     auto old_refusal =
         chat::encode_answer({.outcome = CallOutcome::NotMember, .ticket = std::nullopt});
-    old_refusal[0] = std::byte{1};
+    old_refusal[0] = std::byte{2};
     EXPECT_FALSE(chat::decode_answer(old_refusal));
 }
 
