@@ -67,6 +67,10 @@ enum class CallOutcome : std::uint8_t {
     Expelled = 10,
     // The group call holds as many devices as it takes.
     Full = 11,
+    // A status ask only (CallStatusRequest): the call still rings (for the user asked about, if
+    // one was), or it is on and no longer rings (for them). A call that is over is NoCall.
+    Ringing = 12,
+    Answered = 13,
 };
 
 // A ticket for this device.
@@ -88,7 +92,15 @@ struct CallSignalRequest {
     std::optional<core::UserId> target = std::nullopt;
 };
 
-using CallAsk = std::variant<CallRequest, CallSignalRequest>;
+// Whether the room's call `call` still rings (ADR-0111): for `user` when named, who may be one
+// of a group call's callees still rung while others are in it. Asked by the service API for a
+// notification that arrived late. Read only, of the owner's state; no member list is read.
+struct CallStatusRequest {
+    CallId call;
+    std::optional<core::UserId> user = std::nullopt;
+};
+
+using CallAsk = std::variant<CallRequest, CallSignalRequest, CallStatusRequest>;
 
 struct CallAnswer {
     CallOutcome outcome = CallOutcome::Unavailable;
@@ -107,6 +119,7 @@ struct CallAnswer {
 // layouts. A decode that fails is an answer nobody can act on.
 [[nodiscard]] std::vector<std::byte> encode_request(const CallRequest& request);
 [[nodiscard]] std::vector<std::byte> encode_request(const CallSignalRequest& request);
+[[nodiscard]] std::vector<std::byte> encode_request(const CallStatusRequest& request);
 [[nodiscard]] std::optional<CallAsk> decode_request(std::span<const std::byte> bytes);
 [[nodiscard]] std::vector<std::byte> encode_answer(const CallAnswer& answer);
 [[nodiscard]] std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes);
@@ -223,6 +236,8 @@ public:
     [[nodiscard]] bool enabled() const noexcept { return sfu_ != nullptr; }
     [[nodiscard]] const CallCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] const RingCounters& ring_counters() const noexcept { return ringer_.counters(); }
+    // Who hears the events of the calls this node owns (ADR-0111); nullptr: nobody.
+    void watch_rings(IRingWatcher* watcher) noexcept { ringer_.watch(watcher); }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
     // Calls ringing or answered in the rooms this node owns.
     [[nodiscard]] std::size_t calls() const noexcept { return ringer_.calls(); }

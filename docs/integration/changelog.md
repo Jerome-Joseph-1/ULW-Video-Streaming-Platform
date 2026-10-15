@@ -3,6 +3,31 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-15: notification events for members who are not connected (v1.2.0)
+
+<!-- apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender), apps/chat/src/session.cpp (device_of), apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/call.cpp (CallStatusRequest), migrations/0022_notify.sql, deploy/kubernetes/components/notifications/kustomization.yaml, docs/adr/0111-notification-events-for-members-not-connected.md -->
+
+Additive (versioning rule 1): an opt-in hook, an optional query parameter on the socket's
+upgrade, two service API operations, and a migration. Off unless the operator sets
+`ULW_NOTIFY_URL`; nothing changes for a deployment that does not.
+
+| Before | Now |
+|---|---|
+| A member with no socket open heard nothing of a call or a message | With `ULW_NOTIFY_URL` (components/notifications), every chat node POSTs signed events to the operator's receiver: `call_ringing` with each callee's connected devices, how the ring ended, and `message` naming who is owed word of it, never its content ([Notifications](notifications.md)) |
+| A socket was its user's, no device named | `/rt?device=<uuid>` names it (optional; a malformed one is `400`) ([Chat](chat.md#connecting)) |
+| The service API managed member lists | It also declines a call for a member (`decline_call`) and says whether one still rings (`call_status`) ([Chat](chat.md#the-service-api)) |
+
+What to do:
+
+- **Clients:** name the device on every socket, `/rt?device=<the id you send in call>`, so that
+  a ring is not pushed to a device that already rings. Answering from a notification is what you
+  do already: connect, `join`, and `call` with `answer` naming the ring.
+- **Backends:** nothing unless your operator turns it on; then receive the events
+  ([Notifications](notifications.md)).
+- **Operators:** migration 0022 runs with the gateway as usual. To turn the hook on, RUNBOOK.md,
+  step 7, "Notifications". During the rolling update a `call_status` asked of a room owned by a
+  chat node still on v1.1 is `503` (retry).
+
 ## 2026-10-15: call tickets keep their `ice_servers` across chat's nodes (v1.1.1)
 
 <!-- apps/chat/src/call.cpp (encode_answer, decode_answer, kLayout), apps/chat/src/layout.hpp, tests/call/direct-call.spec.mjs, docs/adr/0109-an-external-turn-service-as-an-alternative-to-stunner.md -->

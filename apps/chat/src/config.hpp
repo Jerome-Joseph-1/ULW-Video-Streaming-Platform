@@ -50,6 +50,19 @@ struct ServiceApiConfig {
     std::uint16_t port = 0;
 };
 
+// The notification hook (ADR-0111): where each node POSTs its events, and the secret it signs
+// them with. Never logged but for the URL's scheme and host.
+struct NotifyConfig {
+    // ULW_NOTIFY_URL: http:// or https://, inside the cluster.
+    std::string url;
+    // ULW_NOTIFY_SECRET: at least 32 bytes.
+    std::string secret;
+    // ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS: 5 to 3600, 30 by default.
+    core::Millis message_interval{30'000};
+};
+
+inline constexpr std::size_t kMinNotifySecretBytes = 32;
+
 struct Config {
     core::NodeId node;
     // Clients: WebSocket upgrades on /rt, and the health and metrics endpoints.
@@ -100,6 +113,8 @@ struct Config {
     std::optional<CallsConfig> calls;
     // Unset when ULW_SERVICE_PORT is: no service API.
     std::optional<ServiceApiConfig> service_api;
+    // Unset when ULW_NOTIFY_URL is: no hook, no registry writes (ADR-0111).
+    std::optional<NotifyConfig> notify;
     // Who to become when started as root.
     std::string run_as_user;
     // Stay root when started as root with no run_as_user; otherwise that is refused.

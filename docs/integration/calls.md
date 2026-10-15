@@ -176,7 +176,11 @@ What the ring does not cover:
   up to 10 s past it while LiveKit issues it, so the answer is not lost to `call_missed`: the
   caller may hear `call_answered` a few seconds after `expires_at`, and the callee's own
   devices should keep the call they answered even past `expires_at`.
-- **A member with no socket open hears nothing**: there are no push notifications yet. A
+- **A member with no socket open hears nothing** from chat itself. Where the operator turns the
+  notification hook on, its backend is told of the ring, with which of the callee's devices are
+  connected, and can push to the others; a socket opened from that notification answers the
+  ring by its id as any other, and the backend can decline it or ask whether it still rings
+  ([notifications.md](notifications.md)). A
   device that connects while the call still rings hears the next announcement, within 15 s.
   Nothing is replayed for a call that ended while a socket was away, including the moment a
   socket reconnects with a fresh token (chat closes it when its token expires): a ring that

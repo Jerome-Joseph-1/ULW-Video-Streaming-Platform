@@ -1,0 +1,103 @@
+# Notification events for members who are not connected (docs/adr/0111, RUNBOOK.md step 7,
+# "Notifications"). An overlay lists this after components/operator-config to turn it on:
+#   components:
+#     - ../../components/operator-config
+#     - ../../components/notifications
+# Without it, chat sends nothing and writes nothing to the connectivity registry, as before.
+#
+# What it changes: every chat pod POSTs its events, signed with NOTIFY_SECRET from chat's own
+# Secret (CHAT_SECRET), to NOTIFY_URL, a receiver inside the cluster that the operator runs; and
+# chat may reach that receiver's port in its namespace (networkpolicy.yaml). Every value here is
+# an example that the replacements below fill from config.env.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+resources:
+  - networkpolicy.yaml
+patches:
+  - target:
+      kind: Deployment
+      name: chat
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: chat
+        namespace: ulw
+      spec:
+        template:
+          spec:
+            containers:
+              - name: chat
+                env:
+                  - name: ULW_NOTIFY_URL
+                    value: http://push-receiver.askedin.svc.cluster.local:8080/ulw/events
+                  - name: ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS
+                    value: "30"
+                  - name: ULW_NOTIFY_SECRET
+                    valueFrom:
+                      secretKeyRef:
+                        name: chat-secrets
+                        key: NOTIFY_SECRET
+
+replacements:
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NAMESPACE
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: chat-notifications
+        fieldPaths:
+          - metadata.namespace
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NOTIFY_URL
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_NOTIFY_URL].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NOTIFY_MESSAGE_INTERVAL_SECONDS
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS].value
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.CHAT_SECRET
+    targets:
+      - select:
+          kind: Deployment
+          name: chat
+        fieldPaths:
+          - spec.template.spec.containers.[name=chat].env.[name=ULW_NOTIFY_SECRET].valueFrom.secretKeyRef.name
+  # Where the receiver runs: its namespace and its pods' port.
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NOTIFY_NAMESPACE
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: chat-notifications
+        fieldPaths:
+          - spec.egress.0.to.0.namespaceSelector.matchLabels.[kubernetes.io/metadata.name]
+  - source:
+      kind: ConfigMap
+      name: ulw-operator-config
+      fieldPath: data.NOTIFY_PORT
+    targets:
+      - select:
+          kind: NetworkPolicy
+          name: chat-notifications
+        fieldPaths:
+          - spec.egress.0.ports.0.port

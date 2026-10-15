@@ -81,7 +81,7 @@ private:
 };
 
 // The result a catalog call delivers, once the reactor has delivered it.
-template <class T> class Reply {
+template <class T> class Awaited {
 public:
     [[nodiscard]] core::ports::CatalogCallback<T> callback() {
         return [this](core::ports::CatalogResult<T> r) noexcept {
@@ -100,7 +100,7 @@ private:
 
 // Pumps until the reply arrives; a reply that never comes fails the test.
 template <class T>
-core::ports::CatalogResult<T> wait(net::IReactor& reactor, Reply<T>& reply,
+core::ports::CatalogResult<T> wait(net::IReactor& reactor, Awaited<T>& reply,
                                    std::chrono::milliseconds limit = std::chrono::seconds(15)) {
     if (!pump_until(reactor, [&] { return reply.ready(); }, limit)) {
         ADD_FAILURE() << "catalog call never answered";

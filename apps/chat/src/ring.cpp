@@ -188,6 +188,25 @@ bool Ringer::fits(const core::RoomId& room, const core::UserId& user) const noex
            std::ranges::find(call.joined, user) != call.joined.end();
 }
 
+std::optional<bool> Ringer::ringing(const core::RoomId& room, const CallId& call,
+                                    const std::optional<core::UserId>& user) const noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end() || it->second.id != call) {
+        return std::nullopt;
+    }
+    const Call& c = it->second;
+    if (!user) {
+        return !c.answered;
+    }
+    if (!member_of(c, *user)) {
+        return std::nullopt;
+    }
+    if (c.kind == CallKind::Direct || *user == c.caller) {
+        return !c.answered;
+    }
+    return std::ranges::find(c.ringing, *user) != c.ringing.end();
+}
+
 std::optional<CallId> Ringer::call_of(const core::RoomId& room) const noexcept {
     const auto it = calls_.find(room);
     if (it == calls_.end()) {
@@ -368,6 +387,13 @@ void Ringer::start(const core::RoomId& room, const core::UserId& caller,
     }
     ++counters_.started;
     announce(room, call, RingEvent::Ringing, std::nullopt);
+    if (watcher_ != nullptr) {
+        try {
+            observe(room, call, RingEvent::Ringing, std::nullopt, call.callees);
+        } catch (const std::bad_alloc&) {
+            ++counters_.allocation_failures;
+        }
+    }
 }
 
 void Ringer::schedule(const core::RoomId& room, Call& call, core::MonoTime due) {
@@ -724,6 +750,9 @@ void Ringer::tick_group(const core::RoomId& room, Calls::iterator it, core::Mono
                 ++counters_.missed;
                 tell(room, call, member, RingEvent::Missed, std::nullopt);
             }
+            if (watcher_ != nullptr && !call.ringing.empty()) {
+                observe(room, call, RingEvent::Missed, std::nullopt, std::move(call.ringing));
+            }
             call.ringing.clear();
         }
     } else if (rings && now >= call.next_announce) {
@@ -788,8 +817,38 @@ void Ringer::tell(const core::RoomId& room, const Call& call, const core::UserId
     }
 }
 
+void Ringer::observe(const core::RoomId& room, const Call& call, RingEvent event,
+                     const std::optional<core::UserId>& by,
+                     std::vector<core::UserId> users) noexcept {
+    if (watcher_ == nullptr) {
+        return;
+    }
+    watcher_->observed(CallEvent{.event = event,
+                                 .room = room,
+                                 .call = call.id,
+                                 .kind = call.kind,
+                                 .caller = call.caller,
+                                 .users = std::move(users),
+                                 .by = by,
+                                 .expires_at = call.expires_at});
+}
+
 void Ringer::announce(const core::RoomId& room, const Call& call, RingEvent event,
                       const std::optional<core::UserId>& by) noexcept {
+    // The first Ringing is observed by start(), with whom it rang; again it is not news, nor is a
+    // group call's Left or Moved.
+    if (watcher_ != nullptr && event != RingEvent::Ringing && event != RingEvent::Left &&
+        event != RingEvent::Moved) {
+        try {
+            std::vector<core::UserId> users;
+            if (event == RingEvent::Missed) {
+                users = call.kind == CallKind::Group ? call.ringing : call.callees;
+            }
+            observe(room, call, event, by, std::move(users));
+        } catch (const std::bad_alloc&) {
+            ++counters_.allocation_failures;
+        }
+    }
     if (call.kind == CallKind::Direct) {
         tell(room, call, call.caller, event, by);
         for (const core::UserId& callee : call.callees) {

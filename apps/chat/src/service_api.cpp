@@ -10,6 +10,7 @@
 #include "infra/auth/token_extractor.hpp"
 #include "rt/message_key.hpp"
 
+#include "call.hpp"
 #include "envelope.hpp"
 #include "named_rooms.hpp"
 #include "presence_room.hpp"
@@ -51,6 +52,8 @@ enum class Op : std::uint8_t {
     CloseDirect,
     Rooms,
     Members,
+    DeclineCall,
+    CallStatus,
 };
 
 Op op_of(std::string_view target) noexcept {
@@ -58,7 +61,7 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 7> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 9> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
@@ -66,6 +69,8 @@ Op op_of(std::string_view target) noexcept {
         {"close_direct", Op::CloseDirect},
         {"rooms", Op::Rooms},
         {"members", Op::Members},
+        {"decline_call", Op::DeclineCall},
+        {"call_status", Op::CallStatus},
     }};
     const auto* found = std::ranges::find(kOps, name, &std::pair<std::string_view, Op>::first);
     return found == kOps.end() ? Op::None : found->second;
@@ -193,6 +198,7 @@ class ServiceApi::Connection final : public net::IStreamHandler,
 public:
     Connection(ServiceApi& api, std::uint64_t id) noexcept : api_(api), id_(id), parser_(*this) {}
     ~Connection() override {
+        stop_asking();
         cancel_timer();
         if (waiting_keys_) {
             api_.verifier_.cancel_wait(*this);
@@ -230,6 +236,7 @@ public:
             return;
         }
         closed_ = true;
+        stop_asking();
         cancel_timer();
         if (waiting_keys_) {
             waiting_keys_ = false;
@@ -532,6 +539,12 @@ private:
             break;
         case Op::Members:
             started = members(*json);
+            break;
+        case Op::DeclineCall:
+            started = decline_call(*json);
+            break;
+        case Op::CallStatus:
+            started = call_status(*json);
             break;
         case Op::None:
             started = std::unexpected(Refusal{.status = Status::NotFound, .reason = "not_found"});
@@ -842,6 +855,210 @@ private:
         return {};
     }
 
+    // A room a call may be in: not a presence room nor a stream's live chat. Its owner reads the
+    // rest, its kind and its members, from the store.
+    static Parsed<core::RoomId> call_room_of(const core::json::Value& body) {
+        auto room = room_of(body, "room");
+        if (room && core::ports::is_stream_chat(*room)) {
+            return std::unexpected(kBadRoom);
+        }
+        return room;
+    }
+
+    static Parsed<CallId> call_of(const core::json::Value& body) {
+        const core::json::Value* v = body.find("call");
+        const auto text = v == nullptr ? std::nullopt : v->as_string();
+        if (!text) {
+            return std::unexpected(kMalformed);
+        }
+        const auto call = CallId::parse(*text);
+        if (!call) {
+            return std::unexpected(Refusal{.status = Status::BadRequest, .reason = "bad_call"});
+        }
+        return *call;
+    }
+
+    // What the owner answered an ask about a call, as the backend sees it; `done` writes the
+    // answer to the outcomes the ask is for.
+    using CallDone = std::move_only_function<bool(std::string& out, CallOutcome outcome)>;
+
+    // Joins the room here for as long as the ask takes, as a client's socket would be, asks its
+    // owner, and leaves.
+    // `read`: counted as a read, not a change.
+    Parsed<void> ask_call(const core::RoomId& room, std::vector<std::byte> request, CallDone done,
+                          bool read = false) {
+        if (api_.rooms_ == nullptr) {
+            return std::unexpected(
+                Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
+        }
+        asking_ = room;
+        call_done_ = std::move(done);
+        call_read_ = read;
+        api_.rooms_->join(
+            room, asker_,
+            [api = &api_, id = id_, request = std::move(request)](
+                std::expected<std::uint64_t, rt::RouteError> joined) mutable noexcept {
+                Connection* c = api->find(id);
+                if (c == nullptr || !c->asking_) {
+                    return;
+                }
+                if (!joined) {
+                    c->call_answered(std::unexpected(joined.error()));
+                    return;
+                }
+                api->rooms_->ask_owner(
+                    *c->asking_, c->asker_, request,
+                    [api,
+                     id](std::expected<std::vector<std::byte>, rt::RouteError> answer) noexcept {
+                        if (Connection* asked = api->find(id); asked != nullptr) {
+                            asked->call_answered(std::move(answer));
+                        }
+                    });
+            });
+        return {};
+    }
+
+    void call_answered(std::expected<std::vector<std::byte>, rt::RouteError> answer) noexcept {
+        CallDone done = std::move(call_done_);
+        stop_asking();
+        const auto decoded =
+            answer ? decode_answer(*answer) : std::optional<CallAnswer>(std::nullopt);
+        if (!decoded || !done) {
+            ++api_.counters_.unavailable;
+            refused(Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
+            return;
+        }
+        try {
+            std::string out;
+            if (done(out, decoded->outcome)) {
+                ++(call_read_ ? api_.counters_.reads : api_.counters_.changes);
+                answered(Status::Ok, out);
+                return;
+            }
+        } catch (const std::bad_alloc&) {
+            ++api_.counters_.unavailable;
+            refused(Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
+            return;
+        }
+        Refusal refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"};
+        switch (decoded->outcome) {
+        case CallOutcome::NoCall:
+            refusal = {.status = Status::Conflict, .reason = "no_call"};
+            break;
+        case CallOutcome::NotMember:
+            refusal = {.status = Status::Conflict, .reason = "not_member"};
+            break;
+        case CallOutcome::NotCallable:
+            refusal = {.status = Status::Conflict, .reason = "not_callable"};
+            break;
+        case CallOutcome::Disabled:
+            refusal = {.status = Status::Conflict, .reason = "calls_disabled"};
+            break;
+        default:
+            break;
+        }
+        if (refusal.status == Status::Conflict) {
+            ++api_.counters_.refused;
+        } else {
+            ++api_.counters_.unavailable;
+        }
+        refused(refusal);
+    }
+
+    void stop_asking() noexcept {
+        if (asking_ && api_.rooms_ != nullptr) {
+            // Drops the join or the ask still under way, whose callbacks are then never called.
+            api_.rooms_->leave(*asking_, asker_);
+        }
+        asking_.reset();
+    }
+
+    Parsed<void> decline_call(const core::json::Value& body) {
+        if (!only(body, {"room", "call", "user"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto room = call_room_of(body);
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        auto call = call_of(body);
+        if (!call) {
+            return std::unexpected(call.error());
+        }
+        auto user = user_of(body, "user");
+        if (!user) {
+            return std::unexpected(user.error());
+        }
+        // The owner's own decline, from a member as from their socket: checked against the
+        // member list there, and allowed only to a callee the call still rings.
+        return ask_call(
+            *room,
+            encode_request(
+                CallSignalRequest{.user = *user, .signal = CallSignal::Decline, .call = *call}),
+            [room = *room, call = *call, user = *user](std::string& out, CallOutcome outcome) {
+                if (outcome != CallOutcome::Done) {
+                    return false;
+                }
+                out += R"({"type":"call_declined","room":")";
+                out += room.to_string();
+                out += R"(","call":")";
+                out += call.to_string();
+                out += R"(","by":)";
+                core::json::append_string(out, user.view());
+                out += '}';
+                return true;
+            });
+    }
+
+    Parsed<void> call_status(const core::json::Value& body) {
+        if (!only(body, {"room", "call", "user"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto room = call_room_of(body);
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        auto call = call_of(body);
+        if (!call) {
+            return std::unexpected(call.error());
+        }
+        std::optional<core::UserId> user;
+        if (body.find("user") != nullptr) {
+            auto named = user_of(body, "user");
+            if (!named) {
+                return std::unexpected(named.error());
+            }
+            user = *named;
+        }
+        return ask_call(
+            *room, encode_request(CallStatusRequest{.call = *call, .user = user}),
+            [room = *room, call = *call](std::string& out, CallOutcome outcome) {
+                std::string_view status;
+                switch (outcome) {
+                case CallOutcome::Ringing:
+                    status = "ringing";
+                    break;
+                case CallOutcome::Answered:
+                    status = "answered";
+                    break;
+                case CallOutcome::NoCall:
+                    status = "over";
+                    break;
+                default:
+                    return false;
+                }
+                out += R"({"type":"call_status","room":")";
+                out += room.to_string();
+                out += R"(","call":")";
+                out += call.to_string();
+                out += R"(","status":")";
+                out += status;
+                out += R"("})";
+                return true;
+            },
+            /*read=*/true);
+    }
+
     void refuse_with(const Refusal& refusal) noexcept {
         respond_error(refusal.status, refusal.reason);
     }
@@ -944,13 +1161,21 @@ private:
     bool closing_ = false;
     bool attached_ = false;
     bool closed_ = false;
+    // A call's ask: the room joined here for it, until its owner answers.
+    struct Asker final : rt::IMember {
+        void deliver(const rt::Message& /*message*/) noexcept override {}
+    };
+    Asker asker_;
+    std::optional<core::RoomId> asking_;
+    CallDone call_done_;
+    bool call_read_ = false;
 };
 
 ServiceApi::ServiceApi(net::IReactor& reactor, const core::ports::IClock& clock,
                        core::ports::IJwtVerifier& verifier, core::ports::IMessageStore& store,
-                       ServiceApiLimits limits)
-    : reactor_(reactor), clock_(clock), verifier_(verifier), store_(store), limits_(limits),
-      bucket_(limits.burst, limits.per_second, reactor.now()) {}
+                       ServiceApiLimits limits, IRooms* rooms)
+    : reactor_(reactor), clock_(clock), verifier_(verifier), store_(store), rooms_(rooms),
+      limits_(limits), bucket_(limits.burst, limits.per_second, reactor.now()) {}
 
 TokenBucket& ServiceApi::failures_of(const net::IpAddress& peer) {
     const auto it =

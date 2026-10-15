@@ -42,6 +42,14 @@ public:
     virtual void allocation_failed() noexcept = 0;
 };
 
+// Told of each message a client here sent, once its room's owner sequenced it (ADR-0111).
+class IMessageWatcher {
+public:
+    virtual ~IMessageWatcher() = default;
+    virtual void message(const core::RoomId& room, const core::UserId& sender,
+                         std::uint64_t seq) noexcept = 0;
+};
+
 // The room plane: rt::RoomRouter, or a fake in tests.
 class IRooms {
 public:
@@ -280,6 +288,8 @@ public:
         }
     }
 
+    // Who hears of the messages clients here send; nullptr: nobody, the default.
+    void watch_messages(IMessageWatcher* watcher) noexcept { message_watcher_ = watcher; }
     [[nodiscard]] const ServiceCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
     [[nodiscard]] std::size_t buffered_bytes() const noexcept { return buffered_bytes_; }
@@ -415,6 +425,7 @@ private:
     bool stopped_ = false;
     std::array<core::ports::IMemberListener*, kMaxAlsoTold> also_{};
     bool resync_owed_ = false;
+    IMessageWatcher* message_watcher_ = nullptr;
 };
 
 } // namespace chat

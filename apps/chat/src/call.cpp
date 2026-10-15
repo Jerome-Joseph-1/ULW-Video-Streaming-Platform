@@ -24,6 +24,9 @@ constexpr std::uint8_t kLayout = 3;
 // know and answers Unavailable, which the client retries).
 constexpr std::uint8_t kTicket = 0;
 constexpr std::uint8_t kAnswer = 6;
+// A status ask: no user first, as every other kind has, but a flag and then perhaps one. A node
+// of an earlier release reads it as malformed and answers Unavailable.
+constexpr std::uint8_t kStatus = 7;
 
 // A direct chat lists two members; a few more are read, for a list that grew. A group call
 // rings at most kMaxGroupCallees others, the caller aside.
@@ -137,12 +140,51 @@ std::vector<std::byte> encode_request(const CallSignalRequest& request) {
     return out;
 }
 
+namespace {
+
+// A status ask past its kind: the call, then a flag and perhaps a user.
+std::optional<CallAsk> decode_status(layout::Reader& in) {
+    const auto call = in.uuid<CallId>();
+    const auto has_user = in.u8();
+    if (!call || !has_user || *has_user > 1) {
+        return std::nullopt;
+    }
+    std::optional<core::UserId> user;
+    if (*has_user == 1) {
+        user = in.user();
+        if (!user) {
+            return std::nullopt;
+        }
+    }
+    if (!in.empty()) {
+        return std::nullopt;
+    }
+    return CallStatusRequest{.call = *call, .user = user};
+}
+
+} // namespace
+
+std::vector<std::byte> encode_request(const CallStatusRequest& request) {
+    std::vector<std::byte> out;
+    put_u8(out, kLayout);
+    put_u8(out, kStatus);
+    put_uuid(out, request.call);
+    put_u8(out, request.user ? 1 : 0);
+    if (request.user) {
+        put_short(out, request.user->view());
+    }
+    return out;
+}
+
 std::optional<CallAsk> decode_request(std::span<const std::byte> bytes) {
     layout::Reader in{bytes};
     if (in.u8() != kLayout) {
         return std::nullopt;
     }
     const auto what = in.u8();
+    if (what == kStatus) {
+        return decode_status(in);
+    }
     auto user = in.user();
     if (!what || !user ||
         (*what > static_cast<std::uint8_t>(CallSignal::Expel) && *what != kAnswer)) {
@@ -219,7 +261,7 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
         return std::nullopt;
     }
     const auto outcome = in.u8();
-    if (!outcome || *outcome > static_cast<std::uint8_t>(CallOutcome::Full)) {
+    if (!outcome || *outcome > static_cast<std::uint8_t>(CallOutcome::Answered)) {
         return std::nullopt;
     }
     CallAnswer answer{.outcome = static_cast<CallOutcome>(*outcome), .ticket = std::nullopt};
@@ -306,6 +348,16 @@ void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> re
         if (in_flight_ >= limits_.max_in_flight) {
             ++counters_.busy;
             finish(answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
+            return;
+        }
+        if (const auto* s = std::get_if<CallStatusRequest>(&*asked)) {
+            // What the ringer knows now; nothing to wait on.
+            const auto ringing = ringer_.ringing(room, s->call, s->user);
+            CallOutcome outcome = CallOutcome::NoCall;
+            if (ringing) {
+                outcome = *ringing ? CallOutcome::Ringing : CallOutcome::Answered;
+            }
+            finish(answer, {.outcome = outcome, .ticket = std::nullopt});
             return;
         }
         ++in_flight_;

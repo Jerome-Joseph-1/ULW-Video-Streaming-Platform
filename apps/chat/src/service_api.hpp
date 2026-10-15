@@ -8,6 +8,7 @@
 #include "net/reactor.hpp"
 #include "os/unique_fd.hpp"
 
+#include "chat_service.hpp"
 #include "token_bucket.hpp"
 
 #include <cstddef>
@@ -86,9 +87,11 @@ struct ServiceApiCounters {
 // only. The store's answers must not reach a destroyed ServiceApi: destroy the store first.
 class ServiceApi final : public net::IAcceptHandler {
 public:
+    // `rooms` is the room plane decline_call and call_status ask the room's owner through
+    // (ADR-0111); null, they are answered unavailable. It must outlive the API.
     ServiceApi(net::IReactor& reactor, const core::ports::IClock& clock,
                core::ports::IJwtVerifier& verifier, core::ports::IMessageStore& store,
-               ServiceApiLimits limits);
+               ServiceApiLimits limits, IRooms* rooms = nullptr);
     ~ServiceApi() override;
     ServiceApi(const ServiceApi&) = delete;
     ServiceApi& operator=(const ServiceApi&) = delete;
@@ -116,6 +119,7 @@ private:
     const core::ports::IClock& clock_;
     core::ports::IJwtVerifier& verifier_;
     core::ports::IMessageStore& store_;
+    IRooms* rooms_;
     ServiceApiLimits limits_;
     ServiceApiCounters counters_;
     TokenBucket bucket_;

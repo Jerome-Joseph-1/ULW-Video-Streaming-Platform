@@ -111,7 +111,8 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       shared_(deps.messages), chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
       presence_(rooms_, shared_, deps.reactor, deps.clock, deps.node, limits_.presence),
       calls_(deps.messages, deps.sfu, rooms_, deps.clock, deps.random, limits_.calls),
-      service_api_(deps.reactor, deps.clock, deps.verifier, deps.messages, limits_.service_api),
+      service_api_(deps.reactor, deps.clock, deps.verifier, deps.messages, limits_.service_api,
+                   &rooms_),
       directory_(deps.registry, deps.key_packages, shared_, deps.clock, limits_.directory),
       // One more than the connections that can pin an entry, so a new client always finds one.
       clients_(std::max(kClientEntries, limits_.max_connections + 1),
@@ -124,6 +125,11 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     deps_.router.hear(&bell_);
     chat_.also_tell(&calls_);
     chat_.also_tell(&presence_);
+    if (deps_.notifier != nullptr) {
+        chat_.watch_messages(deps_.notifier);
+        calls_.watch_rings(deps_.notifier);
+        deps_.notifier->start();
+    }
 }
 
 ChatServer::~ChatServer() {
@@ -131,6 +137,8 @@ ChatServer::~ChatServer() {
     // service, which would otherwise ask it what a resync still owes.
     chat_.stop();
     chat_.also_tell(nullptr);
+    chat_.watch_messages(nullptr);
+    calls_.watch_rings(nullptr);
     deps_.router.serve(nullptr);
     deps_.router.hear(nullptr);
     deps_.reactor.cancel_timer(drain_timer_);
@@ -300,12 +308,20 @@ void ChatServer::begin_drain() noexcept {
     // A release that fails leaves the rooms to go stale, which costs the other nodes
     // rt::kOwnerStaleAfter; the drain goes on either way.
     deps_.router.release_rooms([this](rt::StoreResult<void>) noexcept { released_ = true; });
+    // The registry forgets this node's sockets now rather than when its lease lapses: its members
+    // are reconnecting elsewhere, and a ring meanwhile should push to them.
+    if (deps_.notifier != nullptr) {
+        deps_.notifier->stop([this]() noexcept { forgotten_ = true; });
+    } else {
+        forgotten_ = true;
+    }
     drain_timer_ = deps_.reactor.arm_timer(limits_.drain_deadline, *this);
 }
 
 void ChatServer::on_timeout() noexcept {
     drain_timer_ = {};
     released_ = true;
+    forgotten_ = true;
     sessions_.for_each_live([](Session& s) { s.close(); });
 }
 
@@ -331,6 +347,39 @@ std::size_t ChatServer::http_parsers() const noexcept {
 void ChatServer::retire(net::Slab<Session>::Handle handle) noexcept {
     sessions_.retire(handle);
 }
+
+namespace {
+
+std::string render_notify_metrics(const Notifier* notifier, const HookSender* hook) {
+    if (notifier == nullptr || hook == nullptr) {
+        return "notify_enabled 0\n";
+    }
+    const NotifyCounters& n = notifier->counters();
+    const SenderCounters& h = hook->counters();
+    return std::format("notify_enabled 1\n"
+                       "notify_events_total{{outcome=\"sent\"}} {}\n"
+                       "notify_events_total{{outcome=\"dropped\"}} {}\n"
+                       "notify_events_total{{outcome=\"failed\"}} {}\n"
+                       "notify_events_queued {}\n"
+                       "notify_requests_total{{result=\"ok\"}} {}\n"
+                       "notify_requests_total{{result=\"failed\"}} {}\n"
+                       "notify_registry_total{{op=\"renew\",result=\"ok\"}} {}\n"
+                       "notify_registry_total{{op=\"renew\",result=\"failed\"}} {}\n"
+                       "notify_registry_total{{op=\"sync\",result=\"ok\"}} {}\n"
+                       "notify_registry_total{{op=\"sync\",result=\"failed\"}} {}\n"
+                       "notify_registry_resyncs_total {}\n"
+                       "notify_sockets {}\n"
+                       "notify_sockets_unwritten {}\n"
+                       "notify_ringing_devices_unknown_total {}\n"
+                       "notify_message_lookups_failed_total {}\n"
+                       "notify_allocation_failures_total {}\n",
+                       h.sent, h.dropped, h.failed, hook->queued(), h.requests - h.failed_requests,
+                       h.failed_requests, n.renewals, n.renew_failures, n.syncs, n.sync_failures,
+                       n.resyncs, notifier->sockets(), notifier->unwritten(), n.lookups_unknown,
+                       n.message_failures, n.allocation_failures);
+}
+
+} // namespace
 
 std::string ChatServer::render_metrics() const {
     const Counters& c = counters_;
@@ -517,7 +566,9 @@ std::string ChatServer::render_metrics() const {
                        api.changes, api.reads, api.unauthorized, api.forbidden, api.limited,
                        api.bad_requests, api.refused, api.unavailable) +
            // The key directory (ADR-0102), on the node the asking client is on.
-           render_directory_metrics(directory_.counters());
+           render_directory_metrics(directory_.counters()) +
+           // The notification hook (ADR-0111), when it is set.
+           render_notify_metrics(deps_.notifier, deps_.hook);
 }
 
 } // namespace chat

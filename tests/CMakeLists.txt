@@ -486,12 +486,14 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/membership_test.cpp
     unit/chat/memory_store_access_test.cpp
     unit/chat/named_rooms_test.cpp
+    unit/chat/notify_sender_test.cpp
+    unit/chat/notify_test.cpp
     unit/chat/presence_test.cpp
     unit/chat/ring_test.cpp
     unit/chat/service_api_test.cpp
     unit/chat/session_test.cpp
     unit/chat/token_bucket_test.cpp)
-target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::os
+target_link_libraries(chat_unit_tests PRIVATE ulw::chat_lib ulw::messages_memory ulw::notify_memory ulw::os
     ulw::test_http_server ulw::e2ee_directory_memory)
 target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 
@@ -501,11 +503,12 @@ target_include_directories(chat_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 ulw_add_test_suite(chat_cluster_tests integration
     integration/chat_cluster_test.cpp
     integration/chat_key_directory_test.cpp
+    integration/chat_notify_test.cpp
     integration/postgres_harness.cpp
     support/child_process.cpp
     SERIAL "*.ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsToOneRoom/*")
 target_link_libraries(chat_cluster_tests PRIVATE ulw::pg_store ulw::devtoken ulw::auth ulw::codec_ws
-    ulw::net_lib ulw::os ulw::sfu_livekit ulw::test_tls PkgConfig::LIBPQ)
+    ulw::net_lib ulw::os ulw::sfu_livekit ulw::test_tls ulw::test_http_server PkgConfig::LIBPQ)
 target_include_directories(chat_cluster_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/infra/postgres/src
     ${PROJECT_SOURCE_DIR}/infra/sfu/livekit/src)
@@ -555,6 +558,23 @@ ulw_add_test_suite(e2ee_unit_tests unit
 target_link_libraries(e2ee_unit_tests PRIVATE ulw::e2ee_directory_memory)
 target_include_directories(e2ee_unit_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/tests/conformance)
+
+# The connectivity registry of the notification hook (ADR-0111): one contract, in memory and on
+# Postgres.
+ulw_add_test_suite(notify_unit_tests unit
+    conformance/notify_store_contract.cpp
+    unit/notify/memory_connectivity_test.cpp)
+target_link_libraries(notify_unit_tests PRIVATE ulw::notify_memory)
+target_include_directories(notify_unit_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/tests/conformance)
+
+ulw_add_test_suite(notify_integration_tests integration
+    conformance/notify_store_contract.cpp
+    integration/postgres_notify_test.cpp
+    integration/postgres_harness.cpp)
+target_link_libraries(notify_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
+target_include_directories(notify_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
 
 ulw_add_test_suite(e2ee_integration_tests integration
     conformance/e2ee_directory_contract.cpp

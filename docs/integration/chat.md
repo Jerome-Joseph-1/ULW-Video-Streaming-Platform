@@ -16,6 +16,7 @@ one WebSocket to it and send JSON messages in text frames.
 | | |
 |---|---|
 | Endpoint | `GET /rt` with a WebSocket upgrade (RFC 6455, version 13) on the chat host: `wss://<CHAT_HOST>/rt` |
+| Device | Optional: `/rt?device=<uuid>`, the device this socket belongs to (the id it sends in `call`), for the operator's notifications ([notifications.md](notifications.md#devices)). Other query parameters are ignored |
 | Subprotocols, extensions | None. `permessage-deflate` is not offered. |
 | Auth | The identity provider's token, as for the gateway ([auth.md](auth.md)): `Authorization: Bearer <token>`, or the `ULW_AUTH_COOKIE` cookie |
 | Cookie and `Origin` | A cookie token is accepted only when the request's `Origin` is listed exactly in `ULW_ALLOWED_ORIGINS` (`scheme://host[:port]`, comma separated; `http://` only for `localhost`, `127.0.0.1` or `[::1]`, and no explicit default port such as `:443`). With no list configured, cookies are refused. A bearer token is accepted from any origin. |
@@ -24,7 +25,7 @@ Upgrade refusals (the connection is closed after the response, and the body is e
 
 | Status | When |
 |---|---|
-| `400` | Malformed upgrade or `Sec-WebSocket-Key`, or the request carries a body |
+| `400` | Malformed upgrade or `Sec-WebSocket-Key`, the request carries a body, or `device` is not a UUID or is given twice |
 | `426` with `Upgrade: websocket` | `GET /rt` that is not an upgrade, or a WebSocket version other than 13 |
 | `401` | No usable token, or the token fails verification |
 | `403` | Cookie token without an allowed `Origin` |
@@ -462,6 +463,8 @@ alive; requests on one connection are answered in order, one at a time.
 | `close_direct` | `room` (a direct chat's id, `03`, else `bad_room`) | `{"type":"closed","room":..,"removed":[who it unlisted]}`. Takes a direct chat apart (an unfriend, a block): both of the pair unlisted under the room's lock, so their sockets leave the room at once on every node and their watches of each other are dropped (`not_shared`) unless they share another chat. Idempotent: `"removed":[]` when it lists nobody. The history stays; a later `open_direct` lists the pair again in the same room, history included. |
 | `rooms` | `user`, optional `after` (a room id), `limit` (1 to 100, default 50) | `{"type":"rooms","rooms":[{"room","kind","role","peer"}],"more":..}`, as the socket's `rooms` answers that user. |
 | `members` | `room`, optional `after` (a user id), `limit` (1 to 100, default 50) | `{"type":"members","room":..,"members":[{"user","role"}],"more":..}` for any room; a room nobody is listed in answers no members. |
+| `decline_call` | `room`, `call`, `user` | `{"type":"call_declined","room":..,"call":..,"by":<user>}`: the user's own decline of a call ringing them, from a notification ([notifications.md](notifications.md#answering-and-declining-from-a-notification)). `409` `no_call` or `not_member` as their socket's would be |
+| `call_status` | `room`, `call`, optional `user` | `{"type":"call_status","room":..,"call":..,"status":"ringing"\|"answered"\|"over"}`: whether the call still rings (for `user`), from the room's owner |
 
 Changes go through exactly the database statements users' commands do, under the room's lock:
 the same kinds (a direct chat's pair never changes), the 100-member cap, the 1000-room cap on

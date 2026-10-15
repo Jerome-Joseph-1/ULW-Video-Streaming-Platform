@@ -29,6 +29,7 @@ against in HTML comments, for maintainers.
 | [changelog.md](changelog.md) | Changes to the Stable pages a client may have to act on | Stable |
 | [chat.md](chat.md) | WebSocket endpoint, envelope, resume, history, member lists, presence and the service API | Stable |
 | [calls.md](calls.md) | 1:1 and group calls | Stable |
+| [notifications.md](notifications.md) | Events for the operator's backend to notify members who are not connected (opt-in) | Stable |
 | [live.md](live.md) | Live streams: starting, publishing over WHIP, watching, and the recording each becomes | Stable |
 | [e2ee.md](e2ee.md) | End-to-end encrypted chat: the key directory, multi-device, the browser client | Stable |
 

@@ -615,6 +615,8 @@ void ChatService::moved(ClientId id, const CallMove& move,
         case CallOutcome::Failed:
         case CallOutcome::Expelled:
         case CallOutcome::Full:
+        case CallOutcome::Ringing:
+        case CallOutcome::Answered:
             write_call_error(out, "unavailable", move.room, kCallRetry);
             break;
         }
@@ -682,6 +684,11 @@ void ChatService::called(ClientId id, const core::RoomId& room,
             break;
         case CallOutcome::Full:
             write_call_error(out, "call_full", room, std::nullopt);
+            break;
+        // A status ask's answers, never a ticket's.
+        case CallOutcome::Ringing:
+        case CallOutcome::Answered:
+            write_call_error(out, "unavailable", room, kCallRetry);
             break;
         // The call this ticket was answering is over: nothing to join, nothing to retry.
         case CallOutcome::NoCall:
@@ -779,6 +786,9 @@ void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageK
         }
         answer(*c->client, reason(result.error()), room, key);
         return;
+    }
+    if (message_watcher_ != nullptr) {
+        message_watcher_->message(room, c->user, *result);
     }
     try {
         std::string out;

@@ -49,6 +49,22 @@ external_turn() {
 for overlay in staging production; do
     external_turn "$overlay" >"$manifests/external-turn-$overlay.yaml"
 done
+# The same with components/notifications (RUNBOOK.md, step 7, "Notifications").
+notifications() {
+    local dir=$manifests/notifications-$1 rel
+    mkdir "$dir"
+    rel=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], sys.argv[2]))' "$kube" \
+        "$dir")
+    sed -e "s#\.\./\.\./#$rel/#g" -e "s#^      - config.env#      - $rel/overlays/$1/config.env#" \
+        -e "s#^  - $rel/components/operator-config\$#&\n  - $rel/components/notifications#" \
+        "$kube/overlays/$1/kustomization.yaml" >"$dir/kustomization.yaml"
+    grep -q "components/notifications" "$dir/kustomization.yaml"
+    render "$dir"
+    rm -r "$dir"
+}
+for overlay in staging production; do
+    notifications "$overlay" >"$manifests/notifications-$overlay.yaml"
+done
 python3 "$here/check-external-turn.py" "$kube/base/livekit/deployment.yaml" \
     "$manifests/staging.yaml" "$manifests/production.yaml" \
     --external "$manifests/external-turn-staging.yaml" "$manifests/external-turn-production.yaml"

@@ -1692,8 +1692,28 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
     short_answer.pop_back();
     EXPECT_FALSE(chat::decode_request(short_answer));
     auto unknown_ask = chat::encode_request(request);
-    unknown_ask[1] = std::byte{7};
+    unknown_ask[1] = std::byte{8};
     EXPECT_FALSE(chat::decode_request(unknown_ask));
+    // A status ask (ADR-0111), about the call or about one member's ring.
+    for (const auto& who : {std::optional<core::UserId>{}, std::optional(request.user)}) {
+        const auto status_back = chat::decode_request(
+            chat::encode_request(chat::CallStatusRequest{.call = call, .user = who}));
+        ASSERT_TRUE(status_back);
+        const auto* status = std::get_if<chat::CallStatusRequest>(&*status_back);
+        ASSERT_NE(status, nullptr);
+        EXPECT_EQ(status->call, call);
+        EXPECT_EQ(status->user, who);
+        auto short_status =
+            chat::encode_request(chat::CallStatusRequest{.call = call, .user = who});
+        short_status.pop_back();
+        EXPECT_FALSE(chat::decode_request(short_status));
+    }
+    for (const CallOutcome outcome : {CallOutcome::Ringing, CallOutcome::Answered}) {
+        const auto status =
+            chat::decode_answer(chat::encode_answer({.outcome = outcome, .ticket = std::nullopt}));
+        ASSERT_TRUE(status);
+        EXPECT_EQ(status->outcome, outcome);
+    }
     auto short_ask = chat::encode_request(request);
     short_ask.pop_back();
     EXPECT_FALSE(chat::decode_request(short_ask));
@@ -1722,7 +1742,7 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
     trailing.push_back(std::byte{0});
     EXPECT_FALSE(chat::decode_answer(trailing));
     auto unknown = chat::encode_answer({.outcome = CallOutcome::Busy, .ticket = std::nullopt});
-    unknown[1] = std::byte{12};
+    unknown[1] = std::byte{14};
     EXPECT_FALSE(chat::decode_answer(unknown));
 
     // A ticket names its call; a signal done names the call's caller.
