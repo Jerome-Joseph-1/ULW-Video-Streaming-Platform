@@ -1203,7 +1203,9 @@ with you (`TURN_PROVIDER=hmac`: coturn with `use-auth-secret`, eturnal). Chat, a
 live streams, then put the service's ICE servers, with credentials for that device, in every
 ticket (`ULW_TURN_MODE=external`), and clients relay through them (docs/integration/calls.md,
 step 4; docs/integration/live.md, "Publishing"). Ship clients that pass `ice_servers` before you
-switch: one that ignores them cannot connect afterwards.
+switch: one that ignores them cannot connect afterwards. Run v1.1.1 or later on every chat node
+first: v1.1.0's chat dropped the relays from a call ticket that crossed between its nodes, so no
+call connected (docs/adr/0109).
 
 **What it does and does not remove.** No port is open to the whole internet any more, and
 STUNner, its operator and `stunner-secrets` are not needed. But LiveKit cannot be a TURN client
@@ -1230,6 +1232,13 @@ kubectl -n "$NS" patch secret sfu-secrets --type merge -p "$(jq -n --rawfile t <
   '{stringData: {EXTERNAL_TURN_API_TOKEN: $t}}')"            # cloudflare
 # or, for hmac: {stringData: {EXTERNAL_TURN_SHARED_SECRET: $s}}
 ```
+
+Do this, and set the provider's keys in `config.env` (`TURN_KEY_ID` for Cloudflare, `TURN_URLS`
+for hmac), before you turn the component on. In external mode chat and the gateway refuse to
+start without them (`ULW_TURN_KEY_ID` and `ULW_TURN_KEY_API_TOKEN`, or `ULW_TURN_URLS` and
+`ULW_TURN_SHARED_SECRET`): their new pods exit naming the missing variable, and the rollout stalls
+with the old pods still serving. `kubectl -n "$NS" logs deploy/chat` shows which; add it and the
+rollout goes on.
 
 **The media port.** In `config.env`: `MEDIA_PUBLIC_IP`, the node's public IPv4 address (Cloudflare
 relays allocate IPv4 only), and `MEDIA_UDP_PORT`, one per environment on a shared node (the

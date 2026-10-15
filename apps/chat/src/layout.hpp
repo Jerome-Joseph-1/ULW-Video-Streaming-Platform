@@ -21,6 +21,11 @@ inline void put_u8(std::vector<std::byte>& out, std::uint8_t v) {
     out.push_back(static_cast<std::byte>(v));
 }
 
+inline void put_u16(std::vector<std::byte>& out, std::uint16_t v) {
+    out.push_back(static_cast<std::byte>((v >> 8U) & 0xFFU));
+    out.push_back(static_cast<std::byte>(v & 0xFFU));
+}
+
 inline void put_u64(std::vector<std::byte>& out, std::uint64_t v) {
     for (int shift = 56; shift >= 0; shift -= 8) {
         out.push_back(static_cast<std::byte>((v >> static_cast<unsigned>(shift)) & 0xFFU));
@@ -64,6 +69,15 @@ public:
         return v;
     }
 
+    [[nodiscard]] std::optional<std::uint16_t> u16() noexcept {
+        const auto high = u8();
+        const auto low = u8();
+        if (!high || !low) {
+            return std::nullopt;
+        }
+        return static_cast<std::uint16_t>((std::uint16_t{*high} << 8U) | *low);
+    }
+
     [[nodiscard]] std::optional<std::uint64_t> u64() noexcept {
         if (rest_.size() < sizeof(std::uint64_t)) {
             return std::nullopt;
@@ -92,12 +106,7 @@ public:
     }
 
     [[nodiscard]] std::optional<std::string_view> long_text() noexcept {
-        const auto high = u8();
-        const auto low = u8();
-        if (!high || !low) {
-            return std::nullopt;
-        }
-        return text((std::size_t{*high} << 8U) | *low);
+        return u16().and_then([this](std::uint16_t n) { return text(n); });
     }
 
     [[nodiscard]] std::optional<core::UserId> user() noexcept {

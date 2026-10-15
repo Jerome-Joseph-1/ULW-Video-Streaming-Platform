@@ -574,8 +574,9 @@ jobs:
             gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
             gstreamer1.0-nice libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer-plugins-bad1.0-dev
-      # chat-stack.mjs creates and drops its scratch database with psql.
-      - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client
+      # chat-stack.mjs creates and drops its scratch database with psql; direct-call.spec.mjs
+      # relays a call in external TURN mode through a coturn of its own.
+      - run: sudo apt-get install -y -qq --no-install-recommends postgresql-client coturn
       # A build is only good for the GStreamer it linked against and the compiler that made it;
       # fetch-whipsink.sh rebuilds whatever the key lets through that does not match either.
       - name: GStreamer version

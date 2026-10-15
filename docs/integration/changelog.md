@@ -3,6 +3,27 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## 2026-10-15: call tickets keep their `ice_servers` across chat's nodes (v1.1.1)
+
+<!-- apps/chat/src/call.cpp (encode_answer, decode_answer, kLayout), apps/chat/src/layout.hpp, tests/call/direct-call.spec.mjs, docs/adr/0109-an-external-turn-service-as-an-alternative-to-stunner.md -->
+
+A fix, no change to the documented surface: v1.1.0 documented `ice_servers` in call tickets, but
+chat dropped them from every call ticket, since each one travels from the room's owner to the
+asking node in a layout that had no place for them. Only external TURN mode was affected
+(`ULW_TURN_MODE=external`); there, no call connected. Publisher tickets (the gateway's) always
+carried them. No migration.
+
+| Before | Now |
+|---|---|
+| v1.1.0, external mode: a call ticket had `url`, `token`, `expires_at` and `call`, and no `ice_servers` | Every call ticket carries `ice_servers` in external mode, as documented ([Calls](calls.md#the-flow)) |
+
+What to do:
+
+- **Clients:** nothing; pass `ice_servers` as the entry below says.
+- **Operators:** run v1.1.1 or later before you turn external mode on. During the rolling update
+  from v1.1.0, a call ask between an old and a new chat node is answered `unavailable` with
+  `retry_after_ms` (clients retry), in either mode, until every node runs the new version.
+
 ## 2026-10-14: tickets may carry an external TURN service's ICE servers
 
 <!-- infra/turn/src/relayed_sfu.cpp (make_relayed_sfu), infra/turn/src/config.cpp (load_config, append_ice_servers), apps/chat/src/envelope.cpp (write_ticket), apps/gateway/src/connection.cpp (append_ticket), deploy/kubernetes/components/external-turn/kustomization.yaml, docs/adr/0109-an-external-turn-service-as-an-alternative-to-stunner.md -->

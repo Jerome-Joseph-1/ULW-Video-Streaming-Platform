@@ -57,6 +57,11 @@ struct MediaTicket {
     // out.
     // NOLINTNEXTLINE(readability-redundant-member-init)
     std::vector<IceServer> ice_servers{};
+
+    // Every field: a copy that crossed the node channel (chat's call answers) must equal the
+    // ticket the owner issued, and a field added here fails that test until the layout carries
+    // it.
+    friend bool operator==(const MediaTicket&, const MediaTicket&) = default;
 };
 
 // One connected device in a room, as the media server reports it. A group call's owner reads the

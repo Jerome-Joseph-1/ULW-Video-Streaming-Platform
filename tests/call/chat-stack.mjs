@@ -41,7 +41,7 @@ async function bindable(port, host) {
 // tests/support/reserve_port.hpp explains, a port there can never be some outgoing connection's
 // source port by the time a node binds it. Never one this process handed out before.
 const handedOut = new Set();
-async function freePort() {
+export async function freePort() {
   const [low] = readFileSync('/proc/sys/net/ipv4/ip_local_port_range', 'utf8').trim().split(/\s+/)
     .map(Number);
   const first = 20_000;

@@ -5,16 +5,20 @@
 #include <algorithm>
 #include <chrono>
 #include <limits>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace chat {
 
 namespace {
 
 // The layouts' first byte; a node that reads another is answered Unavailable, as for an owner
-// that cannot be reached. 2: an ask says what it asks for, and a ticket names its call.
-constexpr std::uint8_t kLayout = 2;
+// that cannot be reached. 2: an ask says what it asks for, and a ticket names its call. 3: a
+// ticket carries the relays its client reaches the media server through (ADR-0109), so a node
+// that would drop them refuses the answer instead.
+constexpr std::uint8_t kLayout = 3;
 // What an ask asks for: a ticket, or one of CallSignal's values, or a ticket answering a call
 // it names (after Expel's value, so that a node without it reads it as a layout it does not
 // know and answers Unavailable, which the client retries).
@@ -40,6 +44,65 @@ constexpr std::size_t kMaxTicketed = 64;
 core::Millis backoff(std::uint32_t attempt) noexcept {
     const std::uint32_t doublings = std::min<std::uint32_t>(attempt == 0 ? 0 : attempt - 1, 5);
     return std::min(kRetryEvery * (1U << doublings), core::Millis{30'000});
+}
+
+// A ticket's relays: their count, and each one's URIs, username and credential. A list longer
+// than the counts hold is refused, never cut: a client given part of it may not reach the
+// media server.
+bool put_ice_servers(std::vector<std::byte>& out,
+                     const std::vector<core::ports::IceServer>& servers) {
+    constexpr std::size_t kMaxCount = std::numeric_limits<std::uint16_t>::max();
+    if (servers.size() > kMaxCount) {
+        return false;
+    }
+    layout::put_u16(out, static_cast<std::uint16_t>(servers.size()));
+    for (const core::ports::IceServer& server : servers) {
+        if (server.urls.size() > kMaxCount || server.username.size() > kMaxCount ||
+            server.credential.size() > kMaxCount) {
+            return false;
+        }
+        layout::put_u16(out, static_cast<std::uint16_t>(server.urls.size()));
+        for (const std::string& url : server.urls) {
+            if (url.size() > kMaxCount) {
+                return false;
+            }
+            layout::put_long(out, url);
+        }
+        layout::put_long(out, server.username);
+        layout::put_long(out, server.credential);
+    }
+    return true;
+}
+
+std::optional<std::vector<core::ports::IceServer>> read_ice_servers(layout::Reader& in) {
+    const auto count = in.u16();
+    if (!count) {
+        return std::nullopt;
+    }
+    std::vector<core::ports::IceServer> servers;
+    for (std::uint16_t i = 0; i < *count; ++i) {
+        const auto urls = in.u16();
+        if (!urls) {
+            return std::nullopt;
+        }
+        core::ports::IceServer server;
+        for (std::uint16_t u = 0; u < *urls; ++u) {
+            const auto url = in.long_text();
+            if (!url) {
+                return std::nullopt;
+            }
+            server.urls.emplace_back(*url);
+        }
+        const auto username = in.long_text();
+        const auto credential = in.long_text();
+        if (!username || !credential) {
+            return std::nullopt;
+        }
+        server.username = std::string(*username);
+        server.credential = std::string(*credential);
+        servers.push_back(std::move(server));
+    }
+    return servers;
 }
 
 } // namespace
@@ -131,6 +194,10 @@ std::vector<std::byte> encode_answer(const CallAnswer& answer) {
             std::chrono::duration_cast<core::Millis>(answer.ticket->expires_at.time_since_epoch())
                 .count();
         put_u64(out, static_cast<std::uint64_t>(ms));
+        if (!put_ice_servers(out, answer.ticket->ice_servers)) {
+            // Unreadable on purpose: the asking node answers its client Unavailable.
+            return {};
+        }
         put_u8(out, answer.call ? 1 : 0);
         if (answer.call) {
             put_uuid(out, *answer.call);
@@ -160,14 +227,16 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
         const auto endpoint = in.long_text();
         const auto credential = in.long_text();
         const auto ms = in.u64();
+        auto ice_servers = read_ice_servers(in);
         const auto has_call = in.u8();
-        if (!endpoint || !credential || !ms || !has_call || *has_call > 1) {
+        if (!endpoint || !credential || !ms || !ice_servers || !has_call || *has_call > 1) {
             return std::nullopt;
         }
         answer.ticket = core::ports::MediaTicket{
             .endpoint = std::string(*endpoint),
             .credential = std::string(*credential),
-            .expires_at = core::WallTime{core::Millis{static_cast<core::Millis::rep>(*ms)}}};
+            .expires_at = core::WallTime{core::Millis{static_cast<core::Millis::rep>(*ms)}},
+            .ice_servers = std::move(*ice_servers)};
         if (*has_call == 1) {
             answer.call = in.uuid<CallId>();
             if (!answer.call) {
