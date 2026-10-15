@@ -286,6 +286,12 @@ public:
     // not a direct call still ringing from `user` (CallRequest::answering).
     [[nodiscard]] bool answerable(const core::RoomId& room,
                                   const core::UserId& user) const noexcept;
+    // Whether the room's call `call` still rings: for `user` when named (a group call's callee
+    // still rung, or its caller while nobody has come), or at all. false: it is on, and does not
+    // ring (for them). nullopt: the room has no such call, or `user` is not in it.
+    [[nodiscard]] std::optional<bool>
+    ringing(const core::RoomId& room, const CallId& call,
+            const std::optional<core::UserId>& user) const noexcept;
     // The id of the room's call, if it has one, and whose it is.
     [[nodiscard]] std::optional<CallId> call_of(const core::RoomId& room) const noexcept;
     [[nodiscard]] std::optional<CallKind> kind_of(const core::RoomId& room) const noexcept;

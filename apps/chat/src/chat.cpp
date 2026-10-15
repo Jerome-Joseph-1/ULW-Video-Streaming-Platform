@@ -111,7 +111,8 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       shared_(deps.messages), chat_(rooms_, deps.messages, deps.clock, service_limits(limits_)),
       presence_(rooms_, shared_, deps.reactor, deps.clock, deps.node, limits_.presence),
       calls_(deps.messages, deps.sfu, rooms_, deps.clock, deps.random, limits_.calls),
-      service_api_(deps.reactor, deps.clock, deps.verifier, deps.messages, limits_.service_api),
+      service_api_(deps.reactor, deps.clock, deps.verifier, deps.messages, limits_.service_api,
+                   &rooms_),
       directory_(deps.registry, deps.key_packages, shared_, deps.clock, limits_.directory),
       // One more than the connections that can pin an entry, so a new client always finds one.
       clients_(std::max(kClientEntries, limits_.max_connections + 1),

@@ -26,7 +26,7 @@ using infra::postgres::CatalogConfig;
 using infra::postgres::Params;
 using infra::postgres::PgUploadCatalog;
 using infra::postgres::PgUploadReaper;
-using ulw::test::Reply;
+using ulw::test::Awaited;
 using ulw::test::scalar;
 using ulw::test::ScratchDatabase;
 
@@ -85,14 +85,14 @@ protected:
             .backend_ref = "session-" + video.to_string(),
             .object_key = *core::StorageKey::parse("videos/" + video.to_string() + "/raw"),
             .request = std::nullopt};
-        Reply<void> reply;
+        Awaited<void> reply;
         catalog->create_upload(u, reply.callback());
         EXPECT_TRUE(ulw::test::wait(*reactor, reply));
         return u;
     }
 
     template <class T = void, class Start> core::ports::CatalogResult<T> call(Start start) {
-        Reply<T> reply;
+        Awaited<T> reply;
         start(reply.callback());
         return ulw::test::wait(*reactor, reply);
     }
@@ -175,7 +175,7 @@ TEST_F(UploadReaperTest, TakesAtMostTheLimitAndTheEarliestExpiryFirst) {
 TEST_F(UploadReaperTest, IgnoresUploadsThatCompletedOrWereAbortedByTheirOwner) {
     const NewUpload committed = created();
     const NewUpload discarded = created();
-    Reply<core::ports::ClaimedUpload> claimed;
+    Awaited<core::ports::ClaimedUpload> claimed;
     catalog->claim_upload(committed.upload.id, committed.upload.owner, claimed.callback());
     const auto held = ulw::test::wait(*reactor, claimed);
     ASSERT_TRUE(held);
@@ -199,7 +199,7 @@ TEST_F(UploadReaperTest, IgnoresUploadsThatCompletedOrWereAbortedByTheirOwner) {
 
 TEST_F(UploadReaperTest, SkipsAnUploadWhileItsOwnerHoldsTheClaimAndTakesItAfter) {
     const NewUpload u = created();
-    Reply<core::ports::ClaimedUpload> claimed;
+    Awaited<core::ports::ClaimedUpload> claimed;
     catalog->claim_upload(u.upload.id, u.upload.owner, claimed.callback());
     const auto held = ulw::test::wait(*reactor, claimed);
     ASSERT_TRUE(held);

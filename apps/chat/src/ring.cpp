@@ -188,6 +188,25 @@ bool Ringer::fits(const core::RoomId& room, const core::UserId& user) const noex
            std::ranges::find(call.joined, user) != call.joined.end();
 }
 
+std::optional<bool> Ringer::ringing(const core::RoomId& room, const CallId& call,
+                                    const std::optional<core::UserId>& user) const noexcept {
+    const auto it = calls_.find(room);
+    if (it == calls_.end() || it->second.id != call) {
+        return std::nullopt;
+    }
+    const Call& c = it->second;
+    if (!user) {
+        return !c.answered;
+    }
+    if (!member_of(c, *user)) {
+        return std::nullopt;
+    }
+    if (c.kind == CallKind::Direct || *user == c.caller) {
+        return !c.answered;
+    }
+    return std::ranges::find(c.ringing, *user) != c.ringing.end();
+}
+
 std::optional<CallId> Ringer::call_of(const core::RoomId& room) const noexcept {
     const auto it = calls_.find(room);
     if (it == calls_.end()) {

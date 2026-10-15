@@ -27,7 +27,7 @@ using core::ports::StoredUpload;
 using infra::postgres::CatalogConfig;
 using infra::postgres::Params;
 using infra::postgres::PgUploadCatalog;
-using ulw::test::Reply;
+using ulw::test::Awaited;
 using ulw::test::scalar;
 using ulw::test::ScratchDatabase;
 
@@ -101,7 +101,7 @@ protected:
     }
 
     template <class T, class Start> CatalogResult<T> call(Start start) {
-        Reply<T> reply;
+        Awaited<T> reply;
         start(reply.callback());
         return ulw::test::wait(*reactor, reply);
     }
@@ -342,8 +342,8 @@ TEST_P(CatalogTest, ConcurrentCommitsFromTwoGatewaysQueueOneJob) {
     fill(u);
     other = make_catalog();
     ASSERT_TRUE(other);
-    Reply<core::VideoState> first;
-    Reply<core::VideoState> second;
+    Awaited<core::VideoState> first;
+    Awaited<core::VideoState> second;
     catalog->commit_upload(u.upload.id, u.video.id, "req-1", first.callback());
     other->commit_upload(u.upload.id, u.video.id, "req-2", second.callback());
     EXPECT_EQ(ulw::test::wait(*reactor, first), core::VideoState::Processing);
@@ -474,7 +474,7 @@ TEST_P(CatalogTest, ClaimOutlivesTheOwnerItWasGiven) {
     // The port asks callers to keep only the callback's captures alive. The owner goes before
     // the statement is sent, and another id of the same length takes over its memory.
     auto owner = std::make_unique<core::UserId>(tester());
-    Reply<ClaimedUpload> reply;
+    Awaited<ClaimedUpload> reply;
     catalog->claim_upload(u.upload.id, *owner, reply.callback());
     owner.reset();
     const auto intruder = std::make_unique<core::UserId>(*core::UserId::parse("auth0|intrud"));
@@ -487,7 +487,7 @@ TEST_P(CatalogTest, SecondClaimInOneProcessIsRefusedOnALaterIteration) {
     const NewUpload u = new_upload();
     ASSERT_TRUE(create(*catalog, u));
     ASSERT_TRUE(claim(*catalog, u.upload.id));
-    Reply<ClaimedUpload> again;
+    Awaited<ClaimedUpload> again;
     catalog->claim_upload(u.upload.id, u.upload.owner, again.callback());
     EXPECT_EQ(again.calls(), 0);
     EXPECT_EQ(ulw::test::wait(*reactor, again).error(), CatalogError::Conflict);

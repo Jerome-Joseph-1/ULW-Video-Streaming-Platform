@@ -402,6 +402,9 @@ protected:
         for (std::string& livekit : livekit_environment()) {
             env.push_back(std::move(livekit));
         }
+        for (std::string& extra : extra_env()) {
+            env.push_back(std::move(extra));
+        }
         for (const char* passed : {"ASAN_OPTIONS", "UBSAN_OPTIONS", "LSAN_OPTIONS"}) {
             // NOLINTNEXTLINE(concurrency-mt-unsafe): read before any thread starts.
             if (const char* value = std::getenv(passed)) {
@@ -470,9 +473,14 @@ protected:
         return std::make_unique<Client>(std::move(*ws), user);
     }
 
-    std::unique_ptr<Client> connect(const Node& node, std::size_t user) {
+    // What a suite adds to every node's environment.
+    [[nodiscard]] virtual std::vector<std::string> extra_env() const { return {}; }
+
+    // `path`: the upgrade's, such as "/rt?device=<uuid>".
+    std::unique_ptr<Client> connect(const Node& node, std::size_t user,
+                                    const std::string& path = "/rt") {
         std::string refusal;
-        auto ws = WsClient::connect(node.port, "/rt",
+        auto ws = WsClient::connect(node.port, path,
                                     "Authorization: Bearer " + tokens_[user] + "\r\n", &refusal);
         if (!ws) {
             ADD_FAILURE() << "upgrade refused: " << refusal;

@@ -109,8 +109,8 @@ protected:
         auto r = net::make_reactor(net::ReactorKind::Epoll, clock_, 256);
         ASSERT_TRUE(r);
         reactor_ = std::move(*r);
-        registry_ = std::make_unique<infra::notify::MemoryConnectivity>(*reactor_, clock_,
-                                                                        core::ports::NotifyTiming{});
+        registry_ = std::make_unique<infra::notify::MemoryConnectivity>(
+            *reactor_, clock_, core::ports::NotifyTiming{});
         stalling_ = std::make_unique<StallingStore>(*registry_);
     }
     void TearDown() override {
@@ -243,7 +243,8 @@ TEST_F(NotifierTest, ARingingCallNamesEachCalleesConnectedDevicesAndItsLaterEven
     ASSERT_EQ(callees->size(), 2U);
     EXPECT_EQ(text((*callees)[0], "user"), "bob");
     EXPECT_EQ((*callees)[0].find("connected")->as_bool(), true);
-    EXPECT_EQ(strings((*callees)[0].find("devices")), std::vector<std::string>{std::string(kPhone)});
+    EXPECT_EQ(strings((*callees)[0].find("devices")),
+              std::vector<std::string>{std::string(kPhone)});
     EXPECT_EQ(text((*callees)[1], "user"), "carol");
     EXPECT_EQ((*callees)[1].find("connected")->as_bool(), false);
     EXPECT_TRUE(strings((*callees)[1].find("devices")).empty());

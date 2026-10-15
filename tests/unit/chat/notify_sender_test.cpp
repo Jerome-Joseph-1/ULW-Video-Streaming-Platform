@@ -1,7 +1,7 @@
+#include "core/util/json.hpp"
 #include "net/reactor_factory.hpp"
 #include "os/system_clock.hpp"
 
-#include "core/util/json.hpp"
 #include "notify_sender.hpp"
 #include "support/fake_clock.hpp"
 #include "support/http_test_server.hpp"
@@ -44,8 +44,9 @@ protected:
                                                     std::string(kSecret), limits);
     }
     bool idle() {
-        return pump_until(*reactor, [&] { return !sender->busy() && sender->queued() == 0; },
-                          std::chrono::seconds(10));
+        return pump_until(
+            *reactor, [&] { return !sender->busy() && sender->queued() == 0; },
+            std::chrono::seconds(10));
     }
 
     os::SystemClock reactor_clock;
@@ -66,7 +67,8 @@ TEST(NotifySignature, IsHmacSha256OfTheTimeAndTheBody) {
 }
 
 TEST_F(NotifySenderTest, EventsGoOutBatchedAndSignedInTheOrderOffered) {
-    const HttpTestServer receiver([](const ServedRequest&) { return Reply{.status = 204, .headers = {}, .body = {}}; });
+    const HttpTestServer receiver(
+        [](const ServedRequest&) { return Reply{.status = 204, .headers = {}, .body = {}}; });
     make(receiver.base_url() + "/ulw/events", {.batch = 2});
     sender->offer(R"({"n":1})");
     sender->offer(R"({"n":2})");
@@ -84,7 +86,8 @@ TEST_F(NotifySenderTest, EventsGoOutBatchedAndSignedInTheOrderOffered) {
         const auto seconds =
             std::chrono::duration_cast<std::chrono::seconds>(clock.wall_now().time_since_epoch())
                 .count();
-        EXPECT_EQ(r.header("ulw-signature").value_or(""), chat::notify_signature(kSecret, seconds, r.body));
+        EXPECT_EQ(r.header("ulw-signature").value_or(""),
+                  chat::notify_signature(kSecret, seconds, r.body));
         EXPECT_TRUE(core::json::parse(r.body));
     }
     EXPECT_EQ(sender->counters().sent, 3U);
@@ -93,7 +96,8 @@ TEST_F(NotifySenderTest, EventsGoOutBatchedAndSignedInTheOrderOffered) {
 }
 
 TEST_F(NotifySenderTest, AFullQueueDropsWhatComesAndCountsIt) {
-    const HttpTestServer receiver([](const ServedRequest&) { return Reply{.status = 200, .headers = {}, .body = {}}; });
+    const HttpTestServer receiver(
+        [](const ServedRequest&) { return Reply{.status = 200, .headers = {}, .body = {}}; });
     make(receiver.base_url(), {.max_queued = 2, .batch = 1});
     // The first is taken off the queue at once; two wait; the fourth finds the queue full.
     for (int i = 0; i < 4; ++i) {

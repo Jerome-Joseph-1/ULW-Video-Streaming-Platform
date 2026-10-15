@@ -71,15 +71,22 @@ user is, and only for a node that watches them (ADR-0056).
 - **The sender.** Each node queues at most 4096 events, POSTs them in batches of up to 64 as
   `{"events": [...]}`, one request at a time so a node's events arrive in the order it made
   them, each with a 2 s timeout. A full queue drops the new event; a failed or timed-out batch is
-  dropped; both are counted (`chat_notify_dropped_total`, `chat_notify_failed_total`). Nothing
-  waits on the sender: a ring, a ticket and a message go on as if it were not there. Each request
+  dropped; both are counted. Nothing
+  waits on the sender: a ring, a ticket and a message go on as if it were not there
+  (`notify_events_total{outcome="dropped"|"failed"}` count what was lost). Each request
   carries `ULW-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256 of "<t>.<body>" under the
   secret>`; each event carries an `id` (UUID) for the receiver to drop a repeat.
 - **Answering and declining from a notification.** A socket opened after the ring started
   answers by call id (`call` with `answer`) as any other does; nothing changes. The service API
   gains `decline_call` (`room`, `call`, `user`: the owner's own decline, checked against the
-  member list as from a socket) and `call_status` (`room`, `call`: `ringing`, `answered` or
-  `over`), both asked of the room's owner by joining the room for the ask and leaving after.
+  member list as from a socket) and `call_status` (`room`, `call`, optionally `user`: `ringing`,
+  `answered` or `over`, for that user when named, as a group call may ring some while others
+  talk), both asked of the room's owner by joining the room for the ask and leaving after. The
+  status ask is a new ask kind (7) and two new outcomes; an owner of an earlier release reads it
+  as malformed, and the API answers `503` until it is replaced.
+- **Kubernetes.** `components/notifications` sets the three variables from `config.env` and
+  chat's Secret, and adds a NetworkPolicy letting chat reach the receiver's port in its
+  namespace: chat's own policy admits no in-cluster port of another namespace.
 
 ## Consequences
 

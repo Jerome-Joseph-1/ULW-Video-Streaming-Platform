@@ -405,9 +405,8 @@ int run() {
         // This run's tag in the registry: another run of the same pod is another node there.
         std::array<std::byte, sizeof(std::uint64_t)> tag{};
         s.random.fill(tag);
-        s.notifier = std::make_unique<chat::Notifier>(*s.reactor, *s.notify_store, *s.hook,
-                                                      s.clock, s.random,
-                                                      std::bit_cast<std::uint64_t>(tag));
+        s.notifier = std::make_unique<chat::Notifier>(*s.reactor, *s.notify_store, *s.hook, s.clock,
+                                                      s.random, std::bit_cast<std::uint64_t>(tag));
     }
 
     s.room_log = std::make_unique<chat::RoomLog>(config->node);

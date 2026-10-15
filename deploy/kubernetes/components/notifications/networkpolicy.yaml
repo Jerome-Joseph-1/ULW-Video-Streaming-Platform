@@ -1,0 +1,25 @@
+# Chat's way to the notification receiver (docs/adr/0111): from the chat pods to the receiver's
+# pods, in the namespace and on the port config.env names, and nowhere else. Added to chat's own
+# policy (base/chat/networkpolicy.yaml), which admits 443 but no in-cluster port of another
+# namespace. The receiver should admit chat alone: the events name users and devices.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: chat-notifications
+  namespace: ulw
+  labels:
+    app.kubernetes.io/name: chat
+    app.kubernetes.io/part-of: ulw
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: chat
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: askedin
+      ports:
+        - port: 8080
+          protocol: TCP

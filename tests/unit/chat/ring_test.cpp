@@ -1018,4 +1018,29 @@ TEST_F(GroupRingerTest, TheWatcherHearsOnlyThoseStillRungMissAGroupCallThatGoesO
     EXPECT_TRUE(watcher.take().empty());
 }
 
+TEST_F(RingerTest, AStatusSaysWhetherTheCallStillRingsAndForWhom) {
+    const CallId call = ring();
+    EXPECT_EQ(ringer_.ringing(room_id(), call, std::nullopt), true);
+    EXPECT_EQ(ringer_.ringing(room_id(), call, user("bob")), true);
+    EXPECT_EQ(ringer_.ringing(room_id(), call, user("carol")), std::nullopt) << "not in it";
+    EXPECT_EQ(ringer_.ringing(room_id(), CallId::generate(clock_, random_), std::nullopt),
+              std::nullopt);
+    ASSERT_TRUE(ringer_.ticketed(room_id(), user("bob"), std::nullopt));
+    EXPECT_EQ(ringer_.ringing(room_id(), call, std::nullopt), false);
+    EXPECT_EQ(ringer_.ringing(room_id(), call, user("alice")), false);
+    ASSERT_TRUE(ringer_.signal(room_id(), user("bob"), CallSignal::End, call));
+    EXPECT_EQ(ringer_.ringing(room_id(), call, std::nullopt), std::nullopt);
+}
+
+TEST_F(GroupRingerTest, AGroupCallStillRingsForThoseNotYetInItWhileOthersTalk) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    EXPECT_EQ(ringer_.ringing(room_id(), call, std::nullopt), false);
+    EXPECT_EQ(ringer_.ringing(room_id(), call, user("bob")), false);
+    EXPECT_EQ(ringer_.ringing(room_id(), call, user("alice")), false);
+    EXPECT_EQ(ringer_.ringing(room_id(), call, user("carol")), true);
+    ASSERT_TRUE(ringer_.signal(room_id(), user("carol"), CallSignal::Decline, call));
+    EXPECT_EQ(ringer_.ringing(room_id(), call, user("carol")), false);
+}
+
 } // namespace

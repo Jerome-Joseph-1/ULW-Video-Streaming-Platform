@@ -73,9 +73,9 @@ void append_call(std::string& out, const CallEvent& event) {
 
 } // namespace
 
-Notifier::Notifier(net::IReactor& reactor, core::ports::IConnectivityStore& store,
-                   IEventSink& sink, const core::ports::IClock& clock,
-                   core::ports::IRandom& random, std::uint64_t node, NotifyLimits limits)
+Notifier::Notifier(net::IReactor& reactor, core::ports::IConnectivityStore& store, IEventSink& sink,
+                   const core::ports::IClock& clock, core::ports::IRandom& random,
+                   std::uint64_t node, NotifyLimits limits)
     : reactor_(reactor), store_(store), sink_(sink), clock_(clock), random_(random), node_(node),
       limits_(limits), self_(std::make_shared<Notifier*>(this)), next_renew_(clock.now()) {}
 
@@ -142,7 +142,8 @@ void Notifier::changed(const core::UserId& user, const std::optional<core::Devic
     try {
         const SocketDevice who{.user = user, .device = device};
         std::string key = key_of(who);
-        auto [it, made] = sockets_.try_emplace(key, Socket{.who = who, .open = 0, .written = false, .writing = std::nullopt});
+        auto [it, made] = sockets_.try_emplace(
+            key, Socket{.who = who, .open = 0, .written = false, .writing = std::nullopt});
         Socket& s = it->second;
         if (open) {
             ++s.open;
@@ -182,8 +183,7 @@ void Notifier::arm() noexcept {
         timer_ = {};
     }
     const core::MonoTime now = clock_.now();
-    const auto delay =
-        due <= now ? core::Millis{0} : std::chrono::ceil<core::Millis>(due - now);
+    const auto delay = due <= now ? core::Millis{0} : std::chrono::ceil<core::Millis>(due - now);
     try {
         timer_ = reactor_.arm_timer(delay, *this);
         timer_due_ = due;
@@ -365,38 +365,38 @@ void Notifier::message(const core::RoomId& room, const core::UserId& sender,
         return;
     }
     ++message_lookups_;
-    store_.message_targets(
-        room, sender,
-        [weak = std::weak_ptr(self_), room, sender,
-         seq](NotifyResult<std::vector<core::UserId>> result) mutable noexcept {
-            const auto self = weak.lock();
-            if (!self) {
-                return;
-            }
-            Notifier& n = **self;
-            --n.message_lookups_;
-            if (!result) {
-                ++n.counters_.message_failures;
-                return;
-            }
-            if (result->empty()) {
-                return;
-            }
-            try {
-                std::string out;
-                n.head(out, "message");
-                out += R"(,"room":")";
-                out += room.to_string();
-                out += R"(","sender":)";
-                append_user(out, sender);
-                std::format_to(std::back_inserter(out), R"(,"seq":{},"users":)", seq);
-                append_users(out, *result);
-                out += '}';
-                n.offer(std::move(out));
-            } catch (const std::bad_alloc&) {
-                ++n.counters_.allocation_failures;
-            }
-        });
+    store_.message_targets(room, sender,
+                           [weak = std::weak_ptr(self_), room, sender,
+                            seq](NotifyResult<std::vector<core::UserId>> result) mutable noexcept {
+                               const auto self = weak.lock();
+                               if (!self) {
+                                   return;
+                               }
+                               Notifier& n = **self;
+                               --n.message_lookups_;
+                               if (!result) {
+                                   ++n.counters_.message_failures;
+                                   return;
+                               }
+                               if (result->empty()) {
+                                   return;
+                               }
+                               try {
+                                   std::string out;
+                                   n.head(out, "message");
+                                   out += R"(,"room":")";
+                                   out += room.to_string();
+                                   out += R"(","sender":)";
+                                   append_user(out, sender);
+                                   std::format_to(std::back_inserter(out), R"(,"seq":{},"users":)",
+                                                  seq);
+                                   append_users(out, *result);
+                                   out += '}';
+                                   n.offer(std::move(out));
+                               } catch (const std::bad_alloc&) {
+                                   ++n.counters_.allocation_failures;
+                               }
+                           });
 }
 
 void Notifier::observed(const CallEvent& event) noexcept {
@@ -419,25 +419,25 @@ void Notifier::observed(const CallEvent& event) noexcept {
             l.timer = reactor_.arm_timer(limits_.lookup_timeout, l);
             std::vector<core::UserId> users = event.users;
             if (users.size() > core::ports::kMaxConnectedQuery) {
-                users.erase(users.begin() + static_cast<std::ptrdiff_t>(core::ports::kMaxConnectedQuery),
+                users.erase(users.begin() +
+                                static_cast<std::ptrdiff_t>(core::ports::kMaxConnectedQuery),
                             users.end());
             }
-            store_.connected(
-                std::move(users),
-                [weak = std::weak_ptr(self_), call = event.call](
-                    NotifyResult<std::vector<SocketDevice>> result) mutable noexcept {
-                    const auto self = weak.lock();
-                    if (!self || !(*self)->lookups_.contains(call)) {
-                        return;
-                    }
-                    Notifier& n = **self;
-                    if (!result) {
-                        ++n.counters_.lookups_unknown;
-                        n.ring_out(call, std::nullopt);
-                        return;
-                    }
-                    n.ring_out(call, *result);
-                });
+            store_.connected(std::move(users),
+                             [weak = std::weak_ptr(self_), call = event.call](
+                                 NotifyResult<std::vector<SocketDevice>> result) mutable noexcept {
+                                 const auto self = weak.lock();
+                                 if (!self || !(*self)->lookups_.contains(call)) {
+                                     return;
+                                 }
+                                 Notifier& n = **self;
+                                 if (!result) {
+                                     ++n.counters_.lookups_unknown;
+                                     n.ring_out(call, std::nullopt);
+                                     return;
+                                 }
+                                 n.ring_out(call, *result);
+                             });
             return;
         }
         std::string out;
@@ -465,9 +465,8 @@ void Notifier::observed(const CallEvent& event) noexcept {
     }
 }
 
-std::string
-Notifier::ringing_text(const CallEvent& event,
-                       const std::optional<std::vector<SocketDevice>>& devices) {
+std::string Notifier::ringing_text(const CallEvent& event,
+                                   const std::optional<std::vector<SocketDevice>>& devices) {
     std::string out;
     head(out, "call_ringing");
     append_call(out, event);

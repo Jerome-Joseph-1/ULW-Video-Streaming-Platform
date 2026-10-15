@@ -136,12 +136,12 @@ void HookSender::start() noexcept {
         request_ = std::make_unique<Request>(*this, std::move(body), n);
         auto transfer = infra::curl::Transfer::start_upload(
             multi_,
-            infra::curl::Request{.method = infra::curl::Method::Post,
-                                 .url = url_,
-                                 .headers = {"Content-Type: application/json",
-                                             "ULW-Signature: " + signature},
-                                 .max_body = kMaxResponse,
-                                 .timeout = std::chrono::milliseconds(limits_.timeout.count())},
+            infra::curl::Request{
+                .method = infra::curl::Method::Post,
+                .url = url_,
+                .headers = {"Content-Type: application/json", "ULW-Signature: " + signature},
+                .max_body = kMaxResponse,
+                .timeout = std::chrono::milliseconds(limits_.timeout.count())},
             request_->body().size(), *request_, *request_);
         if (!transfer) {
             request_->fail_later();
@@ -153,8 +153,7 @@ void HookSender::start() noexcept {
         counters_.dropped += request_ == nullptr ? n : 0;
         if (request_ == nullptr) {
             queue_.erase(queue_.begin(),
-                         queue_.begin() +
-                             static_cast<std::ptrdiff_t>(std::min(n, queue_.size())));
+                         queue_.begin() + static_cast<std::ptrdiff_t>(std::min(n, queue_.size())));
         }
     }
 }

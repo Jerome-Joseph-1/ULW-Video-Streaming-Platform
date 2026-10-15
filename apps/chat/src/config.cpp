@@ -142,8 +142,8 @@ std::expected<std::optional<T>, ConfigError> bounded(const EnvLookup& env, std::
 std::expected<std::optional<NotifyConfig>, ConfigError> notify_config(const EnvLookup& env) {
     auto url = lookup(env, "ULW_NOTIFY_URL");
     auto secret = lookup(env, "ULW_NOTIFY_SECRET");
-    const auto interval = bounded<std::uint32_t>(env, "ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS", 5,
-                                                 3'600);
+    const auto interval =
+        bounded<std::uint32_t>(env, "ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS", 5, 3'600);
     if (!interval) {
         return std::unexpected(interval.error());
     }

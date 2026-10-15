@@ -666,6 +666,7 @@ is required (a missing one fails the build), and every value shipped is an examp
 | `IMAGE_PULL_POLICY` | `Always` for a moving tag, `IfNotPresent` for a pinned one | the four images' pull policy |
 | `TURN_PORT` | STUNner's public UDP port (step 7) | the TURN listener, and the port LiveKit hands clients |
 | `TURN_PROVIDER`, `TURN_URLS`, `TURN_KEY_ID`, `TURN_TTL_SECONDS`, `MEDIA_PUBLIC_IP`, `MEDIA_UDP_PORT` | With `components/external-turn` only: the external TURN service in place of STUNner, and where its relays reach LiveKit (step 7, "External TURN") | chat's and the gateway's `ULW_TURN_*`; LiveKit's `--node-ip` and UDP port; the published media port |
+| `NOTIFY_URL`, `NOTIFY_NAMESPACE`, `NOTIFY_PORT`, `NOTIFY_MESSAGE_INTERVAL_SECONDS` | With `components/notifications` only: your receiver of chat's notification events, its namespace and port, and how often a member away is told of one room's messages (step 7, "Notifications") | chat's `ULW_NOTIFY_*`; the NetworkPolicy that lets chat reach the receiver |
 | `VIDEO_GATEWAY_SECRET`, `VIDEO_WORKER_SECRET`, `CHAT_SECRET`, `SFU_SECRET`, `LIVE_PACKAGER_SECRET` | The names of the Secrets of step 3, 7 and 9 | every `secretKeyRef`; the one Secret besides its own stream's a packager may read |
 | `LIVE_MAX_STREAMS`, `LIVE_BROADCASTER_CLAIM` | With `components/live-streams` only: how many streams run at once, and who may start one (`<claim>=<value>`, empty for every signed-in user; step 9) | `ULW_LIVE_MAX_STREAMS`, `ULW_LIVE_BROADCASTER_CLAIM` |
 
@@ -1301,6 +1302,62 @@ media Service and policy, which the apply leaves behind:
 ```sh
 kubectl -n "$NS" delete service/livekit-media networkpolicy/livekit-media
 ```
+
+### Notifications (optional)
+
+Chat reaches a member only through the sockets they have open. `components/notifications` has
+every chat node POST events to a receiver you run inside the cluster, for your backend to send
+Web Push (or anything else) to members who are not connected: a call ringing, with which of the
+callee's devices are connected, how the ring ended, and who is owed word of a message, never its
+content (docs/integration/notifications.md, docs/adr/0111). Off unless the overlay lists the
+component; without it chat sends nothing and writes nothing to the registry below. Run v1.2.0 or
+later on every chat node.
+
+**The receiver.** A Service in your namespace (`NOTIFY_NAMESPACE`), its pods listening on
+`NOTIFY_PORT`, answering each `POST` with a `2xx` within 2 s, and checking the `ULW-Signature`
+header (docs/integration/notifications.md, "Delivery"). The component lets chat reach that port
+in that namespace (NetworkPolicy `chat-notifications`); have the receiver's own policy admit chat
+alone.
+
+**The secret.** At least 32 random bytes, `NOTIFY_SECRET` in chat's Secret, which the receiver
+holds too:
+
+```sh
+NOTIFY_SECRET=$(openssl rand -base64 48 | tr -d '\n')
+kubectl -n "$NS" patch secret chat-secrets --type merge \
+  -p "{\"stringData\":{\"NOTIFY_SECRET\":\"$NOTIFY_SECRET\"}}"
+```
+
+**Turning it on.** Set `NOTIFY_URL` (e.g.
+`http://push-receiver.askedin.svc.cluster.local:8080/ulw/events`), `NOTIFY_NAMESPACE`,
+`NOTIFY_PORT` and `NOTIFY_MESSAGE_INTERVAL_SECONDS` in `config.env`, and in the overlay:
+
+```yaml
+components:
+  - ../../components/operator-config
+  - ../../components/notifications
+```
+
+then apply as in step 4. Migration 0022, which the gateway's init container applies, holds the
+registry of which devices have a socket open on which chat node; nothing writes to it without
+the component.
+
+**Verify.**
+
+```sh
+kubectl -n "$NS" logs deploy/chat | grep -m1 '"msg":"listening"'    # "notify":true
+kubectl -n "$NS" port-forward deploy/chat 19101:9101 >/dev/null & sleep 2
+curl -s localhost:19101/metrics | grep '^notify_'                      # notify_enabled 1
+kill %1
+```
+
+`notify_enabled 1`; after a call or a message to someone away, `notify_events_total{outcome="sent"}`
+rises and your receiver logs the event. `{outcome="failed"}` rising means the receiver did not
+answer `2xx` within 2 s (or chat cannot reach it: check the two NetworkPolicies);
+`{outcome="dropped"}`, that 4096 events were waiting. Neither delays anything else.
+
+**Rollback.** Remove the component and apply: chat stops sending, and its rows in the registry
+are deleted as each pod drains.
 
 ## 8. Signing key rotation
 

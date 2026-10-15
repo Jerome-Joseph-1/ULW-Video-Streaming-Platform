@@ -118,6 +118,9 @@ effective configuration, secrets as `<redacted>`.
 | `ULW_TURN_KEY_ID`, `ULW_TURN_KEY_API_TOKEN` | `cloudflare`: the TURN key's id (letters, digits, `-`, `_`) and its API token | | same | The token is secret. From `TURN_KEY_ID` in config.env and `SFU_SECRET` (`EXTERNAL_TURN_API_TOKEN`) |
 | `ULW_TURN_API_URL` | `cloudflare`: optional, default `https://rtc.live.cloudflare.com` | | same | `https://`, or `http://` to loopback for a test |
 | `ULW_TURN_TTL_SECONDS` | with `external`: 600 to 172800, default 14400 | | same | How long each ticket's TURN credentials last; a call longer than that needs a new ticket |
+| `ULW_NOTIFY_URL` | | | optional, `http://` or `https://` | Chat's notification events for members who are not connected ([notifications.md](notifications.md), ADR-0111): every node POSTs them here, signed. Unset (the default): none sent, and nothing written to the registry. `components/notifications` sets the three |
+| `ULW_NOTIFY_SECRET` | | | at least 32 bytes; required with `ULW_NOTIFY_URL`, refused without it | Secret: the key each request is signed with (`ULW-Signature`). From `CHAT_SECRET` (`NOTIFY_SECRET`) |
+| `ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS` | | | optional, 5 to 3600, default 30; only with `ULW_NOTIFY_URL` | How often one member away is told of one room's messages |
 
 The Kubernetes secret names (each set in config.env) and the lines that create them are in the
 RUNBOOK, step 3.
@@ -458,6 +461,17 @@ that is not the service's; a user trying the port), `{result="rate_limited"}` (4
 `{result="bad_request"}` (another path, method or body), `{result="refused"}` (409 or 404: the
 change the database refused) and `{result="unavailable"}` (503). Chat is Stable
 ([chat.md](chat.md)).
+The notification hook (ADR-0111), on each chat node: `notify_enabled` (1 with `ULW_NOTIFY_URL`
+set; the lines below only then), `notify_events_total{outcome="sent"}` (in requests the receiver
+answered `2xx`), `{outcome="failed"}` (in requests it did not answer `2xx` within 2 s: alert on a
+rise), `{outcome="dropped"}` (4096 were waiting), `notify_events_queued`,
+`notify_requests_total{result="ok"}` and `{result="failed"}`,
+`notify_registry_total{op="renew"|"sync",result="ok"|"failed"}` (the node's lease and its sockets'
+rows in Postgres), `notify_registry_resyncs_total` (the registry had forgotten the node, after its
+first start: every socket written again), `notify_sockets` and `notify_sockets_unwritten`,
+`notify_ringing_devices_unknown_total` (`call_ringing` sent with `devices` null: the registry did
+not answer within 1 s), `notify_message_lookups_failed_total` and
+`notify_allocation_failures_total`. The registry holds two database sessions per chat node.
 `lossy_drops_total` counts messages lossy clients (every viewer of a stream's live chat) were
 moved past because they were behind (ADR-0070): a node whose count climbs has viewers that
 cannot keep up, not a fault of its own. Each chat connection's kernel send buffer is fixed at

@@ -32,7 +32,7 @@ using core::ports::VideoView;
 using infra::postgres::CatalogConfig;
 using infra::postgres::Params;
 using infra::postgres::PgUploadCatalog;
-using ulw::test::Reply;
+using ulw::test::Awaited;
 using ulw::test::scalar;
 using ulw::test::ScratchDatabase;
 
@@ -74,7 +74,7 @@ protected:
     }
 
     template <class T, class Start> CatalogResult<T> call(Start start) {
-        Reply<T> reply;
+        Awaited<T> reply;
         start(reply.callback());
         return ulw::test::wait(*reactor, reply);
     }

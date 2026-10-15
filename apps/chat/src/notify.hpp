@@ -4,8 +4,9 @@
 #include "core/ports/clock.hpp"
 #include "core/ports/notify.hpp"
 #include "core/ports/random.hpp"
-#include "chat_service.hpp"
 #include "net/reactor.hpp"
+
+#include "chat_service.hpp"
 #include "notify_sender.hpp"
 #include "ring.hpp"
 
