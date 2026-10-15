@@ -3,6 +3,7 @@
 #include "core/ports/e2ee.hpp"
 #include "core/ports/live.hpp"
 #include "core/ports/media.hpp"
+#include "core/ports/notify.hpp"
 
 namespace core::ports {
 
@@ -68,6 +69,16 @@ std::string_view to_string(E2eeError e) noexcept {
         return "corrupt record";
     }
     return "unknown e2ee error";
+}
+
+std::string_view to_string(NotifyError e) noexcept {
+    switch (e) {
+    case NotifyError::Unavailable:
+        return "connectivity registry unavailable";
+    case NotifyError::Corrupt:
+        return "corrupt record";
+    }
+    return "unknown notify error";
 }
 
 std::string_view to_string(MediaError e) noexcept {

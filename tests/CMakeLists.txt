@@ -556,6 +556,23 @@ target_link_libraries(e2ee_unit_tests PRIVATE ulw::e2ee_directory_memory)
 target_include_directories(e2ee_unit_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/tests/conformance)
 
+# The connectivity registry of the notification hook (ADR-0111): one contract, in memory and on
+# Postgres.
+ulw_add_test_suite(notify_unit_tests unit
+    conformance/notify_store_contract.cpp
+    unit/notify/memory_connectivity_test.cpp)
+target_link_libraries(notify_unit_tests PRIVATE ulw::notify_memory)
+target_include_directories(notify_unit_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/tests ${PROJECT_SOURCE_DIR}/tests/conformance)
+
+ulw_add_test_suite(notify_integration_tests integration
+    conformance/notify_store_contract.cpp
+    integration/postgres_notify_test.cpp
+    integration/postgres_harness.cpp)
+target_link_libraries(notify_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
+target_include_directories(notify_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
+    ${PROJECT_SOURCE_DIR}/tests/conformance ${PROJECT_SOURCE_DIR}/infra/postgres/src)
+
 ulw_add_test_suite(e2ee_integration_tests integration
     conformance/e2ee_directory_contract.cpp
     integration/postgres_e2ee_test.cpp
