@@ -8,6 +8,7 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <span>
+#include <string_view>
 #include <utility>
 
 namespace chat {
@@ -74,7 +75,7 @@ public:
     }
     std::size_t read_body(std::span<std::byte> out) noexcept override {
         const std::size_t n = std::min(out.size(), body_.size() - sent_);
-        std::memcpy(out.data(), body_.data() + sent_, n);
+        std::memcpy(out.data(), std::string_view(body_).substr(sent_).data(), n);
         sent_ += n;
         return n;
     }
@@ -131,7 +132,7 @@ void HookSender::start() noexcept {
         const auto seconds =
             std::chrono::duration_cast<std::chrono::seconds>(clock_.wall_now().time_since_epoch())
                 .count();
-        std::string signature = notify_signature(secret_, seconds, body);
+        const std::string signature = notify_signature(secret_, seconds, body);
         queue_.erase(queue_.begin(), queue_.begin() + static_cast<std::ptrdiff_t>(n));
         request_ = std::make_unique<Request>(*this, std::move(body), n);
         auto transfer = infra::curl::Transfer::start_upload(

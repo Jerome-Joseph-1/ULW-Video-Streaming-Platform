@@ -866,7 +866,7 @@ void Session::close() noexcept {
     if (directory_) {
         server_.directory().detach(*directory_);
     }
-    if (notified_) {
+    if (notified_ && user_) {
         server_.deps().notifier->closed(*user_, device_);
     }
     release_request_hold();

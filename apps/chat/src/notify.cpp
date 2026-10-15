@@ -309,7 +309,7 @@ void Notifier::sync() noexcept {
 
 void Notifier::synced(std::uint64_t generation, NotifyResult<void> result) noexcept {
     syncing_ = false;
-    std::vector<std::string> keys = std::exchange(writing_, {});
+    const std::vector<std::string> keys = std::exchange(writing_, {});
     if (stopped_) {
         return;
     }
@@ -321,11 +321,15 @@ void Notifier::synced(std::uint64_t generation, NotifyResult<void> result) noexc
     }
     for (const std::string& key : keys) {
         const auto s = sockets_.find(key);
-        if (s == sockets_.end() || !s->second.writing) {
+        if (s == sockets_.end()) {
+            continue;
+        }
+        const std::optional<bool> wrote = s->second.writing;
+        if (!wrote) {
             continue;
         }
         if (taken) {
-            s->second.written = *s->second.writing;
+            s->second.written = *wrote;
         }
         s->second.writing.reset();
         const bool open = s->second.open > 0;
@@ -393,7 +397,9 @@ void Notifier::message(const core::RoomId& room, const core::UserId& sender,
                                    append_users(out, *result);
                                    out += '}';
                                    n.offer(std::move(out));
-                               } catch (const std::bad_alloc&) {
+                               } catch (...) {
+                                   // std::bad_alloc, or std::format's own error, which this
+                                   // format cannot raise.
                                    ++n.counters_.allocation_failures;
                                }
                            });
@@ -460,7 +466,8 @@ void Notifier::observed(const CallEvent& event) noexcept {
             return;
         }
         offer(std::move(out));
-    } catch (const std::bad_alloc&) {
+    } catch (...) {
+        // std::bad_alloc, or std::format's own error, which these formats cannot raise.
         ++counters_.allocation_failures;
     }
 }

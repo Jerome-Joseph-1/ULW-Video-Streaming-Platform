@@ -385,9 +385,9 @@ int run() {
         return *code;
     }
 
-    if (config->notify) {
+    if (const std::optional<chat::NotifyConfig>& notify = config->notify; notify) {
         core::ports::NotifyTiming timing;
-        timing.message_interval = config->notify->message_interval;
+        timing.message_interval = notify->message_interval;
         auto notify_store = infra::postgres::PgNotifyStore::create(
             *s.reactor, *s.offload, {.conninfo = config->database_url, .timing = timing});
         if (!notify_store) {
@@ -401,7 +401,7 @@ int run() {
         }
         s.notify_multi = std::move(*multi);
         s.hook = std::make_unique<chat::HookSender>(*s.reactor, *s.notify_multi, s.clock,
-                                                    config->notify->url, config->notify->secret);
+                                                    notify->url, notify->secret);
         // This run's tag in the registry: another run of the same pod is another node there.
         std::array<std::byte, sizeof(std::uint64_t)> tag{};
         s.random.fill(tag);

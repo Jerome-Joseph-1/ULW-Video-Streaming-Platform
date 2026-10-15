@@ -140,6 +140,30 @@ std::vector<std::byte> encode_request(const CallSignalRequest& request) {
     return out;
 }
 
+namespace {
+
+// A status ask past its kind: the call, then a flag and perhaps a user.
+std::optional<CallAsk> decode_status(layout::Reader& in) {
+    const auto call = in.uuid<CallId>();
+    const auto has_user = in.u8();
+    if (!call || !has_user || *has_user > 1) {
+        return std::nullopt;
+    }
+    std::optional<core::UserId> user;
+    if (*has_user == 1) {
+        user = in.user();
+        if (!user) {
+            return std::nullopt;
+        }
+    }
+    if (!in.empty()) {
+        return std::nullopt;
+    }
+    return CallStatusRequest{.call = *call, .user = user};
+}
+
+} // namespace
+
 std::vector<std::byte> encode_request(const CallStatusRequest& request) {
     std::vector<std::byte> out;
     put_u8(out, kLayout);
@@ -159,22 +183,7 @@ std::optional<CallAsk> decode_request(std::span<const std::byte> bytes) {
     }
     const auto what = in.u8();
     if (what == kStatus) {
-        const auto call = in.uuid<CallId>();
-        const auto has_user = in.u8();
-        if (!call || !has_user || *has_user > 1) {
-            return std::nullopt;
-        }
-        std::optional<core::UserId> user;
-        if (*has_user == 1) {
-            user = in.user();
-            if (!user) {
-                return std::nullopt;
-            }
-        }
-        if (!in.empty()) {
-            return std::nullopt;
-        }
-        return CallStatusRequest{.call = *call, .user = user};
+        return decode_status(in);
     }
     auto user = in.user();
     if (!what || !user ||
@@ -344,10 +353,11 @@ void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> re
         if (const auto* s = std::get_if<CallStatusRequest>(&*asked)) {
             // What the ringer knows now; nothing to wait on.
             const auto ringing = ringer_.ringing(room, s->call, s->user);
-            finish(answer, {.outcome = !ringing   ? CallOutcome::NoCall
-                                       : *ringing ? CallOutcome::Ringing
-                                                  : CallOutcome::Answered,
-                            .ticket = std::nullopt});
+            CallOutcome outcome = CallOutcome::NoCall;
+            if (ringing) {
+                outcome = *ringing ? CallOutcome::Ringing : CallOutcome::Answered;
+            }
+            finish(answer, {.outcome = outcome, .ticket = std::nullopt});
             return;
         }
         ++in_flight_;

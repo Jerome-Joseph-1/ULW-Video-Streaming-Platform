@@ -90,12 +90,12 @@ void MemoryConnectivity::sync(std::uint64_t node, std::vector<SocketDevice> adde
     for (const SocketDevice& r : removed) {
         std::erase(sockets, r);
     }
-    for (SocketDevice& a : added) {
+    for (const SocketDevice& a : added) {
         for (auto& [room, marks] : marks_) {
             marks.erase(a.user);
         }
         if (std::ranges::find(sockets, a) == sockets.end()) {
-            sockets.push_back(std::move(a));
+            sockets.push_back(a);
         }
     }
     reply<void>(std::move(done), {});
