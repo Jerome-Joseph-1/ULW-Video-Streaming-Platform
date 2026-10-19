@@ -1793,6 +1793,23 @@ void CallHandler::on_members_resync() noexcept {
     }
 }
 
+void CallHandler::on_user_disconnected(const core::UserId& user) noexcept {
+    if (sfu_ == nullptr) {
+        return;
+    }
+    try {
+        for (const core::RoomId& room : ringer_.rooms()) {
+            if (plane_.owns(room) && ringer_.involves(room, user)) {
+                ++counters_.disconnects;
+                on_member_removed(room, user);
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        // No list of the rooms: the user stays in their calls until they leave or are put out.
+        ++counters_.store_unavailable;
+    }
+}
+
 void CallHandler::check_occupancy() noexcept {
     std::vector<std::pair<core::RoomId, CallId>> due;
     try {

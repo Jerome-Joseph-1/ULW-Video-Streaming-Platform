@@ -294,6 +294,11 @@ bool Ringer::member_of(const Call& call, const core::UserId& user) noexcept {
            std::ranges::find(call.joined, user) != call.joined.end();
 }
 
+bool Ringer::involves(const core::RoomId& room, const core::UserId& user) const noexcept {
+    const auto it = calls_.find(room);
+    return it != calls_.end() && member_of(it->second, user);
+}
+
 bool Ringer::expelled(const core::RoomId& room, const core::UserId& user) const noexcept {
     const auto it = calls_.find(room);
     return it != calls_.end() &&

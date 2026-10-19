@@ -779,6 +779,9 @@ public:
                                       role == MemberRole::Admin ? "admin" : "member", user.view()));
     }
     void on_members_resync() noexcept override { ++resyncs; }
+    void on_user_disconnected(const core::UserId& user) noexcept override {
+        changes.push_back(std::format("! {}", user.view()));
+    }
 
     std::vector<std::string> changes;
     int resyncs = 0;
@@ -1311,6 +1314,29 @@ TEST_P(MembershipConformance, EveryChangeIsToldToTheListenerUserByUser) {
         return v;
     };
     EXPECT_EQ(sorted(sorted(heard.changes, 0, 2), 2, 4), expected);
+    store().watch_members(nullptr);
+}
+
+// ADR-0132: a disconnect is told like a member change, and changes no list.
+TEST_P(MembershipConformance, ADisconnectIsToldToTheListenerAndChangesNoList) {
+    Heard heard;
+    ASSERT_NO_FATAL_FAILURE(backend_->watch(heard, heard.resyncs));
+    const core::RoomId room = named_room("04");
+    ASSERT_EQ(create_group(room, alice_, {bob_}), done({alice_, bob_}));
+    ASSERT_TRUE(ask<void>([&](auto done) { store().disconnect_user(bob_, std::move(done)); }));
+    ASSERT_TRUE(ask<void>([&](auto done) { store().disconnect_user(bob_, std::move(done)); }));
+    const std::vector<std::string> expected{"+ " + room.to_string() + " auth0|alice",
+                                            "+ " + room.to_string() + " auth0|bob", "! auth0|bob",
+                                            "! auth0|bob"};
+    ASSERT_TRUE(ulw::test::pump_until(backend_->reactor(),
+                                      [&] { return heard.changes.size() >= expected.size(); }));
+    ulw::test::pump_pending(backend_->reactor());
+    auto changes = heard.changes;
+    std::sort(changes.begin(), changes.begin() + 2);
+    EXPECT_EQ(changes, expected);
+    EXPECT_EQ(ask<core::ports::RoomAccess>(
+                  [&](auto done) { store().access(room, bob_, std::move(done)); }),
+              (core::ports::RoomAccess{.kind = core::ports::RoomKind::GroupChat, .member = true}));
     store().watch_members(nullptr);
 }
 

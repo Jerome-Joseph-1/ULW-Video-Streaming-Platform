@@ -61,6 +61,10 @@ public:
                      core::ports::MessageCallback<std::vector<core::UserId>> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
     }
+    void disconnect_user(const core::UserId& /*user*/,
+                         core::ports::MessageCallback<void> done) override {
+        done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
 };
 
 } // namespace ulw::test

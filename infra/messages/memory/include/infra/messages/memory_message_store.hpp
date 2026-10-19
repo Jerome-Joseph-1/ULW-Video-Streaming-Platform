@@ -64,6 +64,8 @@ public:
     void watch_members(core::ports::IMemberListener* listener) noexcept override {
         listener_ = listener;
     }
+    void disconnect_user(const core::UserId& user,
+                         core::ports::MessageCallback<void> done) override;
     void open_direct(const core::RoomId& room, const core::UserId& user, const core::UserId& peer,
                      core::ports::MessageCallback<core::ports::MembershipChange> done) override;
     void create_group(const core::RoomId& room, const core::UserId& creator,

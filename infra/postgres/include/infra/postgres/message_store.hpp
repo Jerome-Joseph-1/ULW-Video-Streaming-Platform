@@ -75,6 +75,8 @@ public:
                 core::ports::MessageCallback<core::ports::RoomAccess> done) override;
     void record_live(const core::RoomId& room, core::ports::MessageCallback<void> done) override;
     void watch_members(core::ports::IMemberListener* listener) noexcept override;
+    void disconnect_user(const core::UserId& user,
+                         core::ports::MessageCallback<void> done) override;
     void open_direct(const core::RoomId& room, const core::UserId& user, const core::UserId& peer,
                      core::ports::MessageCallback<core::ports::MembershipChange> done) override;
     void create_group(const core::RoomId& room, const core::UserId& creator,

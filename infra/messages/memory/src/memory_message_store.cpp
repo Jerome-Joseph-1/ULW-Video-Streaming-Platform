@@ -172,6 +172,15 @@ void MemoryMessageStore::remove_member(const core::RoomId& room, const core::Use
     });
 }
 
+void MemoryMessageStore::disconnect_user(const core::UserId& user, MessageCallback<void> done) {
+    defer([this, done = std::move(done), user]() mutable noexcept {
+        done({});
+        if (listener_ != nullptr) {
+            listener_->on_user_disconnected(user);
+        }
+    });
+}
+
 void MemoryMessageStore::members(const core::RoomId& room, std::optional<core::UserId> after,
                                  std::size_t limit,
                                  MessageCallback<std::vector<core::UserId>> done) {

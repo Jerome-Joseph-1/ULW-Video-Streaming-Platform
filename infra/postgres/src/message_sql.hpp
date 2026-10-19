@@ -64,6 +64,10 @@ ON CONFLICT (room_id, user_id) DO NOTHING)sql";
 
 inline constexpr Sql kRemoveMember = "DELETE FROM chat_members WHERE room_id = $1 AND user_id = $2";
 
+// A user to cut off on every node (ADR-0132), on the channel member changes take: '!' is no
+// change a node of an earlier release knows, so it resyncs, which is harmless.
+inline constexpr Sql kDisconnectUser = "SELECT pg_notify('chat_members', '! ' || $1)";
+
 // Answers with the room's recorded kind and whether $2 is a member. A join reads first, so that
 // joining a recorded room takes no row lock and writes nothing. Only a room with no kind recorded
 // is written, and only with a closed kind ($3): a join that asks for 'stream_live_chat' records

@@ -103,6 +103,7 @@ public:
     }
     [[nodiscard]] std::size_t unsent_bytes() const noexcept override { return 0; }
     void allocation_failed() noexcept override { ++allocation_failures; }
+    void disconnect() noexcept override {}
 
     std::vector<std::string> frames;
     int allocation_failures = 0;

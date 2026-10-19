@@ -178,6 +178,34 @@ private:
     MessageCallback<void> done_;
 };
 
+class DisconnectUser final : public Operation {
+public:
+    DisconnectUser(const core::UserId& user, MessageCallback<void> done)
+        : user_(user), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = message_sql::kDisconnectUser,
+                         .params = Params{}.add_text(user_.view())};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+        } else {
+            done_({});
+        }
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(MessageStoreError::Unavailable));
+    }
+
+private:
+    core::UserId user_;
+    MessageCallback<void> done_;
+};
+
 // The names section 8.15 gives the kinds, as chat_rooms.kind holds them.
 [[nodiscard]] std::string_view kind_text(core::ports::RoomKind kind) noexcept {
     switch (kind) {
@@ -1050,20 +1078,31 @@ private:
 namespace {
 
 struct MemberNotice {
-    enum class Change : std::uint8_t { Added, Removed, Role };
+    enum class Change : std::uint8_t { Added, Removed, Role, Disconnected };
     Change change = Change::Added;
-    core::RoomId room;
+    // Every change but a disconnect is of a room.
+    std::optional<core::RoomId> room;
     core::UserId user;
     core::ports::MemberRole role = core::ports::MemberRole::Member;
 };
 
 // "+ <room> <user>", "- <room> <user>" or "* <room> <role> <user>", as notify_chat_members()
-// (migration 0015) writes it.
+// (migration 0015) writes it, or "! <user>", as disconnect_user does (ADR-0132).
 std::optional<MemberNotice> parse_notice(std::string_view payload) {
     if (payload.size() < 2 || payload[1] != ' ') {
         return std::nullopt;
     }
     MemberNotice::Change change = MemberNotice::Change::Added;
+    if (payload[0] == '!') {
+        const auto user = core::UserId::parse(payload.substr(2));
+        if (!user) {
+            return std::nullopt;
+        }
+        return MemberNotice{.change = MemberNotice::Change::Disconnected,
+                            .room = std::nullopt,
+                            .user = *user,
+                            .role = core::ports::MemberRole::Member};
+    }
     if (payload[0] == '-') {
         change = MemberNotice::Change::Removed;
     } else if (payload[0] == '*') {
@@ -1125,13 +1164,16 @@ public:
         }
         switch (notice->change) {
         case MemberNotice::Change::Added:
-            listener_->on_member_added(notice->room, notice->user);
+            listener_->on_member_added(*notice->room, notice->user);
             return;
         case MemberNotice::Change::Removed:
-            listener_->on_member_removed(notice->room, notice->user);
+            listener_->on_member_removed(*notice->room, notice->user);
             return;
         case MemberNotice::Change::Role:
-            listener_->on_member_role(notice->room, notice->user, notice->role);
+            listener_->on_member_role(*notice->room, notice->user, notice->role);
+            return;
+        case MemberNotice::Change::Disconnected:
+            listener_->on_user_disconnected(notice->user);
             return;
         }
     }
@@ -1248,6 +1290,10 @@ void PgMessageStore::record_live(const core::RoomId& room, MessageCallback<void>
 
 void PgMessageStore::watch_members(core::ports::IMemberListener* listener) noexcept {
     impl_->watch(listener);
+}
+
+void PgMessageStore::disconnect_user(const core::UserId& user, MessageCallback<void> done) {
+    impl_->pool().submit(std::make_unique<DisconnectUser>(user, std::move(done)));
 }
 
 void PgMessageStore::open_direct(const core::RoomId& room, const core::UserId& user,

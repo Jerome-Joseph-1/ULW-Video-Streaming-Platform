@@ -61,6 +61,7 @@ enum class Op : std::uint8_t {
     CallStatus,
     SetRole,
     Presence,
+    DisconnectUser,
 };
 
 Op op_of(std::string_view target) noexcept {
@@ -68,7 +69,7 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 14> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 15> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
@@ -83,6 +84,7 @@ Op op_of(std::string_view target) noexcept {
         {"call_status", Op::CallStatus},
         {"set_role", Op::SetRole},
         {"presence", Op::Presence},
+        {"disconnect_user", Op::DisconnectUser},
     }};
     const auto* found = std::ranges::find(kOps, name, &std::pair<std::string_view, Op>::first);
     return found == kOps.end() ? Op::None : found->second;
@@ -573,6 +575,9 @@ private:
         case Op::Presence:
             started = presence(*json);
             break;
+        case Op::DisconnectUser:
+            started = disconnect_user(*json);
+            break;
         case Op::None:
             started = std::unexpected(Refusal{.status = Status::NotFound, .reason = "not_found"});
             break;
@@ -899,6 +904,41 @@ private:
                         Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
                 }
             });
+        return {};
+    }
+
+    // Every socket and call of the user, on every node, cut off now (ADR-0132): answered once the
+    // notice is out, before the nodes act on it. Their lists stay as they are.
+    Parsed<void> disconnect_user(const core::json::Value& body) {
+        if (!only(body, {"user"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto user = user_of(body, "user");
+        if (!user) {
+            return std::unexpected(user.error());
+        }
+        api_.store_.disconnect_user(*user, [api = &api_, id = id_,
+                                            user = *user](MessageResult<void> result) noexcept {
+            Connection* c = api->find(id);
+            if (c == nullptr) {
+                return;
+            }
+            if (!result) {
+                ++api->counters_.unavailable;
+                c->refused(Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
+                return;
+            }
+            try {
+                ++api->counters_.changes;
+                std::string out = R"({"type":"disconnected","user":)";
+                core::json::append_string(out, user.view());
+                out += '}';
+                c->answered(Status::Ok, out);
+            } catch (const std::bad_alloc&) {
+                ++api->counters_.unavailable;
+                c->refused(Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
+            }
+        });
         return {};
     }
 
