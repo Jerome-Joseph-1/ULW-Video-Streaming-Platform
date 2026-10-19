@@ -160,6 +160,9 @@ struct History {
     std::optional<std::uint64_t> before;
     std::optional<std::uint64_t> after;
     std::size_t limit = kDefaultHistoryLimit;
+    // Instead of before and after: up to `limit` messages around this seq, it included when it
+    // is stored, oldest first (ADR-0118).
+    std::optional<std::uint64_t> around = std::nullopt;
 };
 
 struct Watch {

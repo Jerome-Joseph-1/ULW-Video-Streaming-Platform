@@ -141,7 +141,7 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
 }
 
 [[nodiscard]] std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "before", "after", "limit"})) {
+    if (!only(message, {"type", "room", "before", "after", "around", "limit"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }
     auto room = room_of(message);
@@ -158,7 +158,8 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
         return into.has_value();
     };
     if (!seq_at("before", history.before) || !seq_at("after", history.after) ||
-        (history.before && history.after)) {
+        !seq_at("around", history.around) || (history.before && history.after) ||
+        (history.around && (history.before || history.after))) {
         return std::unexpected(EnvelopeError::Malformed);
     }
     if (const core::json::Value* limit = message.find("limit")) {

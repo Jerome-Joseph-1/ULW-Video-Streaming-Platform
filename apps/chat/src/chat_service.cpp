@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <functional>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -489,6 +490,10 @@ void ChatService::history(ClientId id, const History& history) {
         answer(*c->client, "busy", history.room);
         return;
     }
+    if (history.around) {
+        around(id, history);
+        return;
+    }
     auto done =
         [this, id, room = history.room](
             core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept {
@@ -499,6 +504,56 @@ void ChatService::history(ClientId id, const History& history) {
     } else {
         messages_.history_before(history.room, history.before, history.limit, std::move(done));
     }
+}
+
+// Two reads for one page (ADR-0118): the seq and those before it, half the page, newest first;
+// then those after it, as many as the rest of the page holds. Sent oldest first.
+void ChatService::around(ClientId id, const History& history) {
+    // history() comes here only with `around` set.
+    const std::uint64_t seq = history.around.value_or(0);
+    const std::size_t older = (history.limit + 1) / 2;
+    const auto before = seq == std::numeric_limits<std::uint64_t>::max()
+                            ? std::optional<std::uint64_t>{}
+                            : std::optional(seq + 1);
+    messages_.history_before(
+        history.room, before, older,
+        [this, id, room = history.room, seq, limit = history.limit](
+            core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept {
+            if (!page) {
+                page_read(id, room, std::move(page));
+                return;
+            }
+            std::ranges::reverse(*page);
+            const std::size_t rest = limit - std::min(limit, page->size());
+            if (rest == 0) {
+                page_read(id, room, std::move(page));
+                return;
+            }
+            try {
+                messages_.history_after(
+                    room, seq, rest,
+                    [this, id, room, first = std::move(*page)](
+                        core::ports::MessageResult<std::vector<core::ports::StoredMessage>>
+                            newer) mutable noexcept {
+                        if (!newer) {
+                            page_read(id, room, std::move(newer));
+                            return;
+                        }
+                        try {
+                            first.insert(first.end(), std::make_move_iterator(newer->begin()),
+                                         std::make_move_iterator(newer->end()));
+                        } catch (const std::bad_alloc&) {
+                            ++counters_.allocation_failures;
+                            page_read(id, room,
+                                      std::unexpected(core::ports::MessageStoreError::Unavailable));
+                            return;
+                        }
+                        page_read(id, room, std::move(first));
+                    });
+            } catch (const std::bad_alloc&) {
+                ++counters_.allocation_failures;
+            }
+        });
 }
 
 ChatService::Room* ChatService::calling_room(Client& c, ClientId id, const core::RoomId& room) {
