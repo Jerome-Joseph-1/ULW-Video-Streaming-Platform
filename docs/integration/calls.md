@@ -90,6 +90,7 @@ passes to the SDK ([step 4](#the-flow)).
    | `token` | Admits this user and device to this call, once |
    | `expires_at` | Unix seconds, 60 s after issue: connect before then |
    | `ice_servers` | Only where the deployment uses an external TURN service (ADR-0109): the relays this device must reach LiveKit through, as `RTCIceServer` objects (`urls`, and `username` and `credential` for TURN). Absent otherwise |
+   | `ice_expires_at` | With `ice_servers`: Unix seconds when their credentials stop working (ADR-0127) |
    | `call` | The call this ticket belongs to: the one it started ringing, or the one it answered or rejoined. Absent when there is none: nobody else is on the room's member list, or the call you were answering ended while you asked (then do not connect) |
 
 4. Connect with the LiveKit JS SDK (`livekit-client`; the call suite pins 2.22.3), before
@@ -111,8 +112,21 @@ passes to the SDK ([step 4](#the-flow)).
    ```
 
    The `ice_servers` credentials last as long as the deployment configures (4 hours by
-   default) and are not renewed mid-call: a call longer than that drops its relay, and the
-   client comes back with a new ticket (step 6), which carries fresh ones.
+   default), until `ice_expires_at`. A call that may outlast them asks for fresh ones a few
+   minutes before, on the socket, without leaving the call (ADR-0127):
+
+   ```json
+   {"type":"ice_servers","room":"<room>","device":"<this device>"}
+   ```
+
+   answered `{"type":"ice_servers","room":..,"ice_servers":[...],"ice_expires_at":..}`, or an
+   `error` (`not_joined`, `no_relay` where there is no external TURN service, `busy` like a
+   join, `unavailable`: retry). Hand them to the peer connections and restart ICE
+   (`pc.setConfiguration({...pc.getConfiguration(), iceServers})`, then `pc.restartIce()`).
+   livekit-client does not expose its peer connections, so a client on it rejoins with a fresh
+   ticket instead (step 6), shortly before `ice_expires_at` and while the old relay still works,
+   so the call barely blips. A client that does neither drops its relay at `ice_expires_at` and
+   comes back with a new ticket, as before.
 
    The ticket is used once. After the connect LiveKit keeps the connection's credential fresh
    itself, and the SDK reconnects with it after a network change; do not store the ticket.

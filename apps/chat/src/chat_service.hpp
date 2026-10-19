@@ -3,6 +3,7 @@
 #include "core/models/ids.hpp"
 #include "core/ports/clock.hpp"
 #include "core/ports/message_store.hpp"
+#include "core/ports/turn.hpp"
 #include "rt/message_key.hpp"
 #include "rt/room_router.hpp"
 
@@ -240,6 +241,15 @@ public:
     void around(ClientId id, const History& history);
     // The socket stops following a room it joined, freeing its place (ADR-0117).
     void part(ClientId id, const Part& part);
+    // Fresh relay credentials for the client's device, in a room it joined (ADR-0127); charged as
+    // a join. Without an external TURN service, `no_relay`.
+    void ice_servers(ClientId id, const IceServersRequest& request);
+    // The external TURN service's issuer and its credentials' lifetime, which tickets carry as
+    // ice_expires_at; null when the media server names its own relay. Must outlive the service.
+    void use_turn(core::ports::ITurnCredentials* turn, core::Seconds ttl) noexcept {
+        turn_ = turn;
+        turn_ttl_ = ttl;
+    }
     // Member lists as their users change them (ADR-0096, membership.cpp). None needs the room
     // joined: the store decides from the list itself, under the room's lock. Changes are charged
     // to the user's membership allowance, listings to the join allowance (each is a read of the
@@ -401,6 +411,8 @@ private:
     IRooms& rooms_plane_;
     core::ports::IMessageStore& messages_;
     const core::ports::IClock& clock_;
+    core::ports::ITurnCredentials* turn_ = nullptr;
+    core::Seconds turn_ttl_{0};
     ServiceLimits limits_;
     ServiceCounters counters_;
     std::uint64_t next_client_ = 1;

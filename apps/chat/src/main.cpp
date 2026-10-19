@@ -167,6 +167,16 @@ std::expected<void, std::string> make_sfu(const chat::Config& config, Services& 
     return {};
 }
 
+// How long the external TURN service's credentials last, which tickets say (ADR-0127); zero
+// without one.
+core::Seconds turn_ttl_of(const chat::Config& config) noexcept {
+    if (!config.calls) {
+        return core::Seconds{0};
+    }
+    const auto& turn = config.calls->turn;
+    return turn ? turn->ttl : core::Seconds{0};
+}
+
 std::expected<void, std::string> make_verifier(const chat::Config& config, Services& s) {
     infra::auth::ClaimRules rules{.issuer = config.jwt_issuer,
                                   .audience = config.jwt_audience,
@@ -439,6 +449,8 @@ int run() {
                    .clock = s.clock,
                    .random = s.random,
                    .sfu = s.sfu.get(),
+                   .turn = s.turn.get(),
+                   .turn_ttl = turn_ttl_of(*config),
                    .registry = s.directory.get(),
                    .key_packages = s.directory.get(),
                    .notifier = s.notifier.get(),

@@ -251,6 +251,13 @@ struct SocketState {
     bool visible = true;
 };
 
+// ice_servers: fresh relay credentials for this device in a joined room's call, for a call that
+// outlasts the ticket's (ADR-0127).
+struct IceServersRequest {
+    core::RoomId room;
+    core::DeviceId device;
+};
+
 struct ListRooms {
     std::optional<core::RoomId> after;
     std::size_t limit = kDefaultListLimit;
@@ -299,9 +306,10 @@ struct ClaimKeyPackages {
 using DirectoryCommand =
     std::variant<RegisterDevice, RetireDevice, PublishKeyPackages, ListDevices, ClaimKeyPackages>;
 
-using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery,
-                             Part, Ping, SocketState, OpenDirect, CreateGroup, AddMembers,
-                             RemoveMember, LeaveRoom, ListRooms, ListMembers, DirectoryCommand>;
+using Command =
+    std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery, Part, Ping,
+                 SocketState, IceServersRequest, OpenDirect, CreateGroup, AddMembers, RemoveMember,
+                 LeaveRoom, ListRooms, ListMembers, DirectoryCommand>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -351,6 +359,10 @@ void write_rate_limited(std::string& out, const core::RoomId& room, const rt::Me
                         core::Millis retry_after);
 
 // The answer to a call: the ticket the client takes to the SFU, and the ring it belongs to.
+// {"type":"ice_servers","room":..,"ice_servers":[...],"ice_expires_at":..}: the answer to
+// ice_servers.
+void write_ice_servers(std::string& out, const core::RoomId& room,
+                       std::span<const core::ports::IceServer> servers, core::WallTime expires_at);
 void write_ticket(std::string& out, const core::RoomId& room,
                   const core::ports::MediaTicket& ticket,
                   const std::optional<CallId>& call = std::nullopt);

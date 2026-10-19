@@ -169,6 +169,14 @@ TEST(Envelope, WhatIsNotACommandIsRefusedWithAReason) {
               std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(chat::parse_command(R"({"type":"state","visible":true,"focused":true})"),
               std::unexpected(EnvelopeError::Malformed));
+    // ice_servers names the room and the device (ADR-0127).
+    const auto ice = chat::parse_command(R"({"type":"ice_servers",)" + room +
+                                         R"(,"device":"01a0eb86-6cca-7dce-84cc-3bb47615f001"})");
+    ASSERT_TRUE(ice);
+    EXPECT_EQ(std::get<chat::IceServersRequest>(*ice).device.to_string(),
+              "01a0eb86-6cca-7dce-84cc-3bb47615f001");
+    EXPECT_EQ(chat::parse_command(R"({"type":"ice_servers",)" + room + "}"),
+              std::unexpected(EnvelopeError::Malformed));
     // ping takes a rid, and nothing else (ADR-0122).
     EXPECT_FALSE(std::get<chat::Ping>(*chat::parse_command(R"({"type":"ping"})")).rid);
     EXPECT_EQ(std::get<chat::Ping>(*chat::parse_command(R"({"type":"ping","rid":"a1"})")).rid,

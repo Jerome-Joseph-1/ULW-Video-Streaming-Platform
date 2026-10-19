@@ -659,6 +659,10 @@ void Session::command(const codec::ws::Frame& frame) {
         chat.part(*client_, *p);
         return;
     }
+    if (const auto* i = std::get_if<IceServersRequest>(&*parsed)) {
+        chat.ice_servers(*client_, *i);
+        return;
+    }
     if (const auto* o = std::get_if<OpenDirect>(&*parsed)) {
         chat.open_direct(*client_, *o);
         return;
