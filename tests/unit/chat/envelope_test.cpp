@@ -159,6 +159,16 @@ TEST(Envelope, WhatIsNotACommandIsRefusedWithAReason) {
               *core::RoomId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f9fd"));
     EXPECT_EQ(chat::parse_command(R"({"type":"part",)" + room + R"(,"after":1})"),
               std::unexpected(EnvelopeError::Malformed));
+    // state says whether the page is in view, and nothing else (ADR-0125).
+    EXPECT_FALSE(
+        std::get<chat::SocketState>(*chat::parse_command(R"({"type":"state","visible":false})"))
+            .visible);
+    EXPECT_EQ(chat::parse_command(R"({"type":"state"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"state","visible":"no"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(R"({"type":"state","visible":true,"focused":true})"),
+              std::unexpected(EnvelopeError::Malformed));
     // ping takes a rid, and nothing else (ADR-0122).
     EXPECT_FALSE(std::get<chat::Ping>(*chat::parse_command(R"({"type":"ping"})")).rid);
     EXPECT_EQ(std::get<chat::Ping>(*chat::parse_command(R"({"type":"ping","rid":"a1"})")).rid,

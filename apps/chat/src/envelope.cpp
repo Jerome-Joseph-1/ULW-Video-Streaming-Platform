@@ -817,6 +817,14 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
         }
         return Ping{.rid = *rid};
     }
+    if (name == "state") {
+        const core::json::Value* visible = message->find("visible");
+        const auto value = visible != nullptr ? visible->as_bool() : std::nullopt;
+        if (!only(*message, {"type", "visible"}) || !value) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        return SocketState{.visible = *value};
+    }
     if (name == "rooms") {
         return rooms_of(*message);
     }
@@ -1165,6 +1173,10 @@ void write_removed(std::string& out, const core::RoomId& room, const core::UserI
 void write_pong(std::string& out, const std::optional<rt::MessageKey>& rid) {
     out += R"({"type":"pong"})";
     append_echo(out, std::nullopt, rid);
+}
+
+void write_state(std::string& out, bool visible) {
+    out += visible ? R"({"type":"state","visible":true})" : R"({"type":"state","visible":false})";
 }
 
 void write_parted(std::string& out, const core::RoomId& room) {

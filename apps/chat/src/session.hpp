@@ -124,6 +124,7 @@ private:
     void read_frames(net::BorrowedBytes bytes);
     [[nodiscard]] bool within_control_budget(std::size_t in_this_read) noexcept;
     void command(const codec::ws::Frame& frame);
+    void set_visible(bool visible) noexcept;
 
     void send_text(std::string_view text);
     void send_frame(const codec::ws::Frame& frame);
@@ -171,6 +172,9 @@ private:
     // refusals_on_socket.
     bool socket_refusals_ = false;
     bool notified_ = false;
+    // The client said its page or app is out of view (ADR-0125): out of the registry until it
+    // says otherwise.
+    bool hidden_ = false;
     net::IpAddress peer_;
     // ADR-0076: the direct peer's connection, for the socket's life; a forwarded client's
     // upgrade, until it is answered; and the user's open socket, from the upgrade on.
