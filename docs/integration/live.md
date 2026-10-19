@@ -275,8 +275,8 @@ is a video with a visibility of its own, private until its owner shares it
 ([When a stream ends](#when-a-stream-ends)).
 
 Both answer the stream object as its owner sees it, with `visibility`. Refusals carry
-`{"error":"<code>"}`: `400` `bad_visibility` (not one of the three forms; an empty body is `400`
-with no body), `403` `not_member`, and on the owner's route `404` with no body for a stream not
+`{"error":"<code>"}`: `400` `bad_visibility` (not one of the three forms, `"public"`
+included, which only a video may be; an empty body is `400` with no body), `403` `not_member`, and on the owner's route `404` with no body for a stream not
 the caller's. The backend's route takes the same token as the
 [service API for videos](videos-and-playback.md#service-api-grants), in the `Authorization`
 header only (`403` `forbidden` for anything else), and answers `404` `not_found` for no such

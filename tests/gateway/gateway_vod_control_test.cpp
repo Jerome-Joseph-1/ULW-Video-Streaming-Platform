@@ -338,7 +338,7 @@ TEST_F(GatewayVodControl, TheServiceSetsAnyVideosVisibility) {
 TEST_F(GatewayVodControl, TheServicesVisibilityIsCheckedAsTheOwnersIs) {
     publish(core::VideoState::Ready);
     for (const std::string_view body :
-         {R"({"visibility":"public"})", R"({"visibility":"room:nope"})", "{}", "not json"}) {
+         {R"({"visibility":"everyone"})", R"({"visibility":"room:nope"})", "{}", "not json"}) {
         const auto r = service_patch(body);
         ASSERT_TRUE(r);
         EXPECT_EQ(r->status, 400) << body;
@@ -391,7 +391,7 @@ TEST_F(GatewayVodControl, TheServicesBulkVisibilityIsCheckedFirst) {
     publish(core::VideoState::Ready);
     const std::string video = std::format(R"("{}")", kVideo);
     for (const auto& [body, error] : std::initializer_list<std::pair<std::string, std::string>>{
-             {R"({"visibility":"public","videos":[)" + video + "]}", "bad_visibility"},
+             {R"({"visibility":"everyone","videos":[)" + video + "]}", "bad_visibility"},
              {"not json", "bad_visibility"},
              {R"({"visibility":"unlisted"})", "bad_videos"},
              {R"({"visibility":"unlisted","videos":[]})", "bad_videos"},

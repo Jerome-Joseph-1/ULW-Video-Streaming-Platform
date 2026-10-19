@@ -15,6 +15,7 @@ namespace {
 constexpr std::string_view kPrivate = "private";
 constexpr std::string_view kRoom = "room";
 constexpr std::string_view kUnlisted = "unlisted";
+constexpr std::string_view kPublic = "public";
 constexpr std::string_view kRoomPrefix = "room:";
 
 } // namespace
@@ -25,6 +26,9 @@ std::expected<Visibility, DomainError> Visibility::parse(std::string_view text) 
     }
     if (text == kUnlisted) {
         return unlisted();
+    }
+    if (text == kPublic) {
+        return anyone();
     }
     if (!text.starts_with(kRoomPrefix)) {
         return std::unexpected(DomainError::InvalidVisibility);
@@ -59,6 +63,9 @@ Visibility::from_columns(std::string_view kind,
     if (kind == kUnlisted) {
         return unlisted();
     }
+    if (kind == kPublic) {
+        return anyone();
+    }
     return std::unexpected(DomainError::InvalidVisibility);
 }
 
@@ -70,6 +77,8 @@ std::string_view Visibility::kind_name() const noexcept {
         return kRoom;
     case VisibilityKind::Unlisted:
         return kUnlisted;
+    case VisibilityKind::Public:
+        return kPublic;
     }
     return kPrivate;
 }

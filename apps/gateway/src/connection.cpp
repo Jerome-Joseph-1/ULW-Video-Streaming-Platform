@@ -30,6 +30,13 @@ constexpr std::size_t kMaxJsonBody = std::size_t{4} * 1024;
 // The longest Idempotency-Key a create may carry (ADR-0108).
 constexpr std::size_t kMaxIdempotencyKey = 255;
 
+// Who the catalog's read of a video names for a request with no token (ADR-0121). What it
+// answers about them is never looked at: access_of_anonymous decides on the video alone, so
+// a user of that name gains nothing from it.
+core::UserId anonymous_viewer() {
+    return *core::UserId::parse("anonymous");
+}
+
 // 1 to 255 visible ASCII characters, as the catalog's check requires (ADR-0108).
 bool idempotency_key_valid(std::string_view key) noexcept {
     return !key.empty() && key.size() <= kMaxIdempotencyKey &&
@@ -440,6 +447,16 @@ http::HeadVerdict Connection::authenticate_head(const http::RequestHead& head) n
     }
     const auto token = extractor.token();
     if (!token) {
+        // A video's metadata and playlists are asked without a token for a public video
+        // (ADR-0121): nobody is signed in, and only a public video is served. The request stays
+        // under its address's limits.
+        // An Authorization header that names no usable token is still refused.
+        if ((req_.route == RouteId::GetVideo || req_.route == RouteId::MasterPlaylist ||
+             req_.route == RouteId::MediaPlaylist) &&
+            !http::find_header(head.headers, "authorization")) {
+            req_.authenticated = true;
+            return http::HeadVerdict::accept();
+        }
         return http::HeadVerdict::reject(Status::Unauthorized);
     }
     // Authorization wins over the cookie, so without one the token is the cookie. Checked before
@@ -1019,14 +1036,17 @@ void Connection::start_lookup() noexcept {
     if (req_.route == RouteId::GetVideo || req_.route == RouteId::MasterPlaylist ||
         req_.route == RouteId::MediaPlaylist) {
         const auto id = core::VideoId::parse(req_.params[0]);
-        const core::ports::Claims* claims = get(req_.claims);
-        if (!id || claims == nullptr) {
-            fail(id ? Status::InternalServerError : Status::NotFound);
+        if (!id) {
+            fail(Status::NotFound);
             return;
         }
         // What the viewer is to the video comes in the same read as the video (ADR-0097).
+        // Nobody signed in has no facts to read: the stand-in id's are never looked at, since
+        // access_of_anonymous decides on the video alone.
+        const core::ports::Claims* claims = get(req_.claims);
+        const core::UserId viewer = claims != nullptr ? claims->subject : anonymous_viewer();
         ++pending_;
-        deps().catalog.find_video_for(*id, claims->subject, [this](auto result) noexcept {
+        deps().catalog.find_video_for(*id, viewer, [this](auto result) noexcept {
             --pending_;
             on_video(std::move(result));
         });
@@ -1137,18 +1157,22 @@ void Connection::on_video(core::ports::CatalogResult<core::ports::VideoView> res
         return;
     }
     const core::ports::Claims* claims = get(req_.claims);
-    if (claims == nullptr) {
-        fail(Status::InternalServerError);
-        return;
-    }
     if (!result) {
+        if (claims == nullptr && result.error() == core::ports::CatalogError::NotFound) {
+            fail(Status::Unauthorized);
+            return;
+        }
         fail_catalog(result.error());
         return;
     }
     const core::VideoRecord& v = result->video;
-    const core::VideoAccess access = core::access_of(v, claims->subject, result->viewer);
+    const core::VideoAccess access = claims != nullptr
+                                         ? core::access_of(v, claims->subject, result->viewer)
+                                         : core::access_of_anonymous(v);
     if (access == core::VideoAccess::None) {
-        fail(Status::NotFound);
+        // Without a token, anything but a public video asks to sign in, as before ADR-0121: a
+        // missing video answers the same, so neither says whether the id exists.
+        fail(claims != nullptr ? Status::NotFound : Status::Unauthorized);
         return;
     }
     if (req_.route != RouteId::GetVideo) {
@@ -1180,7 +1204,7 @@ void Connection::start_playlist(const core::VideoRecord& video) noexcept {
 
 void Connection::on_playlist(ControlJob job) noexcept {
     const core::ports::Claims* claims = get(req_.claims);
-    if (claims == nullptr || !job.body || !job.playlist) {
+    if (!job.body || !job.playlist) {
         fail(Status::InternalServerError);
         return;
     }
@@ -1188,7 +1212,8 @@ void Connection::on_playlist(ControlJob job) noexcept {
         fail_playlist(job.body->error());
         return;
     }
-    if (job.playlist->kind == PlaylistKind::Master) {
+    // A view is a signed-in viewer's (ADR-0121): one who is not is not counted.
+    if (job.playlist->kind == PlaylistKind::Master && claims != nullptr) {
         gw().views().record({.video = job.playlist->video,
                              .viewer = claims->subject,
                              .at = deps().clock.wall_now()});
@@ -1473,7 +1498,7 @@ void Connection::set_service_stream_visibility() noexcept {
         fail_with(Status::NotFound, "not_found");
         return;
     }
-    const auto visibility = visibility_from_body(req_.body);
+    const auto visibility = stream_visibility_from_body(req_.body);
     if (!visibility) {
         fail_with(Status::BadRequest, "bad_visibility");
         return;
@@ -1817,7 +1842,7 @@ void Connection::act_on_stream(LiveStreams& live, const core::LiveStreamId& id,
             respond_stream(Status::Ok, *r, nullptr);
         };
     if (req_.route == RouteId::UpdateStream) {
-        const auto visibility = visibility_from_body(req_.body);
+        const auto visibility = stream_visibility_from_body(req_.body);
         if (!visibility) {
             fail_with(Status::BadRequest, "bad_visibility");
             return;

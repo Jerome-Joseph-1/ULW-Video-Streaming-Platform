@@ -101,7 +101,7 @@ TEST(VisibilityFromBody, TakesTheThreeForms) {
 TEST(VisibilityFromBody, RefusesAnythingElse) {
     for (const std::string_view body :
          {"", "null", "[]", R"("private")", "{}", R"({"visibility":null})", R"({"visibility":1})",
-          R"({"visibility":"public"})", R"({"visibility":"room:x"})",
+          R"({"visibility":"everyone"})", R"({"visibility":"room:x"})",
           R"({"visibility":"private")"}) {
         EXPECT_FALSE(visibility_from_body(body)) << body;
     }
@@ -133,7 +133,7 @@ TEST(BulkVisibilityFromBody, RefusesAnEmptyLongRepeatedOrMalformedList) {
           std::string(R"({"visibility":"private","videos":[1]})"),
           std::string(R"({"visibility":"private","videos":["not-a-uuid"]})"),
           R"({"visibility":"private","videos":[)" + video + "," + video + "]}",
-          R"({"visibility":"public","videos":[)" + video + "]}", many}) {
+          R"({"visibility":"everyone","videos":[)" + video + "]}", many}) {
         EXPECT_FALSE(gateway::bulk_visibility_from_body(body)) << body;
     }
     // Exactly the most is fine.

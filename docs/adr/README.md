@@ -124,3 +124,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0118](0118-a-history-page-around-a-seq.md) | A history page around a seq | Accepted |
 | [0119](0119-one-visibility-for-many-videos.md) | One visibility for many videos | Accepted |
 | [0120](0120-video-events-on-the-notification-hook.md) | Video events on the notification hook | Accepted |
+| [0121](0121-a-public-video-plays-without-a-token.md) | A public video plays without a token | Accepted |

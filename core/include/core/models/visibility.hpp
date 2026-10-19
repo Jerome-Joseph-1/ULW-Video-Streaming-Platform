@@ -20,6 +20,9 @@ enum class VisibilityKind : std::uint8_t {
     Room,
     // Any signed-in user who has the video's id.
     Unlisted,
+    // Anyone who has the video's id, signed in or not (ADR-0121). Videos only: a stream's
+    // visibility is never public.
+    Public,
 };
 
 class Visibility {
@@ -33,12 +36,15 @@ public:
     [[nodiscard]] static Visibility unlisted() noexcept {
         return Visibility{VisibilityKind::Unlisted, std::nullopt};
     }
+    [[nodiscard]] static Visibility anyone() noexcept {
+        return Visibility{VisibilityKind::Public, std::nullopt};
+    }
     [[nodiscard]] static Visibility room(const RoomId& room) noexcept {
         return Visibility{VisibilityKind::Room, room};
     }
 
-    // "private", "unlisted" or "room:<room id>", the room id a lowercase canonical UUID: what
-    // the API takes and answers.
+    // "private", "unlisted", "public" or "room:<room id>", the room id a lowercase canonical UUID:
+    // what the API takes and answers.
     [[nodiscard]] static std::expected<Visibility, DomainError>
     parse(std::string_view text) noexcept;
     // The catalog's two columns: the kind's name, and the room for a room's kind only.
@@ -48,7 +54,7 @@ public:
     [[nodiscard]] VisibilityKind kind() const noexcept { return kind_; }
     // Set exactly when the kind is Room.
     [[nodiscard]] const std::optional<RoomId>& room_id() const noexcept { return room_; }
-    // "private", "room" or "unlisted": the catalog's kind column.
+    // "private", "room", "unlisted" or "public": the catalog's kind column.
     [[nodiscard]] std::string_view kind_name() const noexcept;
     // The form parse() takes.
     [[nodiscard]] std::string to_string() const;

@@ -29,9 +29,14 @@ enum class VideoAccess : std::uint8_t {
 //   - its owner always;
 //   - nobody else while its upload is in progress (init, uploading): what exists of it is the
 //     uploader's alone, whatever its visibility or grants say;
-//   - then anyone it is unlisted for, any current member of the room it is shared with, and any
+//   - then anyone it is unlisted or public for, any current member of the room it is shared with,
+//   and any
 //     user granted it.
 [[nodiscard]] VideoAccess access_of(const VideoRecord& video, const UserId& viewer,
                                     const ViewerFacts& facts) noexcept;
+
+// The same rule for someone who is not signed in (ADR-0121): a public video once its upload is
+// committed, as a viewer; nothing else, grants and rooms included, since nobody is named.
+[[nodiscard]] VideoAccess access_of_anonymous(const VideoRecord& video) noexcept;
 
 } // namespace core
