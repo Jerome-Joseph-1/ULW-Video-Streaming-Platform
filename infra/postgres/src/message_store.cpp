@@ -1162,18 +1162,26 @@ public:
             listener_->on_members_resync();
             return;
         }
+        if (notice->change == MemberNotice::Change::Disconnected) {
+            listener_->on_user_disconnected(notice->user);
+            return;
+        }
+        if (!notice->room) {
+            listener_->on_members_resync();
+            return;
+        }
+        const core::RoomId& room = *notice->room;
         switch (notice->change) {
         case MemberNotice::Change::Added:
-            listener_->on_member_added(*notice->room, notice->user);
+            listener_->on_member_added(room, notice->user);
             return;
         case MemberNotice::Change::Removed:
-            listener_->on_member_removed(*notice->room, notice->user);
+            listener_->on_member_removed(room, notice->user);
             return;
         case MemberNotice::Change::Role:
-            listener_->on_member_role(*notice->room, notice->user, notice->role);
+            listener_->on_member_role(room, notice->user, notice->role);
             return;
         case MemberNotice::Change::Disconnected:
-            listener_->on_user_disconnected(notice->user);
             return;
         }
     }
