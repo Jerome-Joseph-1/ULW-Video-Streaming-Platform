@@ -4,6 +4,7 @@
 #include "core/ports/clock.hpp"
 #include "core/ports/media.hpp"
 #include "core/ports/message_store.hpp"
+#include "core/ports/ring_store.hpp"
 #include "rt/room_router.hpp"
 
 #include "ring.hpp"
@@ -263,7 +264,17 @@ public:
     [[nodiscard]] const CallCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] const RingCounters& ring_counters() const noexcept { return ringer_.counters(); }
     // Who hears the events of the calls this node owns (ADR-0111); nullptr: nobody.
-    void watch_rings(IRingWatcher* watcher) noexcept { ringer_.watch(watcher); }
+    void watch_rings(IRingWatcher* watcher) noexcept { recorder_.next = watcher; }
+    // Where the rooms' rings are kept for the next owner and for sockets that connect
+    // (ADR-0129); nullptr: nowhere. Must outlive the handler.
+    void keep_rings(core::ports::IRingStore* store) noexcept { recorder_.store = store; }
+    // This node now owns the room (rt::IRouterEvents::on_took_room): a ring its previous owner
+    // left behind, which this node cannot carry on, is ended out loud (ADR-0129).
+    void took_room(const core::RoomId& room) noexcept;
+    // A drain: every call still ringing here ends, call_cancelled with reason moved, before the
+    // rooms go (ADR-0129).
+    void move_out() noexcept { ringer_.move_out(); }
+    [[nodiscard]] std::uint64_t ring_writes_failed() const noexcept { return recorder_.failed; }
     [[nodiscard]] std::size_t rooms() const noexcept { return rooms_.size(); }
     // Calls ringing or answered in the rooms this node owns.
     [[nodiscard]] std::size_t calls() const noexcept { return ringer_.calls(); }
@@ -271,6 +282,15 @@ public:
     [[nodiscard]] std::size_t retired() const noexcept { return retired_.size(); }
 
 private:
+    // Between the ringer and whoever watches it: keeps each ring's start and end in the store,
+    // best effort, and hands every event on.
+    struct RingRecorder final : IRingWatcher {
+        void observed(const CallEvent& event) noexcept override;
+        IRingWatcher* next = nullptr;
+        core::ports::IRingStore* store = nullptr;
+        const core::ports::IClock* clock = nullptr;
+        std::uint64_t failed = 0;
+    };
     struct Waiter {
         CallRequest request;
         rt::OwnerAnswer answer;
@@ -435,6 +455,7 @@ private:
     const core::ports::IClock& clock_;
     CallLimits limits_;
     CallCounters counters_;
+    RingRecorder recorder_;
     Ringer ringer_;
     std::size_t in_flight_ = 0;
     core::MonoTime next_sweep_;

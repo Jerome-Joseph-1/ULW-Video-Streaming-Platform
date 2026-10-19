@@ -165,7 +165,7 @@ Server to client, unasked:
 | `call_ringing` | `room`, `call`, `from`, `expires_at` | `from` is calling. On the caller's own devices (`from` is you), the call you or your other device started is ringing. It rings until `expires_at` (Unix seconds); stop ringing then even if nothing else arrives |
 | `call_answered` | `room`, `call`, `from`, `by` | `by` asked for a ticket and is joining. On `by`'s other devices: stop ringing |
 | `call_declined` | `room`, `call`, `from`, `by`; `reason`, `text` when `by` gave them | `by` turned the call down: show "can't take calls right now" for `not_allowed`, "busy" for `busy`, and `text` as their reply |
-| `call_cancelled` | `room`, `call`, `from`, `by`, or `reason` | The caller gave up before anyone answered. With no `by` and `reason: "caller_left"`: the caller's device left the call's LiveKit room while it rang, so nobody would be there to answer |
+| `call_cancelled` | `room`, `call`, `from`, `by`, or `reason` | The caller gave up before anyone answered. With no `by` and `reason: "caller_left"`: the caller's device left the call's LiveKit room while it rang, so nobody would be there to answer. With `reason: "moved"`: the room changed owner while it rang (ADR-0129); ring again to call |
 | `call_missed` | `room`, `call`, `from` | Nobody answered within the ring timeout (45 s) |
 | `call_ended` | `room`, `call`, `from`, `by` | `by` ended the answered call. With no `by`: nobody was left in its LiveKit room |
 
@@ -223,11 +223,11 @@ What the ring does not cover:
   connected, and can push to the others; a socket opened from that notification answers the
   ring by its id as any other, and the backend can decline it or ask whether it still rings
   ([notifications.md](notifications.md)). A
-  device that connects while the call still rings hears the next announcement, within 15 s.
-  Nothing is replayed for a call that ended while a socket was away, including the moment a
-  socket reconnects with a fresh token (chat closes it when its token expires): a ring that
-  is not announced again within 15 s has most likely ended, and an answer naming it
-  (`answer`) is told so.
+  socket that connects while a call rings its user hears `call_ringing` for it at once, whatever
+  rooms it joins (ADR-0129). Nothing is replayed for a call that ended while a socket was away,
+  including the moment a socket reconnects with a fresh token (chat closes it when its token
+  expires): a ring that is not announced again within 15 s has most likely ended, and an answer
+  naming it (`answer`) is told so.
 - **Rejoining.** Asking for a ticket again while anyone is still in the answered call joins it
   without ringing anyone. A ticket asked for a call nobody is in any more (everyone closed the
   app without a word) ends that call, and everyone hears `call_ended`, then starts the room's next
@@ -236,12 +236,13 @@ What the ring does not cover:
   connecting.
 - **Joining.** A socket that `join`s the room while its call rings that socket's user hears
   `call_ringing` at once, without waiting for the next announcement: a page that reloads, a
-  socket that reconnects or a phone that wakes up. A socket that has joined no room still waits
-  for the next announcement (within 15 s).
-- **A change of the room's owner** (a deploy, a node failure) forgets a ringing call without a
-  word: devices stop at `expires_at`, and a decline or cancel then is `no_call`. A callee who
-  answers by asking for a ticket rings the caller as a new call, which the caller's client,
-  connected to LiveKit and waiting, answers as above.
+  socket that reconnects or a phone that wakes up. So does a socket as it connects, for every
+  call ringing its user (ADR-0129).
+- **A change of the room's owner** (a deploy, a node failure) ends a ringing call out loud
+  (ADR-0129). Everyone hears `call_cancelled` with no `by` and `reason: "moved"`, as on the
+  hook: from the old owner as it drains, or, when it died, from the new owner as it takes the
+  room. Ring again to call: the new owner starts a new call. An answered call goes on in its
+  LiveKit room. A decline or cancel of the moved call is `no_call`.
 
 ## After a reload
 

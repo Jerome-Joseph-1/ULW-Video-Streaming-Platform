@@ -1,3 +1,5 @@
+#include "core/ports/ring_store.hpp"
+
 #include "call.hpp"
 #include "presence_room.hpp"
 #include "support/fake_clock.hpp"
@@ -7,6 +9,7 @@
 #include <algorithm>
 #include <gtest/gtest.h>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <new>
 #include <optional>
@@ -758,6 +761,98 @@ TEST_F(CallHandlerTest, ATicketForAnAnswerThatCameAfterTheRingEndedRingsNobody) 
     EXPECT_EQ(answers_[2].outcome, CallOutcome::Ticket);
     EXPECT_FALSE(answers_[2].call);
     EXPECT_TRUE(plane_.sent.empty());
+}
+
+// ADR-0129: the rooms' rings, as the handler keeps them.
+class FakeRingStore final : public core::ports::IRingStore {
+public:
+    void put_ring(core::ports::StoredRing ring,
+                  core::ports::RingStoreCallback<void> done) override {
+        puts.push_back(ring);
+        rows.insert_or_assign(ring.room.to_string(), std::move(ring));
+        done({});
+    }
+    void end_ring(const core::RoomId& room, const core::Uuid& call,
+                  core::ports::RingStoreCallback<void> done) override {
+        ends.push_back(call);
+        const auto it = rows.find(room.to_string());
+        if (it != rows.end() && it->second.call == call) {
+            rows.erase(it);
+        }
+        done({});
+    }
+    void
+    ring_of(const core::RoomId& room,
+            core::ports::RingStoreCallback<std::optional<core::ports::StoredRing>> done) override {
+        const auto it = rows.find(room.to_string());
+        done(it == rows.end() ? std::optional<core::ports::StoredRing>{}
+                              : std::optional(it->second));
+    }
+    void
+    rings_for(const core::UserId& /*user*/,
+              core::ports::RingStoreCallback<std::vector<core::ports::StoredRing>> done) override {
+        done(std::vector<core::ports::StoredRing>{});
+    }
+    std::vector<core::ports::StoredRing> puts;
+    std::vector<core::Uuid> ends;
+    std::map<std::string, core::ports::StoredRing> rows;
+};
+
+TEST_F(CallHandlerTest, EachRingIsKeptWhileItRingsAndANewOwnerEndsOneLeftBehind) {
+    FakeRingStore rings;
+    handler_->keep_rings(&rings);
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.at(0).call;
+    ASSERT_EQ(rings.puts.size(), 1U);
+    EXPECT_EQ(rings.puts[0].room, room_id());
+    EXPECT_EQ(rings.puts[0].call, call.uuid());
+    EXPECT_EQ(rings.puts[0].caller, *core::UserId::parse("alice"));
+    EXPECT_FALSE(rings.puts[0].group);
+    EXPECT_EQ(rings.puts[0].callees, std::vector{*core::UserId::parse("bob")});
+    // Answered, a direct call's ring is over.
+    ask("bob", kOtherDevice, kRoom, call);
+    sfu_.issue();
+    EXPECT_EQ(rings.ends, std::vector{call.uuid()});
+    EXPECT_TRUE(rings.rows.empty());
+
+    // A ring this node never held, left by the room's previous owner: ended out loud, and gone.
+    const chat::CallId left = chat::CallId::generate(clock_, random_);
+    rings.rows.insert_or_assign(
+        room_id(kOtherRoom).to_string(),
+        core::ports::StoredRing{.room = room_id(kOtherRoom),
+                                .call = left.uuid(),
+                                .caller = *core::UserId::parse("carol"),
+                                .group = false,
+                                .callees = {*core::UserId::parse("dave")},
+                                .started_at = clock_.wall_now(),
+                                .expires_at = clock_.wall_now() + core::Millis{30'000}});
+    plane_.sent.clear();
+    handler_->took_room(room_id(kOtherRoom));
+    ASSERT_EQ(plane_.sent.size(), 2U);
+    for (const chat::CallNotice& n : plane_.sent) {
+        EXPECT_EQ(n.event, chat::RingEvent::Cancelled);
+        EXPECT_EQ(n.call, left);
+        EXPECT_EQ(n.reason, chat::CallReason::OwnerMoved);
+    }
+    EXPECT_TRUE(rings.rows.empty());
+    EXPECT_EQ(handler_->ring_counters().moved, 1U);
+    // Nothing left: taking the room again says nothing.
+    plane_.sent.clear();
+    handler_->took_room(room_id(kOtherRoom));
+    EXPECT_TRUE(plane_.sent.empty());
+    // A drain ends what still rings here; the answered call goes on.
+    ask("alice", kDevice, kOtherRoom);
+    sfu_.open();
+    sfu_.issue();
+    ASSERT_EQ(rings.rows.size(), 1U);
+    plane_.sent.clear();
+    handler_->move_out();
+    ASSERT_EQ(plane_.sent.size(), 2U);
+    EXPECT_EQ(plane_.sent[0].reason, chat::CallReason::OwnerMoved);
+    EXPECT_TRUE(rings.rows.empty());
+    handler_->keep_rings(nullptr);
 }
 
 TEST_F(CallHandlerTest, AnAnswerToARingTheCallerCancelledIsRefusedAndRingsNobodyBack) {

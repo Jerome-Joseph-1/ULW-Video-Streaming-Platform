@@ -63,9 +63,12 @@ enum class CallReason : std::uint8_t {
     Busy = 2,
     NotAllowed = 3,
     Declined = 4,
+    // Cancelled: the room's owner changed (a deploy, a node lost) while the call rang, and the
+    // new owner cannot carry the ring on (ADR-0129). Ring again to call.
+    OwnerMoved = 5,
 };
 // How a reason reads on the wire to clients, the hook and the log: caller_left, busy, not_allowed,
-// declined.
+// declined, moved.
 [[nodiscard]] std::string_view reason_name(CallReason reason) noexcept;
 // The reason a client names, if it is one a decline may give (busy, not_allowed, declined).
 [[nodiscard]] std::optional<CallReason> decline_reason(std::string_view name) noexcept;
@@ -256,6 +259,9 @@ struct RingCounters {
     // Calls forgotten without a word because this node no longer owns their room: the members'
     // devices stop ringing at expires_at.
     std::uint64_t orphaned = 0;
+    // Rings ended, call_cancelled with reason moved, because their room changed owner
+    // (ADR-0129): by this node as it let the room go, or as it found a ring left behind.
+    std::uint64_t moved = 0;
     // Direct calls' rings ended because their caller was no longer in the call.
     std::uint64_t caller_left = 0;
     // Calls found with nobody in them when a member asked for a ticket again: ended, and the
@@ -419,6 +425,16 @@ public:
     void on_group_ended(GroupEnded hook) noexcept { group_ended_ = std::move(hook); }
     // Who hears each call's events (ADR-0111); nullptr: nobody, the default.
     void watch(IRingWatcher* watcher) noexcept { watcher_ = watcher; }
+
+    // This node is letting its rooms go (a drain): every call that still rings nobody has
+    // answered ends, call_cancelled with reason moved, rather than in silence (ADR-0129). Calls
+    // that are on are left to their media rooms.
+    void move_out() noexcept;
+    // The room's previous owner rang this call and this node holds none: its members hear it
+    // ended, call_cancelled with reason moved, as from the previous owner (ADR-0129).
+    void end_moved(const core::RoomId& room, const CallId& call, CallKind kind,
+                   const core::UserId& caller, std::vector<core::UserId> callees,
+                   core::WallTime expires_at) noexcept;
     // Whether anyone is connected to the call's media room: nobody ends it (call_ended; a ringing
     // direct call's ring, call_cancelled caller_left, after kCallerAbsentChecks), and nullopt
     // (the SFU did not answer) asks again at the next check.

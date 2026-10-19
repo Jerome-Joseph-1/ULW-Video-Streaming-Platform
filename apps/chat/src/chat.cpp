@@ -51,6 +51,9 @@ void RoomLog::on_fenced_out(const core::RoomId& room, std::uint64_t generation,
 void RoomLog::on_took_room(const core::RoomId& room, std::uint64_t generation) noexcept {
     log_event(R"("level":"info","msg":"owning room","node":"{}","room":"{}","generation":{})",
               self_.view(), room.to_string(), generation);
+    if (calls_ != nullptr) {
+        calls_->took_room(room);
+    }
 }
 
 void RoomLog::on_peer_lost(const core::NodeId& peer) noexcept {
@@ -122,6 +125,11 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       blocks_(limits_.max_connections + 1, http::AddressHash{http::SeededHash(seed(deps_.random))}),
       sessions_(limits_.max_connections) {
     chat_.use_turn(deps_.turn, deps_.turn_ttl);
+    calls_.keep_rings(deps_.rings);
+    bell_.replay_from(deps_.rings);
+    if (deps_.room_log != nullptr) {
+        deps_.room_log->tell_calls(&calls_);
+    }
     deps_.router.serve(&calls_);
     deps_.router.hear(&bell_);
     chat_.also_tell(&calls_);
@@ -138,6 +146,9 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
 }
 
 ChatServer::~ChatServer() {
+    if (deps_.room_log != nullptr) {
+        deps_.room_log->tell_calls(nullptr);
+    }
     // The message store is destroyed first (Services in main.cpp), and reap() below sweeps the
     // service, which would otherwise ask it what a resync still owes.
     chat_.stop();
@@ -307,6 +318,8 @@ void ChatServer::begin_drain() noexcept {
         return;
     }
     draining_ = true;
+    // The rings this node carries end out loud, before its rooms go (ADR-0129).
+    calls_.move_out();
     deps_.reactor.stop_listening();
     sessions_.for_each_live([](Session& s) { s.drain(); });
     service_api_.stop();
@@ -541,6 +554,13 @@ std::string ChatServer::render_metrics() const {
            std::format("call_rings_total{{outcome=\"caller_left\"}} {}\n"
                        "call_rings_total{{outcome=\"stale\"}} {}\n",
                        ring.caller_left, ring.stale) +
+           // Rings that outlive their owner (ADR-0129).
+           std::format("call_rings_total{{outcome=\"moved\"}} {}\n"
+                       "call_ring_writes_failed_total {}\n"
+                       "call_rings_replayed_total {}\n"
+                       "call_ring_replays_failed_total {}\n",
+                       ring.moved, calls_.ring_writes_failed(), bell.replayed,
+                       bell.replay_failures) +
            // Member lists changed by their users (ADR-0096).
            std::format("directs_opened_total {}\n"
                        "groups_created_total {}\n"

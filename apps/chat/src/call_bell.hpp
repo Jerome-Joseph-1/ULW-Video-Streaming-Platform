@@ -1,12 +1,14 @@
 #pragma once
 
 #include "core/models/ids.hpp"
+#include "core/ports/ring_store.hpp"
 #include "rt/room_router.hpp"
 
 #include "chat_service.hpp"
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -23,6 +25,9 @@ struct BellCounters {
     // Notices that did not decode, or whose room is not their member's presence room.
     std::uint64_t malformed = 0;
     std::uint64_t allocation_failures = 0;
+    // Rings sent to a socket as it connected, from the store (ADR-0129), and reads that failed.
+    std::uint64_t replayed = 0;
+    std::uint64_t replay_failures = 0;
 };
 
 struct BellId {
@@ -36,7 +41,11 @@ struct BellId {
 // runs on the reactor thread.
 class CallBell final : public rt::INoticeListener {
 public:
+    // With a ring store, the socket also hears at once every ring that is its user's now
+    // (ADR-0129), as call_ringing, rather than at the next announcement.
     [[nodiscard]] BellId attach(IClient& client, const core::UserId& user);
+    // Where the rooms' rings are read; nullptr: nowhere. Must outlive the bell.
+    void replay_from(core::ports::IRingStore* store) noexcept { store_ = store; }
     void detach(BellId id) noexcept;
 
     void on_notice(const core::RoomId& room, std::span<const std::byte> body) noexcept override;
@@ -50,6 +59,9 @@ private:
         IClient* client;
     };
 
+    void replay(const std::weak_ptr<int>& alive, std::uint64_t id, const core::UserId& user,
+                core::ports::RingStoreResult<std::vector<core::ports::StoredRing>> rings) noexcept;
+
     std::uint64_t next_ = 1;
     BellCounters counters_;
     // A user's sockets here; each socket is in one list, and a user with none has no entry.
@@ -57,6 +69,9 @@ private:
     std::unordered_map<std::uint64_t, core::UserId> sockets_;
     // The event's text, kept between notices.
     std::string text_;
+    core::ports::IRingStore* store_ = nullptr;
+    // The store's answers may come after the bell is gone.
+    std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };
 
 } // namespace chat

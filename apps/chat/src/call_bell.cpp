@@ -22,7 +22,56 @@ BellId CallBell::attach(IClient& client, const core::UserId& user) {
         }
         throw;
     }
+    if (store_ != nullptr) {
+        store_->rings_for(
+            user,
+            [this, alive = std::weak_ptr(alive_), id, user](
+                core::ports::RingStoreResult<std::vector<core::ports::StoredRing>> rings) noexcept {
+                replay(alive, id, user, std::move(rings));
+            });
+    }
     return BellId{id};
+}
+
+void CallBell::replay(
+    const std::weak_ptr<int>& alive, std::uint64_t id, const core::UserId& user,
+    core::ports::RingStoreResult<std::vector<core::ports::StoredRing>> rings) noexcept {
+    if (alive.expired()) {
+        return;
+    }
+    if (!rings) {
+        ++counters_.replay_failures;
+        return;
+    }
+    const auto it = users_.find(user);
+    if (it == users_.end()) {
+        return;
+    }
+    const auto socket = std::ranges::find(it->second, id, &Socket::id);
+    if (socket == it->second.end()) {
+        return;
+    }
+    try {
+        for (const core::ports::StoredRing& ring : *rings) {
+            const auto call = CallId::parse(ring.call.to_string());
+            if (!call) {
+                continue;
+            }
+            text_.clear();
+            write_call_event(text_, CallNotice{.event = RingEvent::Ringing,
+                                               .to = user,
+                                               .room = ring.room,
+                                               .call = *call,
+                                               .from = ring.caller,
+                                               .by = std::nullopt,
+                                               .expires_at = ring.expires_at});
+            if (socket->client->push(text_)) {
+                ++counters_.replayed;
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+    }
 }
 
 void CallBell::detach(BellId id) noexcept {

@@ -91,6 +91,8 @@ std::string_view reason_name(CallReason reason) noexcept {
         return "not_allowed";
     case CallReason::Declined:
         return "declined";
+    case CallReason::OwnerMoved:
+        return "moved";
     }
     return "unknown";
 }
@@ -175,7 +177,8 @@ std::optional<CallNotice> decode_notice(std::span<const std::byte> bytes) {
     std::string text;
     if (static_cast<RingEvent>(*event) == RingEvent::Cancelled && !in.empty()) {
         const auto r = in.u8();
-        if (!r || *r != static_cast<std::uint8_t>(CallReason::CallerLeft)) {
+        if (!r || (*r != static_cast<std::uint8_t>(CallReason::CallerLeft) &&
+                   *r != static_cast<std::uint8_t>(CallReason::OwnerMoved))) {
             return std::nullopt;
         }
         reason = static_cast<CallReason>(*r);
@@ -952,6 +955,61 @@ void Ringer::occupied(const core::RoomId& room, const CallId& call, std::optiona
         // Kept with nothing due would be kept for ever: forgotten without a word instead.
         ++counters_.allocation_failures;
         forget_ended(it);
+    }
+}
+
+void Ringer::move_out() noexcept {
+    for (auto it = calls_.begin(); it != calls_.end();) {
+        const Call& call = it->second;
+        if (call.answered || !plane_.owns(it->first)) {
+            ++it;
+            continue;
+        }
+        ++counters_.cancelled;
+        ++counters_.moved;
+        announce(it->first, call, RingEvent::Cancelled, std::nullopt, CallReason::OwnerMoved);
+        const auto gone = it++;
+        forget(gone);
+    }
+}
+
+void Ringer::end_moved(const core::RoomId& room, const CallId& call, CallKind kind,
+                       const core::UserId& caller, std::vector<core::UserId> callees,
+                       core::WallTime expires_at) noexcept {
+    if (calls_.contains(room) || !plane_.owns(room)) {
+        return;
+    }
+    try {
+        const core::MonoTime now = clock_.now();
+        std::vector<core::UserId> ringing;
+        std::vector<core::UserId> joined;
+        if (kind == CallKind::Group) {
+            ringing = callees;
+            joined = {caller};
+        }
+        const Call ended{.id = call,
+                         .caller = caller,
+                         .callees = std::move(callees),
+                         .answered = false,
+                         .kind = kind,
+                         .ringing = std::move(ringing),
+                         .joined = std::move(joined),
+                         .next_caller_check = now,
+                         .started = now,
+                         .started_at = clock_.wall_now(),
+                         .max_people = 0,
+                         .last_ticket = now,
+                         .ring_deadline = now,
+                         .expires_at = expires_at,
+                         .next_announce = now,
+                         .hold_until = now,
+                         .answering_until = now,
+                         .due = now};
+        ++counters_.cancelled;
+        ++counters_.moved;
+        announce(room, ended, RingEvent::Cancelled, std::nullopt, CallReason::OwnerMoved);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
     }
 }
 

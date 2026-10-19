@@ -521,6 +521,68 @@ CallHandler::CallHandler(core::ports::IMessageStore& messages, core::ports::ISfu
             ? limits_.group_participants
             : std::clamp(limits_.group_people, kMinGroupPeople, kMaxGroupParticipants);
     ringer_.on_group_ended([this](const core::RoomId& room) noexcept { group_ended(room); });
+    recorder_.clock = &clock;
+    ringer_.watch(&recorder_);
+}
+
+void CallHandler::RingRecorder::observed(const CallEvent& event) noexcept {
+    if (next != nullptr) {
+        next->observed(event);
+    }
+    if (store == nullptr) {
+        return;
+    }
+    // A ring starts, or ends for everyone it rang. A group call answered by one, or declined by
+    // one, rings the others on, until it rings out or ends.
+    const bool direct = event.kind == CallKind::Direct;
+    const bool ended =
+        event.event == RingEvent::Cancelled || event.event == RingEvent::Missed ||
+        event.event == RingEvent::Ended ||
+        (direct && (event.event == RingEvent::Answered || event.event == RingEvent::Declined));
+    auto done = [this](core::ports::RingStoreResult<void> result) noexcept {
+        if (!result) {
+            ++failed;
+        }
+    };
+    try {
+        if (event.event == RingEvent::Ringing) {
+            store->put_ring(core::ports::StoredRing{.room = event.room,
+                                                    .call = event.call.uuid(),
+                                                    .caller = event.caller,
+                                                    .group = !direct,
+                                                    .callees = event.users,
+                                                    .started_at = clock->wall_now(),
+                                                    .expires_at = event.expires_at},
+                            std::move(done));
+        } else if (ended) {
+            store->end_ring(event.room, event.call.uuid(), std::move(done));
+        }
+    } catch (const std::bad_alloc&) {
+        ++failed;
+    }
+}
+
+void CallHandler::took_room(const core::RoomId& room) noexcept {
+    core::ports::IRingStore* store = recorder_.store;
+    if (store == nullptr || !ringer_.idle(room)) {
+        return;
+    }
+    store->ring_of(
+        room,
+        [this, alive = std::weak_ptr(alive_),
+         room](core::ports::RingStoreResult<std::optional<core::ports::StoredRing>> ring) noexcept {
+            if (alive.expired() || !ring || !*ring || !ringer_.idle(room)) {
+                return;
+            }
+            const core::ports::StoredRing& left = **ring;
+            const auto call = CallId::parse(left.call.to_string());
+            if (!call) {
+                return;
+            }
+            // The call's own row: ending it removes it, as any ring's end does.
+            ringer_.end_moved(room, *call, left.group ? CallKind::Group : CallKind::Direct,
+                              left.caller, left.callees, left.expires_at);
+        });
 }
 
 void CallHandler::group_ended(const core::RoomId& room) noexcept {

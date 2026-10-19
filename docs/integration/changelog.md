@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## Unreleased
 
-<!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md, docs/adr/0115-a-call-says-whom-it-rings-and-who-moderates-it.md, docs/adr/0119-one-visibility-for-many-videos.md, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0120-video-events-on-the-notification-hook.md, core/src/video_access.cpp (access_of_anonymous), migrations/0024_public_videos.sql, docs/adr/0121-a-public-video-plays-without-a-token.md, apps/chat/src/session.cpp (Session::command), docs/adr/0122-ping-on-the-socket.md, apps/chat/src/service_api.cpp (set_role), docs/adr/0123-the-service-sets-a-members-role.md, docs/adr/0124-the-service-asks-who-is-connected.md, docs/adr/0125-a-hidden-socket-is-owed-pushes.md, docs/adr/0126-a-message-names-who-is-present.md, docs/adr/0127-relay-credentials-are-asked-for-again.md, migrations/0025_quiet_messages.sql, docs/adr/0128-a-quiet-message.md -->
+<!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md, docs/adr/0115-a-call-says-whom-it-rings-and-who-moderates-it.md, docs/adr/0119-one-visibility-for-many-videos.md, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0120-video-events-on-the-notification-hook.md, core/src/video_access.cpp (access_of_anonymous), migrations/0024_public_videos.sql, docs/adr/0121-a-public-video-plays-without-a-token.md, apps/chat/src/session.cpp (Session::command), docs/adr/0122-ping-on-the-socket.md, apps/chat/src/service_api.cpp (set_role), docs/adr/0123-the-service-sets-a-members-role.md, docs/adr/0124-the-service-asks-who-is-connected.md, docs/adr/0125-a-hidden-socket-is-owed-pushes.md, docs/adr/0126-a-message-names-who-is-present.md, docs/adr/0127-relay-credentials-are-asked-for-again.md, migrations/0025_quiet_messages.sql, docs/adr/0128-a-quiet-message.md, apps/chat/src/call.cpp (CallHandler::took_room), apps/chat/src/call_bell.cpp (CallBell::replay), migrations/0026_call_rings.sql, docs/adr/0129-a-ring-outlives-its-owner.md -->
 
 Additive (versioning rule 1), with calls that last as long as someone is in them.
 
@@ -35,6 +35,8 @@ Additive (versioning rule 1), with calls that last as long as someone is in them
 | One open tab stopped every message push to its user's other devices | `ULW_NOTIFY_MESSAGE_PRESENT=on`: `message` names the members present and their devices ([Notifications](notifications.md#message)) |
 | A call longer than the TURN credentials' lifetime lost its relay without warning | Tickets carry `ice_expires_at`, and `ice_servers` on the socket gives fresh ones ([Calls](calls.md#the-flow)) |
 | A reaction or an edit bumped `joined.seq` and fired a hook `message` event | `send` with `quiet: true`: no hook event, `quiet: true` on its frames, and `joined` says `loud_seq` ([Chat](chat.md#messages)) |
+| A deploy or a lost node left rings going in silence | They end with `call_cancelled`, `reason: "moved"`, on the sockets and the hook ([Calls](calls.md#ringing)) |
+| A socket that connected heard a ring at the next announcement, up to 15 s later | It hears `call_ringing` at once for every call ringing its user |
 | A refused upgrade read as `1006` in a browser, like a network failure | `/rt?refusals=close` is refused on the socket, with close `4001`, `4003`, `4029` or `4503` ([Chat](chat.md#connecting)) |
 
 What to do:
@@ -47,7 +49,7 @@ What to do:
   video on `video_ready`, and keep polling the listing now and then for events you missed.
 - **Operators:** chat's node channel moves to version 7: roll this release out with the chat
   Deployment set to `Recreate` (RUNBOOK.md, section 3). Migration 0023 adds `video_events` and a
-  trigger on `videos`, 0024 lets a video be `public`, and 0025 adds `chat_messages.quiet`; all
+  trigger on `videos`, 0024 lets a video be `public`, and 0025 adds `chat_messages.quiet` and 0026 `chat_call_rings`; all
   run with the gateway as usual.
   Roll every gateway out before anyone sets `public`: an older one answers `500` for such a
   video.

@@ -113,7 +113,7 @@ From the room's owner, once each, in order after the call's `call_ringing`:
 |---|---|---|
 | `call_answered` | who answered | A callee's ticket answered it (a group call: each member who comes) |
 | `call_declined` | who declined | A callee declined, from a socket or through `decline_call` (a group call: each one); with `reason` and `text` when they gave them (ADR-0115) |
-| `call_cancelled` | the caller, or `null` | The caller gave up before anyone answered. `null` with `"reason":"caller_left"`: the caller was no longer in the call when it rang (ADR-0113) |
+| `call_cancelled` | the caller, or `null` | The caller gave up before anyone answered. `null` with `"reason":"caller_left"`: the caller was no longer in the call when it rang (ADR-0113). `null` with `"reason":"moved"`: the room changed owner while it rang (ADR-0129) |
 | `call_missed` | `null` | Nobody answered by `expires_at`; `users` names who missed it. A group call that goes on without someone: `users` is those still rung when it rang out |
 | `call_ended` | who ended it, or `null` | The call was over after it was answered, or after a group call's ring ran out with only its caller in it (a member ended it, the last one left, or nobody was in it) |
 
@@ -121,10 +121,12 @@ Each has `room`, `call`, `kind` and `caller` as above. Withdraw the notification
 any of them (for a group call, `call_answered` and `call_declined` withdraw only `by`'s). A
 group call's members leaving and being put out are not events.
 
-**A ring that ends with no event.** When the room's owner changes while a call rings (a deploy,
-a node failure), the call is forgotten without a word ([calls.md](calls.md#ringing)), and no
-event follows its `call_ringing`. Expire every call notification at its `expires_at`, and ask
-`call_status` before showing one that arrives late. With `room` alone, `call_status` answers the
+**A ring whose room changes owner.** When the room's owner changes while a call rings (a
+deploy, a node failure), `call_cancelled` with `"reason":"moved"` follows its `call_ringing`
+(ADR-0129). It comes from the old owner as it drains, or from the new owner as it takes the
+room. A node that dies after its last batch, before any new owner takes the room, sends nothing,
+so still expire every call notification at its `expires_at`, and ask `call_status` before
+showing one that arrives late. With `room` alone, `call_status` answers the
 room's call whatever its id, and who is in it ([calls.md](calls.md#after-a-reload)).
 
 ### `message`
