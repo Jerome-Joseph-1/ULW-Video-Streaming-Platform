@@ -1,6 +1,6 @@
 # Notifications
 
-<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of, Session::set_visible), apps/chat/src/notify.cpp (Notifier::message_text), docs/adr/0126-a-message-names-who-is-present.md, apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0111-notification-events-for-members-not-connected.md, docs/adr/0120-video-events-on-the-notification-hook.md -->
+<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), docs/adr/0130-a-hook-batch-says-what-was-lost.md, apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of, Session::set_visible), apps/chat/src/notify.cpp (Notifier::message_text), docs/adr/0126-a-message-names-who-is-present.md, apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0111-notification-events-for-members-not-connected.md, docs/adr/0120-video-events-on-the-notification-hook.md -->
 
 Chat reaches a member only through the sockets they have open ([chat.md](chat.md),
 [calls.md](calls.md)). For a member with none (a closed tab, a phone in a pocket), the operator
@@ -55,11 +55,17 @@ POST /ulw/events HTTP/1.1
 Content-Type: application/json
 ULW-Signature: t=1767225600,v1=9ad04090ab1beebfe548dca4c8329f79a53d98be77244b3baea55fe1de9d5412
 
-{"events":[{"id":"...","type":"call_ringing",...},{"id":"...","type":"call_answered",...}]}
+{"run":"9f3c2a1be04d7765","seq":118,"lost":0,"events":[{"id":"...","type":"call_ringing",...},{"id":"...","type":"call_answered",...}]}
 ```
 
 - **Batches.** Each request carries 1 to 64 events, oldest first, as `{"events":[...]}`. One
   request at a time per node, so a node's events arrive in the order it made them.
+- **What was lost** (ADR-0130). `run` names one run of one node (a new one at every start).
+  `seq` counts that run's requests from 1, and `lost` is how many events the run dropped since
+  the request before this one went out: a full queue's, and a failed request's. A `seq` that
+  skips one, for the same `run`, is a request that never arrived. Either way the events are not
+  sent again: reconcile from your own records (`call_status`, the service listings), or show
+  the user a gap.
 - **Signature.** `ULW-Signature: t=<unix seconds>,v1=<hex>`, the hex being HMAC-SHA256 under
   `ULW_NOTIFY_SECRET` of `<t>.<body>`, the body exactly as received. Check it with a
   constant-time compare, and refuse a `t` more than a few minutes from your clock.
@@ -67,7 +73,8 @@ ULW-Signature: t=1767225600,v1=9ad04090ab1beebfe548dca4c8329f79a53d98be77244b3ba
   events are dropped: they are **never sent again**.
 - **At most once, best effort.** Each node queues at most 4096 events; past that the newest is
   dropped. A receiver that is down, slow or unreachable loses events, which each node counts
-  (`notify_events_total{outcome="dropped"}` and `{outcome="failed"}`). A ring, a ticket and a
+  (`notify_events_total{outcome="dropped"}` and `{outcome="failed"}`) and the next request says
+  (`lost`). A ring, a ticket and a
   message never wait on the receiver.
 - **`id`.** Every event has a UUID; drop one you have seen.
 - **`at`.** Unix seconds when the node made the event.

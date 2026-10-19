@@ -1,5 +1,7 @@
 #include "notify_sender.hpp"
 
+#include "core/util/json.hpp"
+
 #include "log.hpp"
 
 #include <algorithm>
@@ -10,6 +12,7 @@
 #include <openssl/evp.h>
 #include <openssl/hmac.h>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -93,9 +96,9 @@ private:
 
 HookSender::HookSender(net::IReactor& reactor, infra::curl::Multi& multi,
                        const core::ports::IClock& clock, std::string url, std::string secret,
-                       SenderLimits limits)
+                       std::string run, SenderLimits limits)
     : reactor_(reactor), multi_(multi), clock_(clock), url_(std::move(url)),
-      secret_(std::move(secret)), limits_(limits) {
+      secret_(std::move(secret)), run_(std::move(run)), limits_(limits) {
     limits_.batch = std::max<std::size_t>(limits_.batch, 1);
 }
 
@@ -104,12 +107,14 @@ HookSender::~HookSender() = default;
 void HookSender::offer(std::string event) noexcept {
     if (queue_.size() >= limits_.max_queued) {
         ++counters_.dropped;
+        ++lost_;
         return;
     }
     try {
         queue_.push_back(std::move(event));
     } catch (const std::bad_alloc&) {
         ++counters_.dropped;
+        ++lost_;
         return;
     }
     if (request_ == nullptr) {
@@ -123,7 +128,13 @@ void HookSender::start() noexcept {
     }
     const std::size_t n = std::min(queue_.size(), limits_.batch);
     try {
-        std::string body = R"({"events":[)";
+        std::string body = R"({"run":)";
+        core::json::append_string(body, run_);
+        body += R"(,"seq":)";
+        body += std::to_string(seq_ + 1);
+        body += R"(,"lost":)";
+        body += std::to_string(lost_);
+        body += R"(,"events":[)";
         for (std::size_t i = 0; i < n; ++i) {
             if (i != 0) {
                 body += ',';
@@ -137,6 +148,9 @@ void HookSender::start() noexcept {
         const std::string signature = notify_signature(secret_, seconds, body);
         queue_.erase(queue_.begin(), queue_.begin() + static_cast<std::ptrdiff_t>(n));
         request_ = std::make_unique<Request>(*this, std::move(body), n);
+        // Taken: told in this request, which the receiver sees by its seq whether it arrives.
+        ++seq_;
+        lost_ = 0;
         auto transfer = infra::curl::Transfer::start_upload(
             multi_,
             infra::curl::Request{
@@ -154,6 +168,7 @@ void HookSender::start() noexcept {
     } catch (const std::bad_alloc&) {
         // The batch is lost; the next offer tries again.
         counters_.dropped += request_ == nullptr ? n : 0;
+        lost_ += request_ == nullptr ? n : 0;
         if (request_ == nullptr) {
             queue_.erase(queue_.begin(),
                          queue_.begin() + static_cast<std::ptrdiff_t>(std::min(n, queue_.size())));
@@ -169,6 +184,7 @@ void HookSender::finished(std::optional<int> status) noexcept {
     } else {
         counters_.failed += events;
         ++counters_.failed_requests;
+        lost_ += events;
         // Events are sent at most once: these are gone, and the line says how many (#192).
         if (status) {
             log_event(R"("level":"warn","msg":"notify hook refused","status":{},"events":{})",
