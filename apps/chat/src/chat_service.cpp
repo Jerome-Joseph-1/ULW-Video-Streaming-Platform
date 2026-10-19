@@ -64,6 +64,7 @@ struct ChatService::Room final : rt::IMember {
         std::uint64_t seq;
         core::UserId sender;
         rt::MessageKey key;
+        core::WallTime sent_at;
         std::vector<std::byte> body;
     };
 
@@ -403,6 +404,7 @@ std::uint64_t ChatService::replay(const Room& room, Client& c, std::uint64_t aft
                                        .seq = it->seq,
                                        .sender = it->sender,
                                        .key = it->key,
+                                       .sent_at = it->sent_at,
                                        .body = it->body});
         c.client->push(out);
         ++counters_.replayed;
@@ -747,10 +749,12 @@ void ChatService::page_read(
             }
             used += cost;
             out.clear();
-            write_message(
-                out,
-                rt::Message{
-                    .room = room, .seq = m.seq, .sender = m.sender, .key = *key, .body = m.body});
+            write_message(out, rt::Message{.room = room,
+                                           .seq = m.seq,
+                                           .sender = m.sender,
+                                           .key = *key,
+                                           .sent_at = m.sent_at,
+                                           .body = m.body});
             c->client->push(out);
             ++count;
         }
@@ -914,6 +918,7 @@ void ChatService::catch_up(Room& room, ClientId id, Client& c) {
                                        .seq = it->seq,
                                        .sender = it->sender,
                                        .key = it->key,
+                                       .sent_at = it->sent_at,
                                        .body = it->body});
         if (!c.client->push(out)) {
             // Closing: what is left is counted when it detaches.
@@ -935,6 +940,7 @@ void ChatService::keep(Room& room, const rt::Message& message) {
     room.kept.push_back({.seq = message.seq,
                          .sender = message.sender,
                          .key = message.key,
+                         .sent_at = message.sent_at,
                          .body = {message.body.begin(), message.body.end()}});
     room.kept_bytes += cost;
     buffered_bytes_ += cost;

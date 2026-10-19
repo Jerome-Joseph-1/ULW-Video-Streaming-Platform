@@ -63,7 +63,7 @@ Server to client:
 |---|---|---|
 | `joined` | `room`, `seq` | The join succeeded. `seq` is the room's latest seq: a client whose last seq is lower missed messages. |
 | `sent` | `room`, `id`, `seq` | The message was sequenced as `seq`. A resend with the same `id` gets the same answer. |
-| `message` | `room`, `seq`, `sender`, `id`, `body` | A message in the room, your own included, live, resumed or from history. `sender` is the poster's user id ([auth.md](auth.md)). |
+| `message` | `room`, `seq`, `sender`, `id`, `at`, `body` | A message in the room, your own included, live, resumed or from history. `sender` is the poster's user id ([auth.md](auth.md)); `at` is when the room sequenced it, in Unix milliseconds, the same whichever way the message reaches you. |
 | `history` | `room`, `count` | Ends the answer to a `history` command, after its `count` messages. `0`: nothing more in that direction. |
 | `ticket` | `room`, `url`, `token`, `expires_at`, `call` when the ticket belongs to a call | The answer to `call`: connect LiveKit's SDK to `url` with `token` before `expires_at` (Unix seconds). See [calls.md](calls.md). |
 | `call_ringing`, `call_answered`, `call_declined`, `call_cancelled`, `call_missed`, `call_ended`, `call_left`, `call_moved` | `room`, `call`, `from`; `expires_at` (ringing), `by` (who did it, when someone did), `expelled` (moved) | Unasked, on every socket of the call's members, joined to the room or not: a call rings, or how it went. See [calls.md](calls.md#ringing) and [calls.md](calls.md#group-calls). |
@@ -76,7 +76,7 @@ Server to client:
 {"type":"joined","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","seq":44}
 {"type":"send","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","id":"01J9ZQ4V7B8K3M2N5P6R7S8T9W","body":"aGVsbG8"}
 {"type":"sent","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","id":"01J9ZQ4V7B8K3M2N5P6R7S8T9W","seq":45}
-{"type":"message","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","seq":45,"sender":"user-42","id":"01J9ZQ4V7B8K3M2N5P6R7S8T9W","body":"aGVsbG8"}
+{"type":"message","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","seq":45,"sender":"user-42","id":"01J9ZQ4V7B8K3M2N5P6R7S8T9W","at":1767225700123,"body":"aGVsbG8"}
 {"type":"history","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","before":42,"limit":20}
 {"type":"history","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","count":20}
 ```

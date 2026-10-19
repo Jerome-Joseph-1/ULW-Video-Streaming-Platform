@@ -46,6 +46,8 @@ public:
     std::unordered_map<std::string, core::Uuid> holders;
     // Each room's messages, as stored with their seqs from 1.
     std::unordered_map<core::RoomId, std::vector<std::string>> bodies;
+    // And the time each was stored with, in the same order.
+    std::unordered_map<core::RoomId, std::vector<core::WallTime>> sent_at;
     // The seq of each stored message by (room, sender, key), as the store's unique key finds a
     // repeat.
     std::map<std::tuple<core::RoomId, std::string, std::string>, std::uint64_t> keys;
@@ -163,7 +165,8 @@ public:
         auto key = std::make_tuple(room, std::string(message.sender.view()),
                                    std::string(message.key.view()));
         answer("", std::move(done),
-               [this, room, generation, body = std::move(body), key = std::move(key)] {
+               [this, room, generation, body = std::move(body), key = std::move(key),
+                sent_at = message.sent_at] {
                    using Answer = rt::StoreResult<std::optional<std::uint64_t>>;
                    MemoryRooms::Room& r = db_.rooms.at(room);
                    if (r.generation != generation) {
@@ -182,6 +185,7 @@ public:
                        return Answer{it->second};
                    }
                    db_.bodies[room].push_back(body);
+                   db_.sent_at[room].push_back(sent_at);
                    db_.keys.emplace(key, ++r.last_seq);
                    return Answer{r.last_seq};
                });

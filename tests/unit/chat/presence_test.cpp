@@ -91,6 +91,7 @@ public:
                                 .seq = seq,
                                 .sender = s.sender,
                                 .key = s.key,
+                                .sent_at = {},
                                 .body = s.body});
                 }
                 s.done(seq);

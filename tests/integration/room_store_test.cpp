@@ -96,6 +96,7 @@ protected:
             store_->append(room, generation,
                            {.sender = *core::UserId::parse("alice"),
                             .key = *rt::MessageKey::parse(key),
+                            .sent_at = {},
                             .body = {}},
                            std::move(done));
         });

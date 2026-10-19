@@ -39,6 +39,7 @@
 #include <mutex>
 #include <optional>
 #include <poll.h>
+#include <regex>
 #include <span>
 #include <string>
 #include <string_view>
@@ -50,6 +51,16 @@ namespace {
 
 using std::chrono::seconds;
 using ulw::test::WsClient;
+
+// A message frame with its "at" taken out, or "" when it has none: the time is the node's clock's
+// (ADR-0112), and the rest of the frame is compared exactly.
+std::string without_at(const std::optional<std::string>& text) {
+    static const std::regex at(R"(,"at":[0-9]+,)");
+    if (!text || !std::regex_search(*text, at)) {
+        return "";
+    }
+    return std::regex_replace(*text, at, ",", std::regex_constants::format_first_only);
+}
 
 constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
 constexpr std::string_view kAllowed = "https://app.example.com";
@@ -539,7 +550,7 @@ TEST_P(ChatSessionTest, IdentityHeadersNeitherAuthenticateNorRenameTheSender) {
               R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
     ASSERT_TRUE(bob->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
                                R"(","id":"m1","body":"eA"})"));
-    EXPECT_EQ(bob->next_text(seconds(10)),
+    EXPECT_EQ(without_at(bob->next_text(seconds(10))),
               R"({"type":"message","room":")" + std::string(kRoom) +
                   R"(","seq":1,"sender":"bob","id":"m1","body":"eA"})");
 }
@@ -553,7 +564,7 @@ TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
     // base64url of `hi "there"`.
     ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
                                  R"(","id":"m5","body":"aGkgInRoZXJlIg"})"));
-    EXPECT_EQ(alice->next_text(seconds(10)),
+    EXPECT_EQ(without_at(alice->next_text(seconds(10))),
               R"({"type":"message","room":")" + std::string(kRoom) +
                   R"(","seq":1,"sender":"alice","id":"m5","body":"aGkgInRoZXJlIg"})");
     EXPECT_EQ(alice->next_text(seconds(10)),
@@ -587,12 +598,12 @@ TEST_P(ChatSessionTest, AMessageAfterALargerOneIsSentExactlyToEveryMember) {
                                     R"(","seq":)" + std::to_string(seq) +
                                     R"(,"sender":"alice","id":")" + id + R"(","body":")" + *body +
                                     R"("})";
-        EXPECT_EQ(alice->next_text(seconds(10)), message) << id;
+        EXPECT_EQ(without_at(alice->next_text(seconds(10))), message) << id;
         EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"sent","room":")" + std::string(kRoom) +
                                                      R"(","id":")" + id + R"(","seq":)" +
                                                      std::to_string(seq) + "}")
             << id;
-        EXPECT_EQ(bob->next_text(seconds(10)), message) << id;
+        EXPECT_EQ(without_at(bob->next_text(seconds(10))), message) << id;
     }
 }
 

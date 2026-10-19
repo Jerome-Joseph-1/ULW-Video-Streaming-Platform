@@ -769,6 +769,10 @@ void write_message(std::string& out, const rt::Message& message) {
     // UserId allows only characters that need no escaping.
     core::json::append_string(out, message.sender.view());
     append_id(out, message.key);
+    // Unix milliseconds, floored (ADR-0112).
+    std::format_to(
+        std::back_inserter(out), R"(,"at":{})",
+        std::chrono::floor<std::chrono::milliseconds>(message.sent_at.time_since_epoch()).count());
     out += R"(,"body":")";
     // The body's bytes, whatever they are; the encoding reads them as octets.
     // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -801,10 +805,10 @@ void write_error(std::string& out, std::string_view reason, const std::optional<
 
 // base64url without padding is four characters per three bytes and two or three for a partial
 // group. Around it, {"type":"message", the room (45), the seq (27), the sender (at most 140),
-// the id (at most 72) and "body":"" (11) come to 313 bytes, and the WebSocket header of a frame
-// under 64 KiB to 4 more.
+// the id (at most 72), the time (at most 20) and "body":"" (11) come to 333 bytes, and the
+// WebSocket header of a frame under 64 KiB to 4 more.
 std::size_t message_wire_size(std::size_t body) noexcept {
-    constexpr std::size_t kAround = 320;
+    constexpr std::size_t kAround = 340;
     return (((body * 4) + 2) / 3) + kAround;
 }
 

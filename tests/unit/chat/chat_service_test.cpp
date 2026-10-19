@@ -303,6 +303,7 @@ protected:
                         .seq = seq,
                         .sender = *core::UserId::parse(sender),
                         .key = key("m" + std::to_string(seq)),
+                        .sent_at = {},
                         .body = b});
     }
 

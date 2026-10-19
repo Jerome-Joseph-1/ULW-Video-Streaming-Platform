@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <cstdint>
+#include <limits>
 #include <string_view>
 #include <utility>
 
@@ -254,11 +257,21 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto seq = in.u64();
         const auto sender = in.sender();
         const auto key = in.key();
+        const auto micros = in.u64();
         const auto body = in.rest();
-        if (!room || !seq || !sender || !key || body.size() > kMaxBody) {
+        // A time past what a signed count of microseconds holds is no clock's.
+        if (!room || !seq || !sender || !key || !micros ||
+            *micros > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
+            body.size() > kMaxBody) {
             return std::nullopt;
         }
-        return Deliver{.room = *room, .seq = *seq, .sender = *sender, .key = *key, .body = body};
+        return Deliver{.room = *room,
+                       .seq = *seq,
+                       .sender = *sender,
+                       .key = *key,
+                       .sent_at = core::WallTime{std::chrono::microseconds{
+                           static_cast<std::int64_t>(*micros)}},
+                       .body = body};
     }
     case Type::Ask:
         return ask_of(in);
@@ -349,13 +362,16 @@ void encode_reply(std::vector<std::byte>& out, std::uint64_t request, Status sta
 }
 
 void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::uint64_t seq,
-                    const core::UserId& sender, const MessageKey& key,
+                    const core::UserId& sender, const MessageKey& key, core::WallTime sent_at,
                     std::span<const std::byte> body) {
+    const auto micros =
+        std::chrono::duration_cast<std::chrono::microseconds>(sent_at.time_since_epoch()).count();
     const std::size_t at = begin(out, Type::Deliver);
     put_room(out, room);
     put_u64(out, seq);
     put_short(out, sender.view());
     put_short(out, key.view());
+    put_u64(out, static_cast<std::uint64_t>(std::max<std::int64_t>(micros, 0)));
     out.insert(out.end(), body.begin(), body.end());
     end(out, at);
 }

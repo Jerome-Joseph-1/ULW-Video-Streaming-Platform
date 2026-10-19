@@ -3,6 +3,7 @@
 #include "core/models/ids.hpp"
 #include "core/ports/clock.hpp"
 #include "core/ports/random.hpp"
+#include "core/util/time.hpp"
 #include "net/reactor.hpp"
 #include "os/unique_fd.hpp"
 #include "rt/message_key.hpp"
@@ -22,13 +23,14 @@
 
 namespace rt {
 
-// A message as its room's owner sequenced it. The body is opaque and valid only during the
-// call that carries it.
+// A message as its room's owner sequenced it, at `sent_at` by the owner's clock (ADR-0112). The
+// body is opaque and valid only during the call that carries it.
 struct Message {
     core::RoomId room;
     std::uint64_t seq = 0;
     core::UserId sender;
     MessageKey key;
+    core::WallTime sent_at;
     std::span<const std::byte> body;
 };
 
