@@ -48,6 +48,10 @@ public:
                   core::ports::MessageCallback<std::uint64_t> done) override {
         done(std::uint64_t{0});
     }
+    void last_loud_seq(const core::RoomId& /*room*/,
+                       core::ports::MessageCallback<std::uint64_t> done) override {
+        done(std::uint64_t{0});
+    }
     void add_member(const core::RoomId& /*room*/, const core::UserId& /*user*/,
                     core::ports::MessageCallback<void> done) override {
         done({});

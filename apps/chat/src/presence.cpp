@@ -754,7 +754,7 @@ void Presence::post(Room& room, Kind kind, core::MonoTime now) {
     }
     room.sending = true;
     try {
-        rooms_plane_.send(room.id, room, room.user, *key, std::move(body),
+        rooms_plane_.send(room.id, room, room.user, *key, std::move(body), /*quiet=*/false,
                           [this, user = room.user,
                            kind](std::expected<std::uint64_t, rt::RouteError> result) noexcept {
                               posted(user, kind, result);

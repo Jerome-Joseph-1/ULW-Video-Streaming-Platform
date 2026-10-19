@@ -64,7 +64,7 @@ public:
     }
     // Stores a message under the room's next seq, at `sent_at`, and answers that seq.
     virtual void write(const core::RoomId& room, const core::UserId& sender, std::string key,
-                       std::vector<std::byte> body, core::WallTime sent_at,
+                       std::vector<std::byte> body, core::WallTime sent_at, bool quiet,
                        MessageCallback<std::uint64_t> done) = 0;
 
 protected:
@@ -92,18 +92,20 @@ public:
     void open(const core::RoomId& /*room*/) override {}
 
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
-               std::vector<std::byte> body, core::WallTime sent_at,
+               std::vector<std::byte> body, core::WallTime sent_at, bool quiet,
                MessageCallback<std::uint64_t> done) override {
         const std::uint64_t seq = next_[room] + 1;
-        store_->append(room, seq, sender, std::move(key), std::move(body), sent_at,
-                       [this, room, seq,
-                        done = std::move(done)](MessageResult<std::uint64_t> r) mutable noexcept {
-                           // A repeat is answered with the seq it already has, and takes none.
-                           if (r && *r == seq) {
-                               next_[room] = seq;
-                           }
-                           done(r);
-                       });
+        store_->append(
+            room, seq, sender, std::move(key), std::move(body), sent_at,
+            [this, room, seq,
+             done = std::move(done)](MessageResult<std::uint64_t> r) mutable noexcept {
+                // A repeat is answered with the seq it already has, and takes none.
+                if (r && *r == seq) {
+                    next_[room] = seq;
+                }
+                done(r);
+            },
+            quiet);
     }
 
 private:
@@ -170,9 +172,10 @@ public:
     }
 
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
-               std::vector<std::byte> body, core::WallTime sent_at,
+               std::vector<std::byte> body, core::WallTime sent_at, bool quiet,
                MessageCallback<std::uint64_t> done) override {
-        rooms_->append(room, generations_.at(room), ulw::test::outgoing(sender, key, body, sent_at),
+        rooms_->append(room, generations_.at(room),
+                       ulw::test::outgoing(sender, key, body, sent_at, quiet),
                        [done = std::move(done)](
                            rt::StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
                            if (!r) {
@@ -239,11 +242,15 @@ protected:
     // Each call a message of its own, under a key never used before.
     MessageResult<std::uint64_t> write(const core::RoomId& room, const core::UserId& sender,
                                        std::vector<std::byte> body,
-                                       std::optional<core::WallTime> sent_at = std::nullopt) {
+                                       std::optional<core::WallTime> sent_at = std::nullopt,
+                                       bool quiet = false) {
         return ask<std::uint64_t>([&](auto done) {
             backend_->write(room, sender, std::format("m{}", ++keys_), std::move(body),
-                            sent_at.value_or(now()), std::move(done));
+                            sent_at.value_or(now()), quiet, std::move(done));
         });
+    }
+    MessageResult<std::uint64_t> last_loud_seq(const core::RoomId& room) {
+        return ask<std::uint64_t>([&](auto done) { store().last_loud_seq(room, std::move(done)); });
     }
     // The time an owner gives a write: the wall clock's, to the microsecond (ADR-0112).
     [[nodiscard]] static core::WallTime now() {
@@ -324,7 +331,8 @@ TEST_P(MessageStoreConformance, AMessageComesBackWithEveryByteItWasStoredWith) {
         every[i] = static_cast<std::byte>(i);
     }
     ASSERT_EQ(ask<std::uint64_t>([&](auto done) {
-                  backend_->write(room, alice_, "01J9Z-key_0", every, now(), std::move(done));
+                  backend_->write(room, alice_, "01J9Z-key_0", every, now(), false,
+                                  std::move(done));
               }),
               1U);
     ASSERT_EQ(write(room, bob_, {}), 2U);
@@ -339,6 +347,29 @@ TEST_P(MessageStoreConformance, AMessageComesBackWithEveryByteItWasStoredWith) {
     EXPECT_EQ((*page)[1].sender, alice_);
     EXPECT_EQ((*page)[1].key, "01J9Z-key_0");
     EXPECT_EQ((*page)[1].body, every);
+}
+
+// ADR-0128: a quiet message is kept as quiet, and last_loud_seq skips it.
+TEST_P(MessageStoreConformance, AQuietMessageIsKeptSoAndTheLoudSeqSkipsIt) {
+    const core::RoomId room = new_room();
+    EXPECT_EQ(last_loud_seq(room), 0U);
+    ASSERT_EQ(write(room, alice_, bytes("hello")), 1U);
+    ASSERT_EQ(write(room, bob_, bytes("+1"), std::nullopt, /*quiet=*/true), 2U);
+    EXPECT_EQ(last_loud_seq(room), 1U);
+    const auto page = after(room, 0, 10);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 2U);
+    EXPECT_FALSE((*page)[0].quiet);
+    EXPECT_TRUE((*page)[1].quiet);
+    const auto newest = before(room, std::nullopt, 10);
+    ASSERT_TRUE(newest);
+    EXPECT_TRUE(newest->front().quiet);
+    ASSERT_EQ(write(room, alice_, bytes("again")), 3U);
+    EXPECT_EQ(last_loud_seq(room), 3U);
+    // Only quiet ones: none is loud.
+    const core::RoomId hushed = new_room();
+    ASSERT_TRUE(write(hushed, alice_, bytes("x"), std::nullopt, true));
+    EXPECT_EQ(last_loud_seq(hushed), 0U);
 }
 
 TEST_P(MessageStoreConformance, SentAtIsTheTimeTheWriterGaveIt) {
@@ -570,7 +601,8 @@ TEST_P(MessageStoreConformance, AKeyUsedAgainGetsItsSeqWithTheSameBodyAndIsAConf
     const core::RoomId room = new_room();
     const auto write_as = [&](const core::UserId& sender, std::string key, std::string_view body) {
         return ask<std::uint64_t>([&](auto done) {
-            backend_->write(room, sender, std::move(key), bytes(body), now(), std::move(done));
+            backend_->write(room, sender, std::move(key), bytes(body), now(), false,
+                            std::move(done));
         });
     };
     ASSERT_EQ(write_as(alice_, "k1", "hello"), 1U);

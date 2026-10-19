@@ -33,9 +33,13 @@ core::ports::MessageResult<T> ask(net::IReactor& reactor, Call call) {
 inline rt::Outgoing outgoing(const core::UserId& sender, std::string_view key,
                              std::span<const std::byte> body,
                              core::WallTime sent_at = std::chrono::floor<std::chrono::microseconds>(
-                                 std::chrono::system_clock::now())) {
-    return rt::Outgoing{
-        .sender = sender, .key = *rt::MessageKey::parse(key), .sent_at = sent_at, .body = body};
+                                 std::chrono::system_clock::now()),
+                             bool quiet = false) {
+    return rt::Outgoing{.sender = sender,
+                        .key = *rt::MessageKey::parse(key),
+                        .sent_at = sent_at,
+                        .quiet = quiet,
+                        .body = body};
 }
 
 // The same, for the room store.

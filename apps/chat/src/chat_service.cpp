@@ -66,6 +66,7 @@ struct ChatService::Room final : rt::IMember {
         core::UserId sender;
         rt::MessageKey key;
         core::WallTime sent_at;
+        bool quiet = false;
         std::vector<std::byte> body;
     };
 
@@ -88,6 +89,16 @@ struct ChatService::Room final : rt::IMember {
     std::optional<TokenBucket> live_sends;
     // The latest seq known: the room plane's answer to the join, or a later delivery.
     std::uint64_t head = 0;
+    // The newest message that is not quiet (ADR-0128): the store's answer when the room was
+    // entered, then every loud delivery; nullopt when the store could not say, or a stream's
+    // live chat, which has none.
+    std::optional<std::uint64_t> loud;
+    // The store has answered for `loud` (or was never asked). Until it has, the room plane's
+    // answer to the join waits in `routed`, so that joined says loud_seq.
+    bool loud_read = false;
+    std::optional<std::uint64_t> routed;
+    // The newest loud delivery here, which a store answer read before it does not undo.
+    std::uint64_t loud_seen = 0;
     // Since when no client here has been in the room.
     core::MonoTime unused_since;
 };
@@ -300,6 +311,25 @@ void ChatService::enter(ClientId id, const Join& join) {
         return;
     }
     r.joining = true;
+    r.loud_read = core::ports::is_stream_chat(join.room);
+    r.routed.reset();
+    if (!r.loud_read) {
+        messages_.last_loud_seq(
+            join.room,
+            [this, room = join.room](core::ports::MessageResult<std::uint64_t> loud) noexcept {
+                Room* found = find(room);
+                if (found == nullptr || found->loud_read) {
+                    return;
+                }
+                found->loud_read = true;
+                found->loud =
+                    loud ? std::optional(std::max(*loud, found->loud_seen)) : std::nullopt;
+                if (const auto routed = found->routed) {
+                    found->routed.reset();
+                    joined(room, *routed);
+                }
+            });
+    }
     rooms_plane_.join(
         join.room, r,
         [this, room = join.room](std::expected<std::uint64_t, rt::RouteError> result) noexcept {
@@ -311,6 +341,11 @@ void ChatService::joined(const core::RoomId& room,
                          std::expected<std::uint64_t, rt::RouteError> result) noexcept {
     Room* r = find(room);
     if (r == nullptr) {
+        return;
+    }
+    // Joined: answered once the store says loud_seq too.
+    if (result && !r->loud_read) {
+        r->routed = *result;
         return;
     }
     r->joining = false;
@@ -368,7 +403,8 @@ void ChatService::subscribe(Room& room, ClientId id, const Join& join) {
         std::erase(c->behind, room.id);
     }
     std::string out;
-    write_joined(out, room.id, room.head);
+    write_joined(out, room.id, room.head,
+                 room.loud ? std::optional(std::min(*room.loud, room.head)) : std::nullopt);
     c->client->push(out);
     const std::uint64_t resumed_from = join.after ? replay(room, *c, *join.after) : room.head + 1;
     counters_.lossy_drops += owed(was_behind, std::min(room.head, resumed_from - 1));
@@ -416,6 +452,7 @@ std::uint64_t ChatService::replay(const Room& room, Client& c, std::uint64_t aft
                                        .sender = it->sender,
                                        .key = it->key,
                                        .sent_at = it->sent_at,
+                                       .quiet = it->quiet,
                                        .body = it->body});
         c.client->push(out);
         ++counters_.replayed;
@@ -467,10 +504,10 @@ void ChatService::send(ClientId id, Send send) {
         return;
     }
     c->send_bytes_in_flight += bytes;
-    rooms_plane_.send(send.room, *r, c->user, send.id, std::move(send.body),
-                      [this, id, room = send.room, key = send.id,
-                       bytes](std::expected<std::uint64_t, rt::RouteError> result) noexcept {
-                          sent(id, room, key, bytes, result);
+    rooms_plane_.send(send.room, *r, c->user, send.id, std::move(send.body), send.quiet,
+                      [this, id, room = send.room, key = send.id, bytes, quiet = send.quiet](
+                          std::expected<std::uint64_t, rt::RouteError> result) noexcept {
+                          sent(id, room, key, bytes, quiet, result);
                       });
 }
 
@@ -987,6 +1024,7 @@ void ChatService::page_read(
                                            .sender = m.sender,
                                            .key = *key,
                                            .sent_at = m.sent_at,
+                                           .quiet = m.quiet,
                                            .body = m.body});
             c->client->push(out);
             ++count;
@@ -1006,7 +1044,7 @@ void ChatService::page_read(
 }
 
 void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key,
-                       std::size_t bytes,
+                       std::size_t bytes, bool quiet,
                        std::expected<std::uint64_t, rt::RouteError> result) noexcept {
     Client* c = find(id);
     if (c == nullptr) {
@@ -1024,7 +1062,8 @@ void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageK
         answer(*c->client, reason(result.error()), room, key);
         return;
     }
-    if (message_watcher_ != nullptr) {
+    // A quiet message (a reaction, an edit) is owed to nobody (ADR-0128).
+    if (message_watcher_ != nullptr && !quiet) {
         message_watcher_->message(room, c->user, *result);
     }
     try {
@@ -1056,6 +1095,12 @@ void ChatService::delivered(Room& room, const rt::Message& message) noexcept {
         return;
     }
     room.head = std::max(room.head, message.seq);
+    if (!message.quiet) {
+        room.loud_seen = std::max(room.loud_seen, message.seq);
+        if (room.loud) {
+            room.loud = std::max(*room.loud, message.seq);
+        }
+    }
     try {
         keep(room, message);
     } catch (const std::bad_alloc&) {
@@ -1152,6 +1197,7 @@ void ChatService::catch_up(Room& room, ClientId id, Client& c) {
                                        .sender = it->sender,
                                        .key = it->key,
                                        .sent_at = it->sent_at,
+                                       .quiet = it->quiet,
                                        .body = it->body});
         if (!c.client->push(out)) {
             // Closing: what is left is counted when it detaches.
@@ -1174,6 +1220,7 @@ void ChatService::keep(Room& room, const rt::Message& message) {
                          .sender = message.sender,
                          .key = message.key,
                          .sent_at = message.sent_at,
+                         .quiet = message.quiet,
                          .body = {message.body.begin(), message.body.end()}});
     room.kept_bytes += cost;
     buffered_bytes_ += cost;

@@ -131,3 +131,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0125](0125-a-hidden-socket-is-owed-pushes.md) | A hidden socket is owed pushes | Accepted |
 | [0126](0126-a-message-names-who-is-present.md) | A message names who is present | Accepted |
 | [0127](0127-relay-credentials-are-asked-for-again.md) | Relay credentials are asked for again | Accepted |
+| [0128](0128-a-quiet-message.md) | A quiet message | Accepted |

@@ -79,6 +79,8 @@ struct Outgoing {
     core::UserId sender;
     MessageKey key;
     core::WallTime sent_at;
+    // Kept with the message (ADR-0128).
+    bool quiet = false;
     std::span<const std::byte> body;
 };
 

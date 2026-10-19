@@ -116,8 +116,16 @@ std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) 
 }
 
 std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "id", "body"})) {
+    if (!only(message, {"type", "room", "id", "body", "quiet"})) {
         return std::unexpected(EnvelopeError::Malformed);
+    }
+    bool quiet = false;
+    if (const core::json::Value* q = message.find("quiet")) {
+        const auto value = q->as_bool();
+        if (!value) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        quiet = *value;
     }
     auto room = room_of(message);
     if (!room) {
@@ -137,7 +145,7 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
     if (!body) {
         return std::unexpected(EnvelopeError::BadBody);
     }
-    return Send{.room = *room, .id = *id, .body = std::move(*body)};
+    return Send{.room = *room, .id = *id, .body = std::move(*body), .quiet = quiet};
 }
 
 [[nodiscard]] std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
@@ -890,10 +898,15 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     return std::unexpected(EnvelopeError::Malformed);
 }
 
-void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head) {
+void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head,
+                  std::optional<std::uint64_t> loud) {
     out += R"({"type":"joined",)";
     append_room(out, room);
-    std::format_to(std::back_inserter(out), R"(,"seq":{}}})", head);
+    std::format_to(std::back_inserter(out), R"(,"seq":{})", head);
+    if (loud) {
+        std::format_to(std::back_inserter(out), R"(,"loud_seq":{})", *loud);
+    }
+    out += '}';
 }
 
 void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
@@ -918,6 +931,9 @@ void write_message(std::string& out, const rt::Message& message) {
     std::format_to(
         std::back_inserter(out), R"(,"at":{})",
         std::chrono::floor<std::chrono::milliseconds>(message.sent_at.time_since_epoch()).count());
+    if (message.quiet) {
+        out += R"(,"quiet":true)";
+    }
     out += R"(,"body":")";
     // The body's bytes, whatever they are; the encoding reads them as octets.
     // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -950,10 +966,10 @@ void write_error(std::string& out, std::string_view reason, const std::optional<
 
 // base64url without padding is four characters per three bytes and two or three for a partial
 // group. Around it, {"type":"message", the room (45), the seq (27), the sender (at most 140),
-// the id (at most 72), the time (at most 20) and "body":"" (11) come to 333 bytes, and the
-// WebSocket header of a frame under 64 KiB to 4 more.
+// the id (at most 72), the time (at most 20), "quiet":true (13) and "body":"" (11) come to 346
+// bytes, and the WebSocket header of a frame under 64 KiB to 4 more.
 std::size_t message_wire_size(std::size_t body) noexcept {
-    constexpr std::size_t kAround = 340;
+    constexpr std::size_t kAround = 353;
     return (((body * 4) + 2) / 3) + kAround;
 }
 

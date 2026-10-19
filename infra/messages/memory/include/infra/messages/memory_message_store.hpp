@@ -35,7 +35,7 @@ public:
     // (rt::is_ephemeral_room) message is not kept: only its seq counts, for last_seq.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
                 std::string key, std::vector<std::byte> body, core::WallTime sent_at,
-                core::ports::MessageCallback<std::uint64_t> done);
+                core::ports::MessageCallback<std::uint64_t> done, bool quiet = false);
     void history_before(
         const core::RoomId& room, std::optional<std::uint64_t> before, std::size_t limit,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override;
@@ -44,6 +44,8 @@ public:
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override;
     void last_seq(const core::RoomId& room,
                   core::ports::MessageCallback<std::uint64_t> done) override;
+    void last_loud_seq(const core::RoomId& room,
+                       core::ports::MessageCallback<std::uint64_t> done) override;
     void add_member(const core::RoomId& room, const core::UserId& user,
                     core::ports::MessageCallback<void> done) override;
     void remove_member(const core::RoomId& room, const core::UserId& user,

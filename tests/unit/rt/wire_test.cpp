@@ -88,10 +88,10 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     wire::encode_proof(out, mac);
     wire::encode_subscribe(out, 7, room_);
     wire::encode_unsubscribe(out, room_);
-    wire::encode_send(out, 1ULL << 40U, room_, alice_, key_, body);
+    wire::encode_send(out, 1ULL << 40U, room_, alice_, key_, /*quiet=*/true, body);
     wire::encode_reply(out, 9, wire::Status::Fenced, 12);
     const core::WallTime sent_at{std::chrono::microseconds{1767225700123456}};
-    wire::encode_deliver(out, room_, 13, alice_, key_, sent_at, body);
+    wire::encode_deliver(out, room_, 13, alice_, key_, sent_at, /*quiet=*/true, body);
 
     auto frames = decode_all(out);
     ASSERT_EQ(frames.size(), 8U);
@@ -115,6 +115,7 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     EXPECT_EQ(send.room, room_);
     EXPECT_EQ(send.sender, alice_);
     EXPECT_EQ(send.key, key_);
+    EXPECT_TRUE(send.quiet);
     EXPECT_EQ(text(send.body), text(body));
     const auto& reply = std::get<wire::Reply>(frames[4]);
     EXPECT_EQ(reply.request, 9U);
@@ -126,7 +127,30 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     EXPECT_EQ(deliver.sender, alice_);
     EXPECT_EQ(deliver.key, key_);
     EXPECT_EQ(deliver.sent_at, sent_at);
+    EXPECT_TRUE(deliver.quiet);
     EXPECT_EQ(text(deliver.body), text(body));
+}
+
+// ADR-0128: a message's flags travel in one byte; a bit nobody defined is refused.
+TEST_F(WireTest, AMessagesFlagsTravelAndAnUnknownOneIsMalformed) {
+    std::vector<std::byte> out;
+    wire::encode_send(out, 1, room_, alice_, key_, false, bytes("x"));
+    wire::encode_deliver(out, room_, 2, alice_, key_, core::WallTime{}, false, bytes("y"));
+    const auto frames = decode_all(out);
+    ASSERT_EQ(frames.size(), 2U);
+    EXPECT_FALSE(std::get<wire::Send>(frames[0]).quiet);
+    EXPECT_FALSE(std::get<wire::Deliver>(frames[1]).quiet);
+    for (const bool deliver : {false, true}) {
+        std::vector<std::byte> frame;
+        if (deliver) {
+            wire::encode_deliver(frame, room_, 2, alice_, key_, core::WallTime{}, true, bytes("y"));
+        } else {
+            wire::encode_send(frame, 1, room_, alice_, key_, true, bytes("x"));
+        }
+        // The flags byte sits just before the body's one byte.
+        frame[frame.size() - 2] = std::byte{0x03};
+        EXPECT_EQ(error_of(frame), wire::DecodeError::Malformed) << deliver;
+    }
 }
 
 TEST_F(WireTest, AnAskAndItsAnswerComeBackAsTheyWereSent) {
@@ -176,9 +200,9 @@ TEST_F(WireTest, AnAnswerWithAStatusNobodyDefinedIsMalformed) {
 
 TEST_F(WireTest, AnEmptyBodyAndTheLargestBodyBothTravel) {
     std::vector<std::byte> out;
-    wire::encode_send(out, 1, room_, alice_, key_, {});
+    wire::encode_send(out, 1, room_, alice_, key_, false, {});
     const std::vector<std::byte> largest(wire::kMaxBody, std::byte{0x5A});
-    wire::encode_deliver(out, room_, 2, alice_, key_, core::WallTime{}, largest);
+    wire::encode_deliver(out, room_, 2, alice_, key_, core::WallTime{}, false, largest);
     const auto frames = decode_all(out);
     ASSERT_EQ(frames.size(), 2U);
     EXPECT_TRUE(std::get<wire::Send>(frames[0]).body.empty());
@@ -188,7 +212,7 @@ TEST_F(WireTest, AnEmptyBodyAndTheLargestBodyBothTravel) {
 TEST_F(WireTest, BytesFedOneAtATimeDecodeToTheSameFrames) {
     std::vector<std::byte> out;
     wire::encode_subscribe(out, 3, room_);
-    wire::encode_deliver(out, room_, 4, alice_, key_, core::WallTime{}, bytes("hi"));
+    wire::encode_deliver(out, room_, 4, alice_, key_, core::WallTime{}, false, bytes("hi"));
     std::vector<wire::Frame> frames;
     for (const std::byte b : out) {
         const auto got = decode_all(std::span{&b, 1});
@@ -265,6 +289,7 @@ TEST_F(WireTest, ASendWhoseKeyDoesNotParseIsMalformed) {
         send += "alice";
         send += static_cast<char>(key.size());
         send += key;
+        send += '\0';
         send += "body";
         wire::Decoder fresh;
         fresh.feed(raw(4, send));
@@ -302,6 +327,8 @@ TEST_F(WireTest, ASendOrDeliverWithABodyPastTheLargestIsMalformed) {
         if (type == 6) {
             fields += std::string(8, '\0');
         }
+        // The flags (ADR-0128), none.
+        fields += '\0';
         fields += std::string(body, 'x');
         return raw(type, fields);
     };
