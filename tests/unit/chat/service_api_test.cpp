@@ -468,6 +468,50 @@ TEST_F(ServiceApiTest, AGroupIsCreatedOnceForItsRequestAndManagedAsItsAdminWould
     EXPECT_EQ(api_->counters().reads, 3U);
 }
 
+// ADR-0123: the backend sets a group member's role, and the group keeps an admin.
+TEST_F(ServiceApiTest, TheServiceSetsAMembersRole) {
+    ASSERT_EQ(ask("create_group", R"({"creator":"alice","id":"r","users":["bob"]})").status, 200);
+    const std::string r = chat::group_room(user("alice"), *rt::MessageKey::parse("r")).to_string();
+    heard_.take();
+    const Answer promoted =
+        ask("set_role", R"({"room":")" + r + R"(","user":"bob","role":"admin"})");
+    EXPECT_EQ(promoted.status, 200) << promoted.body;
+    EXPECT_EQ(promoted.body, std::format(R"({{"type":"role","room":"{}","user":"bob",)"
+                                         R"("role":"admin","changed":true}})",
+                                         r));
+    EXPECT_EQ(heard_.take(), std::vector<std::string>{"* " + r + " admin bob"});
+    // Again, after a lost answer say: nothing changes, and nobody hears of it.
+    const Answer again = ask("set_role", R"({"room":")" + r + R"(","user":"bob","role":"admin"})");
+    EXPECT_EQ(again.status, 200);
+    EXPECT_NE(again.body.find(R"("changed":false)"), std::string::npos) << again.body;
+    EXPECT_TRUE(heard_.take().empty());
+    ASSERT_EQ(ask("set_role", R"({"room":")" + r + R"(","user":"alice","role":"member"})").status,
+              200);
+    EXPECT_EQ(heard_.take(), std::vector<std::string>{"* " + r + " member alice"});
+    const Answer last = ask("set_role", R"({"room":")" + r + R"(","user":"bob","role":"member"})");
+    EXPECT_EQ(last.status, 409);
+    EXPECT_EQ(last.field("reason"), "last_admin");
+    const Answer stranger =
+        ask("set_role", R"({"room":")" + r + R"(","user":"zed","role":"admin"})");
+    EXPECT_EQ(stranger.status, 409);
+    EXPECT_EQ(stranger.field("reason"), "not_member");
+    for (const std::string& body :
+         {R"({"room":")" + r + R"(","user":"bob","role":"owner"})",
+          R"({"room":")" + r + R"(","user":"bob"})",
+          R"({"room":")" + r + R"(","user":"bob","role":"admin","why":1})"}) {
+        const Answer bad = ask("set_role", body);
+        EXPECT_EQ(bad.status, 400) << body;
+        EXPECT_EQ(bad.field("reason"), "malformed") << body;
+    }
+    // Only a group's own id is a group's.
+    ASSERT_EQ(ask("open_direct", R"({"users":["alice","bob"]})").status, 200);
+    const std::string direct = chat::direct_room(user("alice"), user("bob")).to_string();
+    const Answer not_group =
+        ask("set_role", R"({"room":")" + direct + R"(","user":"bob","role":"admin"})");
+    EXPECT_EQ(not_group.status, 400);
+    EXPECT_EQ(not_group.field("reason"), "bad_room");
+}
+
 TEST_F(ServiceApiTest, ChangesTheStoreRefusesAreAnsweredWithWhy) {
     ASSERT_EQ(ask("open_direct", R"({"users":["alice","bob"]})").status, 200);
     const std::string direct = chat::direct_room(user("alice"), user("bob")).to_string();

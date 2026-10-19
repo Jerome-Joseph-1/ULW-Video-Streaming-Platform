@@ -76,6 +76,8 @@ public:
                       core::ports::MessageCallback<core::ports::MembershipChange> done) override;
     void leave_room(const core::RoomId& room, const core::UserId& user,
                     core::ports::MessageCallback<core::ports::MembershipChange> done) override;
+    void set_role(const core::RoomId& room, const core::UserId& user, core::ports::MemberRole role,
+                  core::ports::MessageCallback<core::ports::MembershipChange> done) override;
     void rooms_of(const core::UserId& user, std::optional<core::RoomId> after, std::size_t limit,
                   core::ports::MessageCallback<std::vector<core::ports::RoomEntry>> done) override;
     void roster(const core::RoomId& room, const core::ports::Actor& asker,

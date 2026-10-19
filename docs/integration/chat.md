@@ -234,7 +234,9 @@ As `user-1`:
   ([auth.md](auth.md)). The service has no list of users, so it does not check that someone
   exists: resolve people to ids in your own directory, and never send a name typed by the user.
 - **Roles.** A group's creator is its admin; everyone else is a member, and so are both people
-  of a direct chat. Only an admin adds or removes others (`not_admin`). A direct chat's pair never
+  of a direct chat. Only an admin adds or removes others (`not_admin`). The operator's backend
+  makes others admins, or members again, with the service API's `set_role`; a group always keeps
+  one admin. A direct chat's pair never
   changes: `add_members`, `remove_member` and `leave` on one are `not_group`, so neither of the
   two can leave it alone; ending one (an unfriend, a block) is the product's, through the service
   API's `close_direct`, which unlists both. A member an operator removed from a direct chat is
@@ -448,7 +450,7 @@ comes back.
 
 ## The service API
 
-<!-- apps/chat/src/service_api.hpp, apps/chat/src/service_api.cpp, apps/chat/src/config.cpp (ULW_SERVICE_PORT), infra/auth/src/service_claim.cpp (read_service_claim, claim_holds), infra/auth/src/claims.cpp (is_service), docs/adr/0096-member-lists-changed-by-their-users.md -->
+<!-- apps/chat/src/service_api.hpp, apps/chat/src/service_api.cpp, apps/chat/src/config.cpp (ULW_SERVICE_PORT), infra/auth/src/service_claim.cpp (read_service_claim, claim_holds), infra/auth/src/claims.cpp (is_service), docs/adr/0096-member-lists-changed-by-their-users.md, infra/postgres/src/message_sql.hpp (kSetRole), docs/adr/0123-the-service-sets-a-members-role.md -->
 
 The embedding product's backend lists and unlists people itself, after its own request and
 accept, rather than letting users do it (`ULW_CHAT_SELF_SERVICE=off`, the default). Chat serves it
@@ -476,6 +478,7 @@ alive; requests on one connection are answered in order, one at a time.
 | `create_group` | `creator`, `id` (a request id: 1 to 64 of `A-Z a-z 0-9 _ -`), optional `users` (at most 50) | `{"type":"group","room":..,"id":..,"added":[...]}`. The group the creator's own `create_group` with that `id` names, the creator its admin; repeated with the same `id`, the same room, listing nobody more. |
 | `add_members` | `room`, `users` (1 to 50) | `{"type":"added","room":..,"users":[who it listed]}`. As the group's admin would, without being on the list; those listed already are left as they are. Only into a group someone created: the `room` must be a group's id (`04`, else `bad_room`), the group must list someone (`404` `no_room` when nothing recorded it or it lists nobody), and one whose members all left over its history is `409` `gone`. |
 | `remove_member` | `room`, `user` | `{"type":"removed","room":..,"user":..,"removed":[the user, or nobody]}`, with `"promoted":<user>` when the user was the group's last admin and the member whose id sorts first became admin, as for a `leave`. The user's sockets are out of the room at once, on every node. Idempotent: a user not listed (any more), or a room nothing recorded, answers `200` with `"removed":[]`. |
+| `set_role` | `room` (a group's id, `04`, else `bad_room`), `user`, `role` (`admin` or `member`) | `{"type":"role","room":..,"user":..,"role":..,"changed":true\|false}`. Makes a member the group's admin, or a plain member again (ADR-0123); every socket concerned hears `member` `promoted` or `demoted`. `changed` is `false`, and nobody is told, when they already had that role. A group keeps an admin while it has members: demoting its only one is `409` `last_admin` (promote another first). `409` `not_member` when the user is not listed. |
 | `close_direct` | `room` (a direct chat's id, `03`, else `bad_room`) | `{"type":"closed","room":..,"removed":[who it unlisted]}`. Takes a direct chat apart (an unfriend, a block): both of the pair unlisted under the room's lock, so their sockets leave the room at once on every node and their watches of each other are dropped (`not_shared`) unless they share another chat. Idempotent: `"removed":[]` when it lists nobody. The history stays; a later `open_direct` lists the pair again in the same room, history included. |
 | `rooms` | `user`, optional `after` (a room id), `limit` (1 to 100, default 50) | `{"type":"rooms","rooms":[{"room","kind","role","peer"}],"more":..}`, as the socket's `rooms` answers that user. |
 | `members` | `room`, optional `after` (a user id), `limit` (1 to 100, default 50) | `{"type":"members","room":..,"members":[{"user","role"}],"more":..}` for any room; a room nobody is listed in answers no members. |
