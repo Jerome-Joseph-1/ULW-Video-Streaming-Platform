@@ -27,7 +27,17 @@ replacements:
     targets:
       - select:
           kind: HTTPRoute
-          name: video-gateway|chat|livekit
+          name: video-gateway
+        fieldPaths:
+          - spec.parentRefs.0.name
+      - select:
+          kind: HTTPRoute
+          name: chat
+        fieldPaths:
+          - spec.parentRefs.0.name
+      - select:
+          kind: HTTPRoute
+          name: livekit
         fieldPaths:
           - spec.parentRefs.0.name
   # Its namespace.
@@ -38,7 +48,17 @@ replacements:
     targets:
       - select:
           kind: HTTPRoute
-          name: video-gateway|chat|livekit
+          name: video-gateway
+        fieldPaths:
+          - spec.parentRefs.0.namespace
+      - select:
+          kind: HTTPRoute
+          name: chat
+        fieldPaths:
+          - spec.parentRefs.0.namespace
+      - select:
+          kind: HTTPRoute
+          name: livekit
         fieldPaths:
           - spec.parentRefs.0.namespace
   # The host every HTTPRoute answers.
@@ -49,7 +69,17 @@ replacements:
     targets:
       - select:
           kind: HTTPRoute
-          name: video-gateway|chat|livekit
+          name: video-gateway
+        fieldPaths:
+          - spec.hostnames.0
+      - select:
+          kind: HTTPRoute
+          name: chat
+        fieldPaths:
+          - spec.hostnames.0
+      - select:
+          kind: HTTPRoute
+          name: livekit
         fieldPaths:
           - spec.hostnames.0
   # JWKS_URL of the gateway and chat.
