@@ -62,8 +62,10 @@ struct OwnVideoQuery {
 [[nodiscard]] std::optional<core::ports::VideoCursor>
 cursor_from_text(std::string_view text) noexcept;
 
-// PATCH /api/v1/videos/{id}'s body: {"visibility": "<private|unlisted|room:<room id>>"}.
+// PATCH /api/v1/videos/{id}'s body: {"visibility": "<private|unlisted|public|room:<room id>>"}.
 [[nodiscard]] std::optional<core::Visibility> visibility_from_body(std::string_view body);
+// A stream's PATCH: the same, but never public (ADR-0121).
+[[nodiscard]] std::optional<core::Visibility> stream_visibility_from_body(std::string_view body);
 
 // PATCH /api/v1/service/videos (ADR-0119): one visibility for up to kMaxBulkVideos videos.
 inline constexpr std::size_t kMaxBulkVideos = 50;

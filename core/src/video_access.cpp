@@ -29,6 +29,7 @@ namespace {
     case VisibilityKind::Room:
         return facts.room_member;
     case VisibilityKind::Unlisted:
+    case VisibilityKind::Public:
         return true;
     }
     return false;
@@ -45,6 +46,13 @@ VideoAccess access_of(const VideoRecord& video, const UserId& viewer,
         return VideoAccess::None;
     }
     if (facts.granted || shared_with(video.visibility, facts)) {
+        return VideoAccess::Viewer;
+    }
+    return VideoAccess::None;
+}
+
+VideoAccess access_of_anonymous(const VideoRecord& video) noexcept {
+    if (past_upload(video.state) && video.visibility.kind() == VisibilityKind::Public) {
         return VideoAccess::Viewer;
     }
     return VideoAccess::None;

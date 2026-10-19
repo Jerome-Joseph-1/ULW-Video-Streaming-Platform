@@ -182,6 +182,23 @@ TEST_P(VideoAccessTest, TheOwnerSharesWithAnyoneByMakingItUnlisted) {
     EXPECT_EQ(access(id, "bob"), core::VideoAccess::None);
 }
 
+// ADR-0121, migration 0024.
+TEST_P(VideoAccessTest, TheOwnerMakesItPublicAndItReadsBack) {
+    const auto id = add_video();
+    const auto set_to = set(id, "alice", core::Visibility::anyone());
+    ASSERT_TRUE(set_to) << core::ports::to_string(set_to.error());
+    EXPECT_EQ(set_to->visibility, core::Visibility::anyone());
+    EXPECT_EQ(access(id, "bob"), core::VideoAccess::Viewer);
+    const auto read = view(id, "carol");
+    ASSERT_TRUE(read);
+    EXPECT_EQ(read->video.visibility, core::Visibility::anyone());
+    EXPECT_EQ(core::access_of_anonymous(read->video), core::VideoAccess::Viewer);
+    // Only a room's kind names a room.
+    auto conn = db->session();
+    EXPECT_FALSE(conn.exec("UPDATE videos SET visibility_room = gen_random_uuid() WHERE id = $1",
+                           Params{}.add_uuid(id.uuid())));
+}
+
 TEST_P(VideoAccessTest, OnlyTheOwnerSetsItAndAnyoneElseIsToldItDoesNotExist) {
     const auto id = add_video();
     EXPECT_EQ(set(id, "bob", core::Visibility::unlisted()).error(), CatalogError::NotFound);
@@ -333,7 +350,7 @@ TEST_P(VideoAccessTest, TheSchemaRefusesWhatTheApiNeverWrites) {
     const auto id = add_video();
     auto conn = db->session();
     const Params video = Params{}.add_uuid(id.uuid());
-    EXPECT_FALSE(conn.exec("UPDATE videos SET visibility = 'public' WHERE id = $1", video));
+    EXPECT_FALSE(conn.exec("UPDATE videos SET visibility = 'everyone' WHERE id = $1", video));
     EXPECT_FALSE(conn.exec("UPDATE videos SET visibility = 'room' WHERE id = $1", video));
     EXPECT_FALSE(
         conn.exec("UPDATE videos SET visibility_room = gen_random_uuid() WHERE id = $1", video));

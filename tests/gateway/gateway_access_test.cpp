@@ -168,6 +168,53 @@ TEST_F(GatewayAccess, AnUnlistedVideoPlaysForAnyoneSignedIn) {
     EXPECT_EQ(get(video_path("master.m3u8"), "")->status, 401);
 }
 
+// ADR-0121: a public video plays without a token, and nothing else does.
+TEST_F(GatewayAccess, APublicVideoPlaysForAnyoneWithoutAToken) {
+    publish(core::VideoState::Ready, core::Visibility::anyone());
+    expect_playable_by("");
+    expect_playable_by(kBob);
+    // Anyone sees it as a viewer does: not its visibility, nor whom else it is shared with.
+    const auto meta = get(video_path(), "");
+    ASSERT_TRUE(meta);
+    EXPECT_EQ(meta->body.find("visibility"), std::string::npos) << meta->body;
+    // A token that fails is still refused, public or not.
+    EXPECT_EQ(get(video_path("master.m3u8"), "forged.!sig")->status, 401);
+}
+
+TEST_F(GatewayAccess, WithoutATokenAnythingButAPublicVideoAsksToSignIn) {
+    for (const core::Visibility& visibility :
+         {core::Visibility{}, core::Visibility::unlisted(), in_room()}) {
+        publish(core::VideoState::Ready, visibility);
+        for (const std::string& path :
+             {video_path(), video_path("master.m3u8"), video_path("720p/index.m3u8")}) {
+            const auto r = get(path, "");
+            ASSERT_TRUE(r);
+            EXPECT_EQ(r->status, 401) << visibility.to_string() << " " << path;
+            EXPECT_EQ(r->header("www-authenticate"), "Bearer");
+            EXPECT_EQ(r->body.find("seg_"), std::string::npos);
+        }
+    }
+    // A video that does not exist answers the same, so the answer says nothing of the id.
+    EXPECT_EQ(get(video_path({}, kMissing), "")->status, 401);
+    // Nor does a public video still being uploaded, which is its owner's alone.
+    publish(core::VideoState::Uploading, core::Visibility::anyone());
+    EXPECT_EQ(get(video_path(), "")->status, 401);
+    // Every other route still needs a token.
+    EXPECT_EQ(get("/api/v1/videos", "")->status, 401);
+    EXPECT_EQ(patch(R"({"visibility":"public"})", "")->status, 401);
+}
+
+TEST_F(GatewayAccess, TheOwnerMakesAVideoPublic) {
+    publish(core::VideoState::Ready, {});
+    const auto r = patch(R"({"visibility":"public"})", kAlice);
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    EXPECT_NE(r->body.find(R"("visibility":"public")"), std::string::npos);
+    expect_playable_by("");
+    ASSERT_EQ(patch(R"({"visibility":"private"})", kAlice)->status, 200);
+    EXPECT_EQ(get(video_path(), "")->status, 401);
+}
+
 TEST_F(GatewayAccess, ARoomsVideoPlaysForItsMembersAndNobodyElse) {
     publish(core::VideoState::Ready, in_room());
     gw_.add_member(kRoom, "alice");
@@ -295,7 +342,7 @@ TEST_F(GatewayAccess, AViewerMayNotChangeItAndOthersCannotTellItExists) {
 TEST_F(GatewayAccess, AnUnreadableVisibilityIsABadRequest) {
     publish(core::VideoState::Ready, {});
     for (const std::string_view body :
-         {R"({"visibility":"public"})", R"({"visibility":"room:nope"})", "{}", "not json"}) {
+         {R"({"visibility":"everyone"})", R"({"visibility":"room:nope"})", "{}", "not json"}) {
         const auto r = patch(body, kAlice);
         ASSERT_TRUE(r);
         EXPECT_EQ(r->status, 400) << body;

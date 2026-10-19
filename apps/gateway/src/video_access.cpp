@@ -222,6 +222,14 @@ std::optional<core::Visibility> visibility_from_body(std::string_view body) {
     return *visibility;
 }
 
+std::optional<core::Visibility> stream_visibility_from_body(std::string_view body) {
+    auto visibility = visibility_from_body(body);
+    if (visibility && visibility->kind() == core::VisibilityKind::Public) {
+        return std::nullopt;
+    }
+    return visibility;
+}
+
 std::optional<BulkVisibility> bulk_visibility_from_body(std::string_view body) {
     const auto visibility = visibility_from_body(body);
     const auto doc = core::json::parse(body);

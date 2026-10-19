@@ -153,6 +153,7 @@ bool may_watch(const LiveStream& stream, const UserId& viewer, bool room_member)
     case VisibilityKind::Room:
         return room_member;
     case VisibilityKind::Unlisted:
+    case VisibilityKind::Public:
         return true;
     }
     return false;

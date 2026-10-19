@@ -54,9 +54,9 @@ TEST(Visibility, EveryVideoStartsPrivate) {
     EXPECT_EQ(v.to_string(), "private");
 }
 
-TEST(Visibility, ParsesTheThreeFormsAndWritesThemBack) {
+TEST(Visibility, ParsesTheFourFormsAndWritesThemBack) {
     for (const std::string_view text :
-         {std::string_view{"private"}, std::string_view{"unlisted"},
+         {std::string_view{"private"}, std::string_view{"unlisted"}, std::string_view{"public"},
           std::string_view{"room:0192f3c4-7a1b-7c2d-8e3f-0123456789ab"}}) {
         const auto v = Visibility::parse(text);
         ASSERT_TRUE(v) << text;
@@ -69,13 +69,15 @@ TEST(Visibility, ParsesTheThreeFormsAndWritesThemBack) {
     EXPECT_EQ(shared->kind_name(), "room");
     EXPECT_EQ(Visibility::parse("unlisted")->kind_name(), "unlisted");
     EXPECT_EQ(Visibility::parse("private")->kind_name(), "private");
+    EXPECT_EQ(Visibility::parse("public")->kind_name(), "public");
+    EXPECT_EQ(*Visibility::parse("public"), Visibility::anyone());
     EXPECT_EQ(*shared, Visibility::room(room()));
     EXPECT_NE(*shared, Visibility::unlisted());
 }
 
 TEST(Visibility, RefusesAnythingElse) {
     for (const std::string_view text :
-         {"", "Private", "public", "room", "room:", "room:not-a-uuid",
+         {"", "Private", "Public", "public ", "room", "room:", "room:not-a-uuid",
           // Ids are lowercase canonical UUIDs, as everywhere in the API.
           "room:0192F3C4-7A1B-7C2D-8E3F-0123456789AB", " private", "unlisted ",
           "room: 0192f3c4-7a1b-7c2d-8e3f-0123456789ab"}) {
@@ -94,13 +96,15 @@ TEST(Visibility, ReadsTheCatalogsColumnsOnlyAsTheApiWritesThem) {
     EXPECT_FALSE(Visibility::from_columns("room", "nope"));
     EXPECT_FALSE(Visibility::from_columns("private", kRoom));
     EXPECT_FALSE(Visibility::from_columns("unlisted", kRoom));
-    EXPECT_FALSE(Visibility::from_columns("public", std::nullopt));
+    EXPECT_EQ(Visibility::from_columns("public", std::nullopt), Visibility::anyone());
+    EXPECT_FALSE(Visibility::from_columns("public", kRoom));
+    EXPECT_FALSE(Visibility::from_columns("everyone", std::nullopt));
 }
 
 TEST(VideoAccess, TheOwnerSeesEveryStateUnderEveryVisibility) {
     for (const VideoState state : kEveryState) {
-        for (const Visibility& v :
-             {Visibility{}, Visibility::unlisted(), Visibility::room(room())}) {
+        for (const Visibility& v : {Visibility{}, Visibility::unlisted(), Visibility::anyone(),
+                                    Visibility::room(room())}) {
             EXPECT_EQ(core::access_of(video(state, v), user("alice"), {}), VideoAccess::Owner);
         }
     }
@@ -118,6 +122,27 @@ TEST(VideoAccess, AnUnlistedVideoIsAnyonesOnceItsUploadIsCommitted) {
     for (const VideoState state : {VideoState::Processing, VideoState::Ready, VideoState::Failed}) {
         EXPECT_EQ(core::access_of(video(state, Visibility::unlisted()), user("bob"), {}),
                   VideoAccess::Viewer);
+    }
+}
+
+// ADR-0121.
+TEST(VideoAccess, APublicVideoIsAnyonesSignedInOrNotOnceItsUploadIsCommitted) {
+    for (const VideoState state : {VideoState::Processing, VideoState::Ready, VideoState::Failed}) {
+        const auto open = video(state, Visibility::anyone());
+        EXPECT_EQ(core::access_of(open, user("bob"), {}), VideoAccess::Viewer);
+        EXPECT_EQ(core::access_of_anonymous(open), VideoAccess::Viewer);
+    }
+    for (const VideoState state : {VideoState::Init, VideoState::Uploading}) {
+        EXPECT_EQ(core::access_of_anonymous(video(state, Visibility::anyone())), VideoAccess::None);
+    }
+}
+
+TEST(VideoAccess, NobodySignedInSeesAnythingButAPublicVideo) {
+    for (const VideoState state : kEveryState) {
+        for (const Visibility& v :
+             {Visibility{}, Visibility::unlisted(), Visibility::room(room())}) {
+            EXPECT_EQ(core::access_of_anonymous(video(state, v)), VideoAccess::None);
+        }
     }
 }
 

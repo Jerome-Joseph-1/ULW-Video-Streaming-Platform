@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## Unreleased
 
-<!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md, docs/adr/0115-a-call-says-whom-it-rings-and-who-moderates-it.md, docs/adr/0119-one-visibility-for-many-videos.md, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0120-video-events-on-the-notification-hook.md -->
+<!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md, docs/adr/0115-a-call-says-whom-it-rings-and-who-moderates-it.md, docs/adr/0119-one-visibility-for-many-videos.md, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0120-video-events-on-the-notification-hook.md, core/src/video_access.cpp (access_of_anonymous), migrations/0024_public_videos.sql, docs/adr/0121-a-public-video-plays-without-a-token.md -->
 
 Additive (versioning rule 1), with calls that last as long as someone is in them.
 
@@ -27,6 +27,7 @@ Additive (versioning rule 1), with calls that last as long as someone is in them
 | A connection freed a place among its 64 rooms only by reconnecting | `part` stops following a room and frees its place, leaving the member list as it is ([Chat](chat.md#messages)) |
 | The service API set one video's visibility per request | `PATCH /api/v1/service/videos` sets it on up to 50, and says which did not change and why ([Videos](videos-and-playback.md#service-api-visibility-takedown-and-listing)) |
 | A backend learned that a video was ready or failed only by polling | With the notification hook on, `video_ready` and `video_failed` events ([Notifications](notifications.md#video_ready-and-video_failed)) |
+| Every playlist needed a token | A `public` video plays for anyone with its id, signed in or not ([Videos](videos-and-playback.md#playing-without-a-token)) |
 | A refused upgrade read as `1006` in a browser, like a network failure | `/rt?refusals=close` is refused on the socket, with close `4001`, `4003`, `4029` or `4503` ([Chat](chat.md#connecting)) |
 
 What to do:
@@ -38,7 +39,9 @@ What to do:
   video on `video_ready`, and keep polling the listing now and then for events you missed.
 - **Operators:** chat's node channel moves to version 6: roll this release out with the chat
   Deployment set to `Recreate` (RUNBOOK.md, section 3). Migration 0023 adds `video_events` and a
-  trigger on `videos`; it runs with the gateway as usual.
+  trigger on `videos`, and 0024 lets a video be `public`; both run with the gateway as usual.
+  Roll every gateway out before anyone sets `public`: an older one answers `500` for such a
+  video.
 
 ## 2026-10-15: notification events for members who are not connected (v1.2.0)
 

@@ -103,7 +103,7 @@ The video object:
 | `duration_ms` | integer or `null` | Set once `ready` |
 | `progress` | object or `null` | While `processing`, `{"stage": "queued" or "transcoding", "percent": 0 to 99}`; `null` in every other state ([Progress](#progress)) |
 | `error_reason` | string, only when `failed`, owner only | Why, in a short English phrase meant for the video's owner, such as `the file could not be decoded as video`, `transcoding exceeded its time budget` or `upload expired`. Show it or log it; do not parse it, as the wording may change. Absent in every other state, and for anyone but the owner. |
-| `visibility` | string, owner only | Who else may see it: `private`, `unlisted` or `room:<room id>` ([Who can see a video](#who-can-see-a-video)). Absent for anyone but the owner. |
+| `visibility` | string, owner only | Who else may see it: `private`, `unlisted`, `public` or `room:<room id>` ([Who can see a video](#who-can-see-a-video)). Absent for anyone but the owner. |
 
 A failed video, as its owner sees it:
 
@@ -210,7 +210,7 @@ All error bodies are empty.
 
 ## Who can see a video
 
-<!-- core/src/video_access.cpp (access_of), core/src/visibility.cpp, infra/postgres/src/upload_catalog.cpp (kFindVideoFor, kSetVisibility, kGrantAccess), apps/gateway/src/connection.cpp (on_video, start_update, start_service_route), apps/gateway/src/video_access.cpp, migrations/0016_video_access.sql, docs/adr/0097-videos-shared-by-visibility-and-service-grants.md -->
+<!-- core/src/video_access.cpp (access_of), core/src/visibility.cpp, infra/postgres/src/upload_catalog.cpp (kFindVideoFor, kSetVisibility, kGrantAccess), apps/gateway/src/connection.cpp (on_video, start_update, start_service_route), apps/gateway/src/video_access.cpp, migrations/0016_video_access.sql, migrations/0024_public_videos.sql, docs/adr/0097-videos-shared-by-visibility-and-service-grants.md, docs/adr/0121-a-public-video-plays-without-a-token.md -->
 
 Every video has a **visibility**, which its owner sets:
 
@@ -218,6 +218,7 @@ Every video has a **visibility**, which its owner sets:
 |---|---|
 | `private` | Nobody. Every video starts so, a live stream's recording included. |
 | `unlisted` | Any signed-in user who has the video id. |
+| `public` | Anyone who has the video id, signed in or not: its metadata and both playlists are served without a token ([Playing without a token](#playing-without-a-token)). |
 | `room:<room id>` | The current members of that chat room, direct or group: whoever chat lists in it ([chat.md](chat.md#changing-member-lists)) at the moment of each request, while it also lists the owner. Someone taken off the list loses the video at their next request; someone added gains it. When the owner leaves the room, nobody in it sees the video any more; listed again, the owner shares into it again. |
 
 On top of any visibility, the operator's backend may **grant** a video to single users
@@ -236,6 +237,21 @@ There is no listing of videos for users in this version: a client keeps the ids 
 the upload, by a chat message, by the operator's product). The operator's backend lists a user's
 videos ([Listing a user's videos](#listing-a-users-videos)) and may hand them to its own client.
 
+### Playing without a token
+
+A request for a video's metadata (`GET /api/v1/videos/{id}`) or either playlist that carries no
+token at all (no `Authorization` header, no auth cookie) is served when the video is `public`
+and its upload is committed, exactly as for a signed-in viewer: the video object without its
+visibility, and playlists whose segment URLs are presigned as usual. Embed a player on a page
+anyone can open and point it at the master playlist.
+
+For anything else (a video that is not public, one still uploading, one that does not exist) a
+request without a token is `401` with `WWW-Authenticate: Bearer`, as before, so a player that
+lost its session still knows to sign in, and nobody learns whether an id exists. A token that
+fails is `401` whatever the video, never served as if no token was sent. Requests without a token
+count against their address's limits, and are not counted as views. Only the video routes take
+them: uploads, listings and every change still need a token, and a live stream is never public.
+
 ### Setting the visibility
 
 | Endpoint | Success | Errors |
@@ -248,7 +264,8 @@ The owner only. The body is JSON, `Content-Type: application/json`, at most 4 Ki
 {"visibility":"room:0192f3c4-7a1b-7c2d-8e3f-0123456789ab"}
 ```
 
-`visibility` is `private`, `unlisted` or `room:<room id>`, the room id a lowercase canonical UUID.
+`visibility` is `private`, `unlisted`, `public` or `room:<room id>`, the room id a lowercase
+canonical UUID.
 A room must be one the owner is a member of at that moment (a direct chat they are one of the
 two of, or a group they are listed in). Leaving the room later stops the share for everyone in it,
 until the owner is listed again or sets another visibility. A cookie request needs an allowed `Origin`, as an upload's create does
@@ -258,7 +275,7 @@ Refusals carry a JSON body, `{"error":"<code>"}`:
 
 | Status | `error` | Meaning |
 |---|---|---|
-| `400` | `bad_visibility` | The body is not an object with one of the three forms; an empty body is `400` with no body |
+| `400` | `bad_visibility` | The body is not an object with one of the four forms; an empty body is `400` with no body |
 | `403` | `forbidden` | You may see the video but are not its owner |
 | `403` | `not_member` | The room is not one you are a member of |
 | `404` | `not_found` | No such video, a bad id, or a video you may not see: the three are indistinguishable |
@@ -353,7 +370,7 @@ or the query is looked at.
 | `DELETE /api/v1/service/videos/{id}` | `204`: the video is taken down | `400`, `401`, `403`, `404`, `409`, `503`, `500` |
 | `GET /api/v1/service/videos` | `200`, `application/json`, `Cache-Control: no-store`, a page of the videos of the user `?owner=` names | `400`, `401`, `403`, `503`, `500` |
 
-**Visibility.** The `PATCH` takes the owner's body, `{"visibility":"private" | "unlisted" |
+**Visibility.** The `PATCH` takes the owner's body, `{"visibility":"private" | "unlisted" | "public" |
 "room:<room id>"}` with `Content-Type: application/json`, at most 4 KiB, and sets it on any video
 whatever its state, as its owner may. A room must list the video's owner at that moment (`403`
 `not_member` otherwise): a room shares a video only while it lists the owner, so any other room
@@ -409,7 +426,7 @@ Refusals carry a JSON body, `{"error":"<code>"}`:
 
 | Status | `error` | Meaning |
 |---|---|---|
-| `400` | `bad_visibility` | `PATCH`: the body is not an object with one of the three forms; an empty body is `400` with no body |
+| `400` | `bad_visibility` | `PATCH`: the body is not an object with one of the four forms; an empty body is `400` with no body |
 | `400` | `bad_videos` | `PATCH` of many: `videos` is missing, empty, longer than 50, or has a malformed or repeated id |
 | `400` | `bad_query` | `GET`: no `owner`, or `owner`, `limit` or `after` malformed, or one given twice |
 | `403` | `forbidden` | Not a service token |
