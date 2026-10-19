@@ -369,6 +369,32 @@ void Notifier::message(const core::RoomId& room, const core::UserId& sender,
         return;
     }
     ++message_lookups_;
+    if (limits_.message_present) {
+        store_.message_audience(
+            room, sender,
+            [weak = std::weak_ptr(self_), room, sender,
+             seq](NotifyResult<core::ports::MessageAudience> result) mutable noexcept {
+                const auto self = weak.lock();
+                if (!self) {
+                    return;
+                }
+                Notifier& n = **self;
+                --n.message_lookups_;
+                if (!result) {
+                    ++n.counters_.message_failures;
+                    return;
+                }
+                if (result->away.empty() && result->present.empty()) {
+                    return;
+                }
+                try {
+                    n.offer(n.message_text(room, sender, seq, *result));
+                } catch (...) {
+                    ++n.counters_.allocation_failures;
+                }
+            });
+        return;
+    }
     store_.message_targets(room, sender,
                            [weak = std::weak_ptr(self_), room, sender,
                             seq](NotifyResult<std::vector<core::UserId>> result) mutable noexcept {
@@ -403,6 +429,48 @@ void Notifier::message(const core::RoomId& room, const core::UserId& sender,
                                    ++n.counters_.allocation_failures;
                                }
                            });
+}
+
+// "users": those away, as without the option; "present": each member with a socket in view and
+// the devices those sockets named, so that the receiver pushes to their other devices
+// (ADR-0126).
+std::string Notifier::message_text(const core::RoomId& room, const core::UserId& sender,
+                                   std::uint64_t seq,
+                                   const core::ports::MessageAudience& audience) {
+    std::string out;
+    head(out, "message");
+    out += R"(,"room":")";
+    out += room.to_string();
+    out += R"(","sender":)";
+    append_user(out, sender);
+    std::format_to(std::back_inserter(out), R"(,"seq":{},"users":)", seq);
+    append_users(out, audience.away);
+    out += R"(,"present":[)";
+    for (std::size_t i = 0; i < audience.present.size(); ++i) {
+        const SocketDevice& socket = audience.present[i];
+        const bool first = i == 0 || audience.present[i - 1].user != socket.user;
+        if (first) {
+            if (i != 0) {
+                out += "]},";
+            }
+            out += R"({"user":)";
+            append_user(out, socket.user);
+            out += R"(,"devices":[)";
+        }
+        if (socket.device) {
+            if (out.back() != '[') {
+                out += ',';
+            }
+            out += '"';
+            out += socket.device->to_string();
+            out += '"';
+        }
+    }
+    if (!audience.present.empty()) {
+        out += "]}";
+    }
+    out += "]}";
+    return out;
 }
 
 void Notifier::observed(const CallEvent& event) noexcept {

@@ -37,6 +37,16 @@ struct SocketDevice {
     friend bool operator==(const SocketDevice&, const SocketDevice&) = default;
 };
 
+// Who a message is owed to (ADR-0126): the members with no socket in view anywhere, and the
+// members with one, with the sockets they have.
+struct MessageAudience {
+    std::vector<UserId> away;
+    // Each present member's sockets, ordered by user, as connected() lists them.
+    std::vector<SocketDevice> present;
+
+    friend bool operator==(const MessageAudience&, const MessageAudience&) = default;
+};
+
 // How long a node's rows count after its last renewal, and how often a member may be told of a
 // room's messages while they stay disconnected.
 struct NotifyTiming {
@@ -82,6 +92,11 @@ public:
     // interval answers none of them, from whichever node it comes. Ordered by user id.
     virtual void message_targets(const RoomId& room, const UserId& sender,
                                  NotifyCallback<std::vector<UserId>> done) = 0;
+    // The same members and interval, with or without a socket (ADR-0126): those with none are
+    // `away`, as message_targets answers; those with one are `present`, with their sockets, so
+    // that the receiver may push to their other devices. Every member answered is marked told.
+    virtual void message_audience(const RoomId& room, const UserId& sender,
+                                  NotifyCallback<MessageAudience> done) = 0;
 };
 
 } // namespace core::ports

@@ -76,6 +76,10 @@ public:
                    NotifyCallback<std::vector<SocketDevice>> done) override {
         stalled.push_back(std::move(done));
     }
+    void message_audience(const core::RoomId& room, const core::UserId& sender,
+                          NotifyCallback<core::ports::MessageAudience> done) override {
+        inner_.message_audience(room, sender, std::move(done));
+    }
     void message_targets(const core::RoomId& room, const core::UserId& sender,
                          NotifyCallback<std::vector<core::UserId>> done) override {
         inner_.message_targets(room, sender, std::move(done));
@@ -120,11 +124,11 @@ protected:
         reactor_.reset();
     }
 
-    void make(bool stall = false) {
+    void make(bool stall = false, chat::NotifyLimits limits = {}) {
         core::ports::IConnectivityStore& store =
             stall ? static_cast<core::ports::IConnectivityStore&>(*stalling_) : *registry_;
         notifier_ = std::make_unique<chat::Notifier>(*reactor_, store, sink_, clock_, random_,
-                                                     kNode, chat::NotifyLimits{});
+                                                     kNode, limits);
         notifier_->start();
         pump();
     }
@@ -289,6 +293,44 @@ TEST_F(NotifierTest, ARegistryThatDoesNotAnswerInTimeLeavesTheDevicesUnknownRath
     stalling_->stalled[0](std::vector<SocketDevice>{});
     pump();
     EXPECT_TRUE(sink_.events.empty());
+}
+
+// ADR-0126: with ULW_NOTIFY_MESSAGE_PRESENT, those with a socket in view are named too, with
+// the devices it names, so the receiver pushes to their other devices.
+TEST_F(NotifierTest, WithPresentOnAMessageAlsoNamesThePresentAndTheirDevices) {
+    chat::NotifyLimits limits;
+    limits.message_present = true;
+    make(false, limits);
+    registry_->set_room(room_id(), core::ports::RoomKind::GroupChat,
+                        {user("alice"), user("bob"), user("carol"), user("dave")});
+    notifier_->opened(user("carol"), device(kLaptop));
+    notifier_->opened(user("carol"), std::nullopt);
+    notifier_->opened(user("dave"), std::nullopt);
+    wait_past(chat::NotifyLimits{}.flush_after);
+    notifier_->message(room_id(), user("alice"), 7);
+    pump();
+    ASSERT_EQ(sink_.events.size(), 1U);
+    const std::string raw = sink_.events[0];
+    auto events = sink_.take();
+    EXPECT_EQ(strings(events[0].find("users")), std::vector<std::string>{"bob"});
+    EXPECT_NE(raw.find(std::string(R"("present":[{"user":"carol","devices":[")") +
+                       std::string(kLaptop) + R"("]},{"user":"dave","devices":[]}]})"),
+              std::string::npos)
+        << raw;
+    // Once per interval, present or not.
+    notifier_->message(room_id(), user("alice"), 8);
+    pump();
+    EXPECT_TRUE(sink_.take().empty());
+}
+
+TEST_F(NotifierTest, WithoutPresentAMessageNamesNobodyPresent) {
+    make();
+    registry_->set_room(room_id(), core::ports::RoomKind::GroupChat, {user("alice"), user("bob")});
+    notifier_->opened(user("bob"), device(kLaptop));
+    wait_past(chat::NotifyLimits{}.flush_after);
+    notifier_->message(room_id(), user("alice"), 7);
+    pump();
+    EXPECT_TRUE(sink_.take().empty());
 }
 
 TEST_F(NotifierTest, AMessageNamesTheMembersWithNoSocketAndTellsEachOncePerInterval) {

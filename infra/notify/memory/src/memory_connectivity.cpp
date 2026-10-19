@@ -164,4 +164,57 @@ void MemoryConnectivity::message_targets(const core::RoomId& room, const core::U
     reply<std::vector<core::UserId>>(std::move(done), std::move(due));
 }
 
+void MemoryConnectivity::message_audience(const core::RoomId& room, const core::UserId& sender,
+                                          NotifyCallback<core::ports::MessageAudience> done) {
+    if (failing_) {
+        reply<core::ports::MessageAudience>(std::move(done),
+                                            std::unexpected(NotifyError::Unavailable));
+        return;
+    }
+    core::ports::MessageAudience audience;
+    const auto found = rooms_.find(room);
+    if (found != rooms_.end() && found->second.kind != core::ports::RoomKind::StreamLiveChat) {
+        const core::MonoTime now = clock_.now();
+        auto& marks = marks_[room];
+        std::vector<core::UserId> told;
+        for (const core::UserId& member : found->second.members) {
+            if (member == sender) {
+                continue;
+            }
+            const auto mark = marks.find(member);
+            if (mark != marks.end() && now - mark->second < timing_.message_interval) {
+                continue;
+            }
+            marks[member] = now;
+            told.push_back(member);
+        }
+        if (marks.empty()) {
+            marks_.erase(room);
+        }
+        std::ranges::sort(told, {}, &core::UserId::view);
+        for (const core::UserId& member : told) {
+            std::vector<SocketDevice> sockets;
+            for (const auto& [tag, node] : nodes_) {
+                if (!live(node, now)) {
+                    continue;
+                }
+                for (const SocketDevice& s : node.sockets) {
+                    if (s.user == member && std::ranges::find(sockets, s) == sockets.end()) {
+                        sockets.push_back(s);
+                    }
+                }
+            }
+            if (sockets.empty()) {
+                audience.away.push_back(member);
+                continue;
+            }
+            std::ranges::sort(sockets, {}, [](const SocketDevice& s) {
+                return s.device ? s.device->to_string() : std::string{};
+            });
+            audience.present.insert(audience.present.end(), sockets.begin(), sockets.end());
+        }
+    }
+    reply<core::ports::MessageAudience>(std::move(done), std::move(audience));
+}
+
 } // namespace infra::notify

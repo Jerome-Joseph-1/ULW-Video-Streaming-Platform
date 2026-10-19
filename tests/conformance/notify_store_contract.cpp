@@ -131,6 +131,34 @@ TEST_P(NotifyStoreContract, AMessageIsOwedToMembersWithNoSocketOncePerInterval) 
     EXPECT_EQ(*targets(room, carol), (std::vector<core::UserId>{alice, bob}));
 }
 
+// ADR-0126: every member is told once per interval, present ones with their sockets.
+TEST_P(NotifyStoreContract, AMessagesAudienceNamesThePresentWithTheirSocketsOncePerInterval) {
+    const core::RoomId room = new_room();
+    harness_->set_room(room, RoomKind::GroupChat, {alice, bob, carol});
+    ASSERT_TRUE(renew(kNodeA));
+    ASSERT_TRUE(renew(kNodeB));
+    const SocketDevice laptop{.user = carol, .device = new_device()};
+    const SocketDevice tab{.user = carol, .device = {}};
+    ASSERT_TRUE(sync(kNodeA, {laptop}));
+    ASSERT_TRUE(sync(kNodeB, {tab, laptop}));
+
+    const auto first = audience(room, alice);
+    ASSERT_TRUE(first) << to_string(first.error());
+    EXPECT_EQ(first->away, std::vector<core::UserId>{bob});
+    // carol's two sockets, once each, the one that named no device first.
+    EXPECT_EQ(first->present, (std::vector<SocketDevice>{tab, laptop}));
+    // Within the interval nobody again, present or not; the sender was never owed one.
+    const auto again = audience(room, alice);
+    ASSERT_TRUE(again);
+    EXPECT_EQ(*again, core::ports::MessageAudience{});
+    // Both reads keep the same marks: whom one told, the other does not tell again.
+    EXPECT_TRUE(targets(room, alice)->empty());
+    const auto from_carol = audience(room, carol);
+    ASSERT_TRUE(from_carol);
+    EXPECT_EQ(from_carol->away, std::vector<core::UserId>{alice});
+    EXPECT_TRUE(from_carol->present.empty());
+}
+
 TEST_P(NotifyStoreContract, AMemberWhoConnectsStartsAfresh) {
     const core::RoomId room = new_room();
     harness_->set_room(room, RoomKind::DirectChat, {alice, bob});
