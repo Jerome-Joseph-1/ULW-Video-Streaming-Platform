@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstdio>
 #include <exception>
 #include <format>
@@ -12,11 +13,14 @@ namespace chat {
 
 // One JSON object per line on stdout, flushed at once, so a supervisor reading the pipe sees
 // each event when it happens. `fields` is the object's members without the braces; every value
-// passed in is a node, room or user id, or a number, none of which needs escaping.
+// passed in is a node, room or user id, or a number, none of which needs escaping. Each line
+// starts with "ts", the wall clock's UTC time to the millisecond, whatever the runtime adds.
 template <class... Args>
 void log_event(std::format_string<Args...> fields, Args&&... args) noexcept {
     try {
-        std::string line = "{";
+        std::string line = std::format(
+            R"({{"ts":"{:%FT%T}Z",)",
+            std::chrono::floor<std::chrono::milliseconds>(std::chrono::system_clock::now()));
         std::format_to(std::back_inserter(line), fields, std::forward<Args>(args)...);
         line += '}';
         std::println(stdout, "{}", line);

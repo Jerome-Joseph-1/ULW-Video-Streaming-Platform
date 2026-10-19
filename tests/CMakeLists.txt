@@ -483,6 +483,7 @@ ulw_add_test_suite(chat_unit_tests unit
     unit/chat/key_directory_test.cpp
     unit/chat/key_fetcher_test.cpp
     unit/chat/live_chat_test.cpp
+    unit/chat/log_test.cpp
     unit/chat/membership_test.cpp
     unit/chat/memory_store_access_test.cpp
     unit/chat/named_rooms_test.cpp

@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -73,7 +74,8 @@ private:
     class Request;
 
     void start() noexcept;
-    void finished(bool ok) noexcept;
+    // `status`: the receiver's HTTP status, or nullopt when there was no answer.
+    void finished(std::optional<int> status) noexcept;
 
     net::IReactor& reactor_;
     infra::curl::Multi& multi_;
