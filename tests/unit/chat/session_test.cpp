@@ -2,6 +2,7 @@
 #include "core/util/parse.hpp"
 #include "infra/auth/base64url.hpp"
 #include "infra/messages/memory_message_store.hpp"
+#include "infra/notify/memory_connectivity.hpp"
 #include "net/ip_address.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/signals.hpp"
@@ -97,8 +98,11 @@ private:
 class Node {
 public:
     // With `manual_clock`, time on the node stands still until advance() moves it.
-    explicit Node(net::ReactorKind kind, chat::Limits limits = {}, bool manual_clock = false)
-        : limits_(std::move(limits)), manual_clock_(manual_clock) {
+    // With `notifier`, the node keeps the hook's registry (ADR-0111), in memory, and says how many
+    // sockets are in it.
+    explicit Node(net::ReactorKind kind, chat::Limits limits = {}, bool manual_clock = false,
+                  bool notifier = false)
+        : limits_(std::move(limits)), manual_clock_(manual_clock), notifier_(notifier) {
         std::promise<std::uint16_t> port;
         auto ready = port.get_future();
         healthy_ = healthy_promise_.get_future();
@@ -146,6 +150,8 @@ public:
     std::atomic<bool> store_held = false;
     // Sessions holding an HTTP parser, as of the node's last turn.
     std::atomic<std::size_t> http_parsers = 0;
+    // With a notifier: the (user, device) pairs with a socket in its registry, as of the last turn.
+    std::atomic<std::size_t> notify_sockets = 0;
     // Upgrades waiting on the verifier's keys ("slow." tokens), as of the node's last turn;
     // setting refresh_keys lets them go on.
     std::atomic<std::size_t> key_waiters = 0;
@@ -200,6 +206,17 @@ private:
         }
         chat::RoomLog log(*core::NodeId::parse("chat-1"));
         os::SystemRandom random;
+        struct NoSink final : chat::IEventSink {
+            void offer(std::string /*event*/) noexcept override {}
+        } sink;
+        std::unique_ptr<infra::notify::MemoryConnectivity> registry;
+        std::unique_ptr<chat::Notifier> notifier;
+        if (notifier_) {
+            registry = std::make_unique<infra::notify::MemoryConnectivity>(
+                **reactor, clock, core::ports::NotifyTiming{});
+            notifier = std::make_unique<chat::Notifier>(**reactor, *registry, sink, clock, random,
+                                                        1, chat::NotifyLimits{});
+        }
         rt::RoomRouter router(**reactor, *store, clock, random,
                               {.self = *core::NodeId::parse("chat-1"),
                                .advertise = "127.0.0.1:" + std::to_string(node_port),
@@ -216,7 +233,8 @@ private:
                        .messages = *messages,
                        .verifier = verifier,
                        .clock = clock,
-                       .random = random},
+                       .random = random,
+                       .notifier = notifier.get()},
             chat::Access{.cookie = "auth_token", .allowed_origins = {std::string(kAllowed)}},
             limits_);
         NamedPeers accept(*server, peer_lock_, named_peer_);
@@ -265,16 +283,19 @@ private:
             drop_pending_seen = verifier.drop_requested;
             key_waiters = verifier.waiting();
             http_parsers = server->http_parsers();
+            notify_sockets = notifier ? notifier->sockets() : 0;
             ++turns_;
             turns_.notify_all();
         }
         messages.reset();
         server.reset();
+        notifier.reset();
         store.reset();
     }
 
     chat::Limits limits_;
     bool manual_clock_;
+    bool notifier_;
     std::mutex peer_lock_;
     std::optional<net::IpAddress> named_peer_;
     std::promise<void> healthy_promise_;
@@ -570,6 +591,46 @@ TEST_P(ChatSessionTest, AStateIsAnsweredWithWhatTheSocketNowCountsAs) {
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"pong"})");
     ASSERT_TRUE(alice->send_text(R"({"type":"state","visible":true})"));
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"state","visible":true})");
+}
+
+// ADR-0125: a hidden socket is out of the hook's registry until it is back in view, and goes
+// once when it closes, hidden or not.
+TEST_P(ChatSessionTest, AHiddenSocketLeavesTheRegistryUntilItIsInViewAgain) {
+    node_.reset();
+    node_ = std::make_unique<Node>(GetParam(), chat::Limits{}, false, /*notifier=*/true);
+    const auto count_is = [&](std::size_t n) {
+        const auto deadline = std::chrono::steady_clock::now() + seconds(10);
+        while (node_->notify_sockets != n) {
+            if (std::chrono::steady_clock::now() > deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return true;
+    };
+    auto phone = WsClient::connect(node_->port(), "/rt?device=01a0eb86-6cca-7dce-84cc-3bb47615f001",
+                                   "Authorization: Bearer user.alice\r\n", nullptr);
+    ASSERT_TRUE(phone);
+    ASSERT_TRUE(count_is(1));
+    ASSERT_TRUE(phone->send_text(R"({"type":"state","visible":false})"));
+    EXPECT_EQ(phone->next_text(seconds(10)), R"({"type":"state","visible":false})");
+    EXPECT_TRUE(count_is(0));
+    // Hidden again changes nothing.
+    ASSERT_TRUE(phone->send_text(R"({"type":"state","visible":false})"));
+    phone->next_text(seconds(10));
+    ASSERT_TRUE(phone->send_text(R"({"type":"state","visible":true})"));
+    phone->next_text(seconds(10));
+    EXPECT_TRUE(count_is(1));
+    ASSERT_TRUE(phone->send_text(R"({"type":"state","visible":false})"));
+    phone->next_text(seconds(10));
+    EXPECT_TRUE(count_is(0));
+    phone.reset();
+    // Closed while hidden: out once, and a socket opened next counts as it should.
+    auto laptop =
+        WsClient::connect(node_->port(), "/rt?device=01a0eb86-6cca-7dce-84cc-3bb47615f002",
+                          "Authorization: Bearer user.alice\r\n", nullptr);
+    ASSERT_TRUE(laptop);
+    EXPECT_TRUE(count_is(1));
 }
 
 // ADR-0122: a ping is answered at once, its rid echoed, from the control frames' allowance.

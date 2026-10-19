@@ -1213,3 +1213,72 @@ TEST_F(PlaintextTest, NoBodyReachesAProcessLogTheServerLogOrATextColumn) {
 }
 
 } // namespace
+
+namespace {
+
+// ADR-0123 and ADR-0128 on Postgres alone: a role set for the service, and the quiet messages a
+// loud_seq skips.
+TEST_F(MessageStoreTest, ARoleIsSetUnderTheRoomsLockAndAQuietMessageIsSkippedByTheLoudSeq) {
+    using core::ports::MemberRole;
+    using core::ports::MembershipChange;
+    using core::ports::MembershipOutcome;
+    const core::RoomId group = named_room("04");
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    ASSERT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->create_group(group, alice_, {bob}, std::move(done));
+              })->outcome,
+              MembershipOutcome::Done);
+    const auto set = [&](const core::UserId& user, MemberRole role) {
+        return ask<MembershipChange>(
+            [&](auto done) { store_->set_role(group, user, role, std::move(done)); });
+    };
+    const auto promoted = set(bob, MemberRole::Admin);
+    ASSERT_TRUE(promoted);
+    EXPECT_EQ(promoted->outcome, MembershipOutcome::Done);
+    EXPECT_EQ(promoted->changed, std::vector{bob});
+    EXPECT_TRUE(set(bob, MemberRole::Admin)->changed.empty());
+    ASSERT_TRUE(set(alice_, MemberRole::Member));
+    EXPECT_EQ(set(bob, MemberRole::Member)->outcome, MembershipOutcome::LastAdmin);
+    EXPECT_EQ(set(*core::UserId::parse("auth0|zed"), MemberRole::Admin)->outcome,
+              MembershipOutcome::NotMember);
+    EXPECT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->set_role(named_room("04"), bob, MemberRole::Admin, std::move(done));
+              })->outcome,
+              MembershipOutcome::NotMember);
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->open_direct(direct, alice_, bob, std::move(done));
+              })->outcome,
+              MembershipOutcome::Done);
+    EXPECT_EQ(ask<MembershipChange>([&](auto done) {
+                  store_->set_role(direct, bob, MemberRole::Admin, std::move(done));
+              })->outcome,
+              MembershipOutcome::NotGroup);
+
+    const core::RoomId room = new_room();
+    const std::uint64_t generation = own(room);
+    const auto loud = [&] {
+        return ask<std::uint64_t>([&](auto done) { store_->last_loud_seq(room, std::move(done)); });
+    };
+    EXPECT_EQ(loud(), 0U);
+    ASSERT_TRUE(write(room, generation, bytes("hello")));
+    const auto quiet =
+        ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
+            const auto body = bytes("+1");
+            rooms_->append(room, generation,
+                           ulw::test::outgoing(alice_, "q1", body,
+                                               std::chrono::floor<std::chrono::microseconds>(
+                                                   std::chrono::system_clock::now()),
+                                               /*quiet=*/true),
+                           std::move(done));
+        });
+    ASSERT_TRUE(quiet && *quiet);
+    EXPECT_EQ(loud(), 1U);
+    const auto page = before(room, std::nullopt, 10);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 2U);
+    EXPECT_TRUE(page->front().quiet);
+    EXPECT_FALSE(page->back().quiet);
+}
+
+} // namespace
