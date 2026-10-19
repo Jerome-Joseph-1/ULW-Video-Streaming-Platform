@@ -6,6 +6,7 @@
 #include "chat_cluster.hpp"
 #include "support/http_test_server.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <format>
 #include <gtest/gtest.h>
@@ -284,6 +285,52 @@ TEST_P(ChatNotifyTest, AMessageNamesTheMembersWithNoSocketOncePerIntervalAndNeve
     ASSERT_TRUE(alice->wait_for([](const Seen& s) { return s.type == "sent" && s.id == "n4"; }));
     std::this_thread::sleep_for(std::chrono::seconds(1));
     EXPECT_EQ(count("message"), 2U);
+}
+
+// ADR-0124 and ADR-0125: the service API says who is connected anywhere, and on which devices;
+// a socket whose page is out of view counts as not connected until it is back.
+TEST_P(ChatNotifyTest, PresenceNamesTheDevicesInViewOnAnyNode) {
+    const auto devices_of = [&](std::size_t node) {
+        const auto [status, body] = service(node, "presence", R"({"users":["bob","carol"]})");
+        EXPECT_EQ(status, 200) << field(body, "reason");
+        std::vector<std::string> out;
+        const core::json::Value* users = body.find("users");
+        if (users == nullptr || users->as_array() == nullptr) {
+            ADD_FAILURE() << "no users";
+            return out;
+        }
+        for (const core::json::Value& u : *users->as_array()) {
+            for (const std::string& d : strings(u.find("devices"))) {
+                out.push_back(field(u, "user") + "/" + d);
+            }
+        }
+        return out;
+    };
+    auto phone = connect(nodes_[1], 1, path_of(kPhone));
+    auto laptop = connect(nodes_[2], 1, path_of(kLaptop));
+    ASSERT_TRUE(phone && laptop);
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    const std::vector<std::string> both{"bob/" + std::string(kPhone),
+                                        "bob/" + std::string(kLaptop)};
+    auto sorted = [](std::vector<std::string> v) {
+        std::ranges::sort(v);
+        return v;
+    };
+    EXPECT_EQ(sorted(devices_of(0)), sorted(both));
+    // The phone is locked: it still hears everything, but its device is owed pushes.
+    ASSERT_TRUE(phone->send(R"({"type":"state","visible":false})"));
+    ASSERT_TRUE(phone->wait_for([](const Seen& s) { return s.type == "state"; }));
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    EXPECT_EQ(devices_of(2), std::vector<std::string>{"bob/" + std::string(kLaptop)});
+    ASSERT_TRUE(phone->send(R"({"type":"state","visible":true})"));
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    EXPECT_EQ(sorted(devices_of(1)), sorted(both));
+    // Gone hidden and then closed, a socket is out once, not twice.
+    ASSERT_TRUE(laptop->send(R"({"type":"state","visible":false})"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    laptop.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    EXPECT_EQ(devices_of(0), std::vector<std::string>{"bob/" + std::string(kPhone)});
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, ChatNotifyTest,

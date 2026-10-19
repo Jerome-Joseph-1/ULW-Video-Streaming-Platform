@@ -608,6 +608,19 @@ void Session::command(const codec::ws::Frame& frame) {
         send_text(out);
         return;
     }
+    // The same allowance: each change is a registry write, batched (ADR-0125).
+    if (const auto* st = std::get_if<SocketState>(&*parsed)) {
+        if (!within_control_budget(0)) {
+            ++server_.counters().control_floods;
+            close_with(kPolicyViolation);
+            return;
+        }
+        set_visible(st->visible);
+        std::string out;
+        write_state(out, st->visible);
+        send_text(out);
+        return;
+    }
     // The key directory's commands go to their own service, not the chat service (ADR-0043).
     if (auto* d = std::get_if<DirectoryCommand>(&*parsed)) {
         server_.directory().command(*directory_, std::move(*d));
@@ -675,6 +688,24 @@ void Session::command(const codec::ws::Frame& frame) {
         return;
     }
     server_.presence().unwatch(*presence_, std::get<Unwatch>(*parsed).user);
+}
+
+// A hidden socket is out of the notification hook's registry, so the hook counts its device as
+// not connected: a ring and a message push to it (ADR-0125). Back in view, it is in again.
+void Session::set_visible(bool visible) noexcept {
+    Notifier* notifier = server_.deps().notifier;
+    if (notifier == nullptr || !user_ || hidden_ == !visible) {
+        hidden_ = !visible;
+        return;
+    }
+    hidden_ = !visible;
+    if (hidden_ && notified_) {
+        notifier->closed(*user_, device_);
+        notified_ = false;
+    } else if (!hidden_ && !notified_) {
+        notifier->opened(*user_, device_);
+        notified_ = true;
+    }
 }
 
 bool Session::push(std::string_view text) noexcept {

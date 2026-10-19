@@ -559,6 +559,19 @@ TEST_P(ChatSessionTest, AnUpgradeAskedToBeRefusedOnTheSocketIsClosedWithACodeTha
                                   "Authorization: Bearer user.alice\r\n", nullptr));
 }
 
+// ADR-0125: a socket says whether its page is in view, and is answered what it now counts as.
+TEST_P(ChatSessionTest, AStateIsAnsweredWithWhatTheSocketNowCountsAs) {
+    auto alice = open("Authorization: Bearer user.alice\r\n");
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(alice->send_text(R"({"type":"state","visible":false})"));
+    EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"state","visible":false})");
+    // A hidden socket still hears what it asks for.
+    ASSERT_TRUE(alice->send_text(R"({"type":"ping"})"));
+    EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"pong"})");
+    ASSERT_TRUE(alice->send_text(R"({"type":"state","visible":true})"));
+    EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"state","visible":true})");
+}
+
 // ADR-0122: a ping is answered at once, its rid echoed, from the control frames' allowance.
 TEST_P(ChatSessionTest, APingIsAnsweredWithAPong) {
     auto alice = open("Authorization: Bearer user.alice\r\n");

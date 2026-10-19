@@ -1,6 +1,6 @@
 # Notifications
 
-<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of), apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0111-notification-events-for-members-not-connected.md, docs/adr/0120-video-events-on-the-notification-hook.md -->
+<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of, Session::set_visible), apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0111-notification-events-for-members-not-connected.md, docs/adr/0120-video-events-on-the-notification-hook.md -->
 
 Chat reaches a member only through the sockets they have open ([chat.md](chat.md),
 [calls.md](calls.md)). For a member with none (a closed tab, a phone in a pocket), the operator
@@ -40,6 +40,12 @@ listed in a call's `devices`.
 
 Name the device on every socket, so that `call_ringing` can say which devices already ring: the
 backend then pushes to the others only.
+
+A socket counts only while its page or app is in view. A socket that says it is hidden
+(`{"type":"state","visible":false}`, [chat.md](chat.md#messages)) is left out of the registry
+until it says it is back: `call_ringing` does not list its device, `message` counts its user as
+away if it was their only one, and `presence` leaves it out (ADR-0125). A phone that is locked
+or backgrounded with its socket still open then gets the push it would otherwise miss.
 
 ## Delivery
 

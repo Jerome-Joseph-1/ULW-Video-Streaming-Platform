@@ -245,6 +245,12 @@ struct Ping {
     std::optional<rt::MessageKey> rid;
 };
 
+// state: whether the page or app is in view (ADR-0125). A hidden socket still hears everything,
+// but counts as not connected for the notification hook, so its device gets pushes.
+struct SocketState {
+    bool visible = true;
+};
+
 struct ListRooms {
     std::optional<core::RoomId> after;
     std::size_t limit = kDefaultListLimit;
@@ -294,8 +300,8 @@ using DirectoryCommand =
     std::variant<RegisterDevice, RetireDevice, PublishKeyPackages, ListDevices, ClaimKeyPackages>;
 
 using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery,
-                             Part, Ping, OpenDirect, CreateGroup, AddMembers, RemoveMember,
-                             LeaveRoom, ListRooms, ListMembers, DirectoryCommand>;
+                             Part, Ping, SocketState, OpenDirect, CreateGroup, AddMembers,
+                             RemoveMember, LeaveRoom, ListRooms, ListMembers, DirectoryCommand>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -374,6 +380,8 @@ void write_removed(std::string& out, const core::RoomId& room, const core::UserI
 void write_parted(std::string& out, const core::RoomId& room);
 // {"type":"pong"} and the ping's rid, when it had one.
 void write_pong(std::string& out, const std::optional<rt::MessageKey>& rid);
+// {"type":"state","visible":..}: the answer to state, saying what this socket now counts as.
+void write_state(std::string& out, bool visible);
 void write_left(std::string& out, const core::RoomId& room,
                 const std::optional<core::UserId>& promoted);
 void write_rooms(std::string& out, std::span<const core::ports::RoomEntry> rooms, bool more);
