@@ -130,3 +130,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0124](0124-the-service-asks-who-is-connected.md) | The service asks who is connected | Accepted |
 | [0125](0125-a-hidden-socket-is-owed-pushes.md) | A hidden socket is owed pushes | Accepted |
 | [0126](0126-a-message-names-who-is-present.md) | A message names who is present | Accepted |
+| [0127](0127-relay-credentials-are-asked-for-again.md) | Relay credentials are asked for again | Accepted |

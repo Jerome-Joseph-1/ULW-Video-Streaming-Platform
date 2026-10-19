@@ -825,6 +825,20 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
         }
         return SocketState{.visible = *value};
     }
+    if (name == "ice_servers") {
+        if (!only(*message, {"type", "room", "device"})) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        auto room = room_of(*message);
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        auto device = device_of(*message);
+        if (!device) {
+            return std::unexpected(device.error());
+        }
+        return IceServersRequest{.room = *room, .device = *device};
+    }
     if (name == "rooms") {
         return rooms_of(*message);
     }
@@ -965,6 +979,21 @@ void write_rate_limited(std::string& out, const core::RoomId& room, const rt::Me
     write_error(out, "rate_limited", room, id);
     out.pop_back();
     std::format_to(std::back_inserter(out), R"(,"retry_after_ms":{}}})", retry_after.count());
+}
+
+void write_ice_servers(std::string& out, const core::RoomId& room,
+                       std::span<const core::ports::IceServer> servers, core::WallTime expires_at) {
+    out += R"({"type":"ice_servers",)";
+    append_room(out, room);
+    out += ',';
+    if (servers.empty()) {
+        out += R"("ice_servers":[])";
+    } else {
+        infra::turn::append_ice_servers(out, servers);
+    }
+    std::format_to(
+        std::back_inserter(out), R"(,"ice_expires_at":{}}})",
+        std::chrono::duration_cast<core::Seconds>(expires_at.time_since_epoch()).count());
 }
 
 void write_ticket(std::string& out, const core::RoomId& room,

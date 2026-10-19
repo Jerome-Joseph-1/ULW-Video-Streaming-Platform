@@ -121,6 +121,7 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
       // A block entry holds nothing but its count, so only open connections need one.
       blocks_(limits_.max_connections + 1, http::AddressHash{http::SeededHash(seed(deps_.random))}),
       sessions_(limits_.max_connections) {
+    chat_.use_turn(deps_.turn, deps_.turn_ttl);
     deps_.router.serve(&calls_);
     deps_.router.hear(&bell_);
     chat_.also_tell(&calls_);

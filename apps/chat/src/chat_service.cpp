@@ -634,6 +634,47 @@ void ChatService::part(ClientId id, const Part& part) {
     c->client->push(out);
 }
 
+void ChatService::ice_servers(ClientId id, const IceServersRequest& request) {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    if (std::ranges::find(c->rooms, request.room) == c->rooms.end() ||
+        std::ranges::find(c->admitting, request.room) != c->admitting.end()) {
+        answer(*c->client, reason(rt::RouteError::NotJoined), request.room);
+        return;
+    }
+    if (turn_ == nullptr) {
+        answer(*c->client, "no_relay", request.room);
+        return;
+    }
+    // One issue at the TURN provider, perhaps a call to its API: charged as a join.
+    if (!admit_join(c->user)) {
+        answer(*c->client, "busy", request.room);
+        return;
+    }
+    turn_->issue(c->user, request.device,
+                 [this, id, room = request.room](
+                     std::expected<std::vector<core::ports::IceServer>, core::ports::MediaError>
+                         servers) noexcept {
+                     Client* asker = find(id);
+                     if (asker == nullptr) {
+                         return;
+                     }
+                     if (!servers) {
+                         answer(*asker->client, "unavailable", room);
+                         return;
+                     }
+                     try {
+                         std::string out;
+                         write_ice_servers(out, room, *servers, clock_.wall_now() + turn_ttl_);
+                         asker->client->push(out);
+                     } catch (const std::exception&) {
+                         ++counters_.allocation_failures;
+                     }
+                 });
+}
+
 void ChatService::call_status(ClientId id, const CallStatusQuery& query) {
     Client* c = find(id);
     if (c == nullptr) {
@@ -834,6 +875,16 @@ void ChatService::called(ClientId id, const core::RoomId& room,
         case CallOutcome::Ticket:
             if (const auto& ticket = answer->ticket) {
                 write_ticket(out, room, *ticket, answer->call);
+                // When its relay credentials stop working (ADR-0127): ask ice_servers before.
+                if (!ticket->ice_servers.empty() && turn_ttl_ > core::Seconds{0} &&
+                    out.back() == '}') {
+                    out.pop_back();
+                    out += R"(,"ice_expires_at":)";
+                    out += std::to_string(std::chrono::duration_cast<core::Seconds>(
+                                              (clock_.wall_now() + turn_ttl_).time_since_epoch())
+                                              .count());
+                    out += '}';
+                }
             }
             break;
         case CallOutcome::NotMember:

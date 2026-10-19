@@ -1881,6 +1881,38 @@ TEST_F(ChatServiceTest, ACallTicketsRelaysReachTheClientThroughTheOwnersAnswer) 
     EXPECT_EQ((*urls)[1].as_string(), "turns:turn.test:5349?transport=tcp");
     EXPECT_EQ(server.find("username")->as_string(), "1790014400:alice");
     EXPECT_EQ(server.find("credential")->as_string(), "c2VjcmV0");
+    // Without the issuer's lifetime known, nothing says when they stop working.
+    EXPECT_EQ(json->find("ice_expires_at"), nullptr);
+}
+
+// ADR-0127: with the TURN service known, a relayed ticket says when its credentials expire.
+TEST_F(ChatServiceTest, ARelayedTicketSaysWhenItsCredentialsStopWorking) {
+    struct NoTurn final : core::ports::ITurnCredentials {
+        void issue(const core::UserId& /*user*/, const core::DeviceId& /*device*/,
+                   core::ports::IceServersDone /*done*/) override {}
+    } turn;
+    service_->use_turn(&turn, core::Seconds{14'400});
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    service_->call(a, {.room = room_id(), .device = *core::DeviceId::parse(kDevice)});
+    ASSERT_EQ(rooms_.asks.size(), 1U);
+    rooms_.asks[0].done(
+        answer(chat::CallOutcome::Ticket,
+               core::ports::MediaTicket{
+                   .endpoint = "wss://media.test",
+                   .credential = "jwt",
+                   .expires_at = core::WallTime{std::chrono::seconds{1'790'000'060}},
+                   .ice_servers = {
+                       {.urls = {"turn:turn.test:3478"}, .username = "u", .credential = "c"}}}));
+    const auto json = core::json::parse(alice.take().at(0));
+    ASSERT_TRUE(json);
+    const auto now =
+        std::chrono::duration_cast<core::Seconds>(clock_.wall_now().time_since_epoch()).count();
+    EXPECT_EQ(json->find("ice_expires_at")->as_u64(), static_cast<std::uint64_t>(now + 14'400));
+    service_->use_turn(nullptr, core::Seconds{0});
 }
 
 TEST_F(ChatServiceTest, ACallsDeclineIsAskedOfTheOwnerAndAnsweredWithTheEventTheOthersHear) {
@@ -2109,6 +2141,52 @@ TEST_F(ChatServiceTest, ACallIsChargedAsAJoinAndADetachedClientHearsNoAnswer) {
 
 // ADR-0117: a socket stops following a room it no longer shows, and has its place back, without
 // leaving the room's member list.
+// ADR-0127: fresh relay credentials for a joined room's call, from the TURN service.
+TEST_F(ChatServiceTest, IceServersAreIssuedAfreshForAJoinedRoom) {
+    struct FakeTurn final : core::ports::ITurnCredentials {
+        void issue(const core::UserId& user, const core::DeviceId& device,
+                   core::ports::IceServersDone done) override {
+            asked.emplace_back(std::string(user.view()) + "/" + device.to_string());
+            waiting.push_back(std::move(done));
+        }
+        std::vector<std::string> asked;
+        std::vector<core::ports::IceServersDone> waiting;
+    } turn;
+    const auto device = *core::DeviceId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f001");
+    FakeClient alice;
+    const auto a = attach(alice);
+    // Without an external TURN service there is nothing to refresh.
+    join(a);
+    rooms_.admit();
+    alice.take();
+    service_->ice_servers(a, {.room = room_id(), .device = device});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "no_relay");
+    service_->use_turn(&turn, core::Seconds{3'600});
+    service_->ice_servers(a, {.room = room_id(), .device = device});
+    ASSERT_EQ(turn.asked, std::vector<std::string>{"alice/" + device.to_string()});
+    const auto now =
+        std::chrono::duration_cast<core::Seconds>(clock_.wall_now().time_since_epoch()).count();
+    std::move(turn.waiting.back())(std::vector<core::ports::IceServer>{
+        {.urls = {"turn:relay.example.com:3478"}, .username = "u", .credential = "c"}});
+    EXPECT_EQ(alice.take(),
+              std::vector{std::format(R"({{"type":"ice_servers","room":"{}","ice_servers":[)"
+                                      R"({{"urls":["turn:relay.example.com:3478"],)"
+                                      R"("username":"u","credential":"c"}}],)"
+                                      R"("ice_expires_at":{}}})",
+                                      room_id().to_string(), now + 3'600)});
+    // The service could not issue: say so, and the client tries again later.
+    service_->ice_servers(a, {.room = room_id(), .device = device});
+    std::move(turn.waiting.back())(std::unexpected(core::ports::MediaError::Unavailable));
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
+    // Only for a room this client joined.
+    FakeClient bob;
+    const auto b = attach(bob, "bob");
+    service_->ice_servers(b, {.room = room_id(), .device = device});
+    EXPECT_EQ(seen(bob.take().at(0)).reason, "not_joined");
+    EXPECT_EQ(turn.asked.size(), 2U);
+    service_->use_turn(nullptr, core::Seconds{0});
+}
+
 TEST_F(ChatServiceTest, APartedRoomHearsNothingMoreAndItsPlaceIsFreeAtOnce) {
     FakeClient alice;
     const auto a = attach(alice);
