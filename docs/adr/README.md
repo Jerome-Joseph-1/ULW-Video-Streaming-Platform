@@ -129,3 +129,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0123](0123-the-service-sets-a-members-role.md) | The service sets a member's role | Accepted |
 | [0124](0124-the-service-asks-who-is-connected.md) | The service asks who is connected | Accepted |
 | [0125](0125-a-hidden-socket-is-owed-pushes.md) | A hidden socket is owed pushes | Accepted |
+| [0126](0126-a-message-names-who-is-present.md) | A message names who is present | Accepted |

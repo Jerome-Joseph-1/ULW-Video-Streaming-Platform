@@ -43,6 +43,9 @@ struct NotifyLimits {
     std::size_t max_lookups = 1'024;
     // Message lookups in flight; a message past it is not looked up, and counted.
     std::size_t max_message_lookups = 256;
+    // ULW_NOTIFY_MESSAGE_PRESENT (ADR-0126): `message` also names the members present, with
+    // their devices, read with message_audience; otherwise only those away, with message_targets.
+    bool message_present = false;
 };
 
 struct NotifyCounters {
@@ -137,6 +140,9 @@ private:
     [[nodiscard]] std::string
     ringing_text(const CallEvent& event,
                  const std::optional<std::vector<core::ports::SocketDevice>>& devices);
+    [[nodiscard]] std::string message_text(const core::RoomId& room, const core::UserId& sender,
+                                           std::uint64_t seq,
+                                           const core::ports::MessageAudience& audience);
     void offer(std::string event) noexcept;
     void head(std::string& out, std::string_view type);
 

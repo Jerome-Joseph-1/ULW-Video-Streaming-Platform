@@ -97,6 +97,12 @@ protected:
             [&](auto done) { harness_->store().message_targets(room, sender, std::move(done)); });
     }
 
+    core::ports::NotifyResult<core::ports::MessageAudience> audience(const core::RoomId& room,
+                                                                     const core::UserId& sender) {
+        return call<core::ports::MessageAudience>(
+            [&](auto done) { harness_->store().message_audience(room, sender, std::move(done)); });
+    }
+
     core::DeviceId new_device() { return core::DeviceId::generate(clock_, random_); }
     core::RoomId new_room() { return core::RoomId::generate(clock_, random_); }
 

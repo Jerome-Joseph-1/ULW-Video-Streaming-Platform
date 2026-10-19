@@ -147,7 +147,14 @@ std::expected<std::optional<NotifyConfig>, ConfigError> notify_config(const EnvL
     if (!interval) {
         return std::unexpected(interval.error());
     }
+    const auto present = lookup(env, "ULW_NOTIFY_MESSAGE_PRESENT");
+    if (present && *present != "on" && *present != "off") {
+        return error("ULW_NOTIFY_MESSAGE_PRESENT", "expected on or off");
+    }
     if (!url) {
+        if (present) {
+            return error("ULW_NOTIFY_MESSAGE_PRESENT", "set, but ULW_NOTIFY_URL is not");
+        }
         if (secret) {
             return error("ULW_NOTIFY_SECRET", "set, but ULW_NOTIFY_URL is not");
         }
@@ -171,7 +178,8 @@ std::expected<std::optional<NotifyConfig>, ConfigError> notify_config(const EnvL
     if (secret->size() < kMinNotifySecretBytes) {
         return error("ULW_NOTIFY_SECRET", "shorter than 32 bytes");
     }
-    NotifyConfig out{.url = std::move(*url), .secret = std::move(*secret)};
+    NotifyConfig out{
+        .url = std::move(*url), .secret = std::move(*secret), .message_present = present == "on"};
     if (*interval) {
         out.message_interval = core::Millis{std::int64_t{**interval} * 1'000};
     }

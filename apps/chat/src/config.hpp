@@ -59,6 +59,9 @@ struct NotifyConfig {
     std::string secret;
     // ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS: 5 to 3600, 30 by default.
     core::Millis message_interval{30'000};
+    // ULW_NOTIFY_MESSAGE_PRESENT: on, `message` also names the members with a socket in view and
+    // their devices (ADR-0126); off by default.
+    bool message_present = false;
 };
 
 inline constexpr std::size_t kMinNotifySecretBytes = 32;

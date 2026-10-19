@@ -1,6 +1,6 @@
 # Notifications
 
-<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of, Session::set_visible), apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0111-notification-events-for-members-not-connected.md, docs/adr/0120-video-events-on-the-notification-hook.md -->
+<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of, Session::set_visible), apps/chat/src/notify.cpp (Notifier::message_text), docs/adr/0126-a-message-names-who-is-present.md, apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0111-notification-events-for-members-not-connected.md, docs/adr/0120-video-events-on-the-notification-hook.md -->
 
 Chat reaches a member only through the sockets they have open ([chat.md](chat.md),
 [calls.md](calls.md)). For a member with none (a closed tab, a phone in a pocket), the operator
@@ -20,6 +20,7 @@ socket hears.
 | `ULW_NOTIFY_URL` | The receiver: `http://` or `https://`, inside the cluster (a Service), e.g. `http://push-receiver.askedin.svc.cluster.local:8080/ulw/events` |
 | `ULW_NOTIFY_SECRET` | At least 32 bytes; the key every request is signed with. Required with the URL. |
 | `ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS` | 5 to 3600, default 30: how often one member may be told of one room's messages while they stay away |
+| `ULW_NOTIFY_MESSAGE_PRESENT` | `on` or `off` (the default): `message` also names the members with a socket in view, and their devices ([`message`](#message)) |
 
 On Kubernetes, `components/notifications` sets all three from `config.env` (`NOTIFY_URL`,
 `NOTIFY_NAMESPACE`, `NOTIFY_PORT`, `NOTIFY_MESSAGE_INTERVAL_SECONDS`) and `NOTIFY_SECRET` in chat's
@@ -141,6 +142,21 @@ no socket open on any node, and not told of this room within the interval
 interval passes or they connect, whichever is first; a busy room makes at most one event per
 member per interval, however many messages it carries. A message that owes nobody makes no
 event. Never the body: fetch what to show through your own backend, or show "New message from …".
+
+With `ULW_NOTIFY_MESSAGE_PRESENT=on` (ADR-0126), the event also says who is **present**: the
+members, not told of this room within the interval, who have a socket in view somewhere, each
+with the devices those sockets named (a socket that named none adds none):
+
+```json
+{"id":"...","type":"message","at":1767225700,"room":"...","sender":"user-1","seq":118,"users":["user-42"],"present":[{"user":"user-7","devices":["01a0eb86-..."]}]}
+```
+
+Push to a present member's other devices: someone reading on a laptop still gets the push on
+their phone. A present member counts as told, as `users` do, so read `present` once you turn
+this on: a receiver that ignores it misses those members for the interval. An event goes out
+when either list has anyone; without the option, `present` is never there and nothing else
+changes. Chat's Deployment takes the variable with a patch in the overlay; the notifications
+component does not set it.
 
 ### `video_ready` and `video_failed`
 

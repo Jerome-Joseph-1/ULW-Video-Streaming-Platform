@@ -84,6 +84,27 @@ ON CONFLICT (room_id, user_id) DO UPDATE SET told_at = excluded.told_at
  WHERE notify_marks.told_at <= now() - $4::float8 * interval '1 millisecond'
 RETURNING user_id)sql";
 
+// kTargets for every member, with or without a socket: each member marked told now, with their
+// live sockets (none for one who is away). $1 to $4 as kTargets.
+constexpr Sql kAudience = R"sql(
+WITH due AS (
+    SELECT m.user_id FROM chat_members m
+      JOIN chat_rooms r ON r.room_id = m.room_id AND r.kind IN ('direct_chat', 'group_chat')
+     WHERE m.room_id = $1 AND m.user_id <> $2),
+told AS (
+    INSERT INTO notify_marks (room_id, user_id, told_at)
+    SELECT $1, user_id, now() FROM due
+    ON CONFLICT (room_id, user_id) DO UPDATE SET told_at = excluded.told_at
+     WHERE notify_marks.told_at <= now() - $4::float8 * interval '1 millisecond'
+    RETURNING user_id),
+live AS (
+    SELECT DISTINCT s.user_id, s.device_id
+      FROM notify_sockets s JOIN notify_nodes n USING (node_tag)
+     WHERE s.user_id IN (SELECT user_id FROM told)
+       AND n.renewed_at >= now() - $3::float8 * interval '1 millisecond')
+SELECT t.user_id, l.device_id FROM told t LEFT JOIN live l USING (user_id)
+ ORDER BY 1, 2)sql";
+
 // The oldest changes nobody holds, taken for good. RETURNING has no order: decode sorts by id.
 constexpr Sql kTakeVideoEvents = R"sql(
 DELETE FROM video_events
@@ -213,6 +234,35 @@ NotifyResult<std::vector<core::UserId>> decode_users(const Result& rows) {
         out.push_back(*parsed);
     }
     std::ranges::sort(out, {}, &core::UserId::view);
+    return out;
+}
+
+NotifyResult<core::ports::MessageAudience> decode_audience(const Result& rows) {
+    core::ports::MessageAudience out;
+    for (int i = 0; i < rows.rows(); ++i) {
+        const auto user = rows.get(i, 0);
+        if (!user) {
+            return std::unexpected(NotifyError::Corrupt);
+        }
+        auto parsed = core::UserId::parse(*user);
+        if (!parsed) {
+            return std::unexpected(NotifyError::Corrupt);
+        }
+        const auto device = rows.get(i, 1);
+        if (!device) {
+            out.away.push_back(*parsed);
+            continue;
+        }
+        std::optional<core::DeviceId> named;
+        if (*device != kNoDevice) {
+            auto id = core::DeviceId::parse(*device);
+            if (!id) {
+                return std::unexpected(NotifyError::Corrupt);
+            }
+            named = *id;
+        }
+        out.present.push_back(SocketDevice{.user = *parsed, .device = named});
+    }
     return out;
 }
 
@@ -382,6 +432,18 @@ void PgNotifyStore::message_targets(const core::RoomId& room, const core::UserId
                                 millis(impl_->timing().message_interval)},
         [done = std::move(done)](Outcome outcome) mutable noexcept {
             done(outcome ? decode_users(*outcome)
+                         : std::unexpected(to_notify_error(outcome.error())));
+        }));
+}
+
+void PgNotifyStore::message_audience(const core::RoomId& room, const core::UserId& sender,
+                                     NotifyCallback<core::ports::MessageAudience> done) {
+    impl_->pool().submit(std::make_unique<Bound>(
+        kAudience,
+        std::vector<Bound::Arg>{room, std::string(sender.view()), millis(impl_->timing().lease),
+                                millis(impl_->timing().message_interval)},
+        [done = std::move(done)](Outcome outcome) mutable noexcept {
+            done(outcome ? decode_audience(*outcome)
                          : std::unexpected(to_notify_error(outcome.error())));
         }));
 }

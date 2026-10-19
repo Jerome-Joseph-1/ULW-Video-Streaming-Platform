@@ -474,4 +474,25 @@ TEST_F(ChatConfigTest, TheNotificationHookIsOffUnlessItsUrlIsSetAndThenNeedsASec
     }
 }
 
+// ADR-0126: naming the members present is off unless asked for, and only with the hook.
+TEST_F(ChatConfigTest, NamingThePresentIsOffUnlessAskedForWithTheHook) {
+    env["ULW_NOTIFY_MESSAGE_PRESENT"] = "on";
+    EXPECT_EQ(refused_variable(), "ULW_NOTIFY_MESSAGE_PRESENT");
+    env["ULW_NOTIFY_URL"] = "http://push.example.svc:8080/ulw/events";
+    env["ULW_NOTIFY_SECRET"] = "a-hook-secret-of-at-least-32-bytes!!";
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_TRUE(config->notify->message_present);
+    env["ULW_NOTIFY_MESSAGE_PRESENT"] = "off";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->notify->message_present);
+    env["ULW_NOTIFY_MESSAGE_PRESENT"] = "yes";
+    EXPECT_EQ(refused_variable(), "ULW_NOTIFY_MESSAGE_PRESENT");
+    env.erase("ULW_NOTIFY_MESSAGE_PRESENT");
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->notify->message_present);
+}
+
 } // namespace

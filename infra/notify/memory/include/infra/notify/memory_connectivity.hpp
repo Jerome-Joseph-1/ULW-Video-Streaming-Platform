@@ -40,6 +40,8 @@ public:
     void
     connected(std::vector<core::UserId> users,
               core::ports::NotifyCallback<std::vector<core::ports::SocketDevice>> done) override;
+    void message_audience(const core::RoomId& room, const core::UserId& sender,
+                          core::ports::NotifyCallback<core::ports::MessageAudience> done) override;
     void message_targets(const core::RoomId& room, const core::UserId& sender,
                          core::ports::NotifyCallback<std::vector<core::UserId>> done) override;
 
