@@ -356,6 +356,11 @@ void Ringer::caller_left(const core::RoomId& room, const CallId& call) noexcept 
     ring_off(it);
 }
 
+bool Ringer::on(const core::RoomId& room) const noexcept {
+    const auto it = calls_.find(room);
+    return it != calls_.end() && it->second.answered;
+}
+
 bool Ringer::settled(const core::RoomId& room) const noexcept {
     const auto it = calls_.find(room);
     return it != calls_.end() && it->second.answered &&

@@ -19,7 +19,7 @@ passes to the SDK ([step 4](#the-flow)).
 
 ## Which rooms have a call
 
-<!-- apps/chat/src/call.cpp (CallHandler::checked, CallHandler::callable), apps/chat/src/call.hpp (kCallParticipants, CallLimits::group_participants), docs/adr/0087-call-tickets-from-the-rooms-owner.md, docs/adr/0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md -->
+<!-- apps/chat/src/call.cpp (CallHandler::checked, CallHandler::callable), apps/chat/src/call.hpp (kCallParticipants, kDirectDevicesPerMember, CallLimits::group_participants), docs/adr/0131-a-direct-call-takes-two-devices-of-each-member.md, docs/adr/0087-call-tickets-from-the-rooms-owner.md, docs/adr/0095-group-calls-from-the-rooms-owner-with-a-fenced-media-generation.md -->
 
 - A **direct chat** (`"kind":"direct"`, [chat.md](chat.md#member-lists)) has one call, for its
   members only. Open one with `open_direct` ([chat.md](chat.md#changing-member-lists)) and
@@ -33,8 +33,10 @@ passes to the SDK ([step 4](#the-flow)).
   [the service API](chat.md#the-service-api), and only then can its members call each other. The
   rooms are the same ones `open_direct` and `create_group` would name, and a call still needs
   its asker on the list at the moment of asking.
-- A direct chat's call holds **two participants**. A participant is a device: each member on one device. A
-  second device of the same member takes the other member's place, and LiveKit refuses a third.
+- A direct chat's call holds **each member on up to two devices** (ADR-0131), a laptop and a
+  phone say: four participants, each a device. A member's second device joins beside the first,
+  and never takes the other member's place. A third device of the same member is refused
+  `call_full` while their other two are in. Leave on one device to come in on another.
 - The first ticket of a call **rings** the other member on every socket they have open, on
   any node, whether or not that socket joined the room ([Ringing](#ringing)). Either member may
   call; both land in the same call.

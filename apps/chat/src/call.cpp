@@ -1501,11 +1501,12 @@ void CallHandler::opened(
 
 void CallHandler::join(const core::RoomId& room, Entry& entry, Waiter waiter) noexcept {
     // Who is in the media room is asked first for a group call, whose cap the SFU applies only
-    // once the client connects (so that the asker hears why); for a callee answering a ring that
-    // should have its caller in it; and for a ticket asked again of a call that is on, which may
-    // have nobody left in it (ADR-0113).
+    // once the client connects (so that the asker hears why); for a direct call that is on, whose
+    // members may each bring two devices and no more (ADR-0131), and which may have nobody left
+    // in it (ADR-0113); and for a callee answering a ring that should have its caller in it. A
+    // direct call that still rings is answered at once, not held up by the SFU.
     if (entry.kind != CallKind::Group && !ringer_.caller_expected(room, waiter.request.user) &&
-        (waiter.request.answering || !ringer_.settled(room))) {
+        !ringer_.on(room)) {
         issue(room, entry, std::move(waiter));
         return;
     }
@@ -1557,6 +1558,17 @@ void CallHandler::counted(
         // the room's next call, which rings (ADR-0113).
         ringer_.abandoned(room, *call);
         restart(room, std::move(waiter));
+        return;
+    }
+    // A direct call: each member on two devices at most, so the other member always fits
+    // (ADR-0131). The asking device itself, connected already, is not another.
+    if (listed && entry.kind == CallKind::Direct &&
+        std::ranges::count_if(*listed, [&](const auto& p) {
+            return p.user == waiter.request.user && p.device != waiter.request.device;
+        }) >= kDirectDevicesPerMember) {
+        ++counters_.full;
+        --in_flight_;
+        finish(waiter.answer, {.outcome = CallOutcome::Full, .ticket = std::nullopt});
         return;
     }
     if (listed && entry.kind == CallKind::Group) {
