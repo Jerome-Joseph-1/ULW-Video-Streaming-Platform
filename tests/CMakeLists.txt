@@ -573,6 +573,7 @@ target_include_directories(notify_unit_tests
 ulw_add_test_suite(notify_integration_tests integration
     conformance/notify_store_contract.cpp
     integration/postgres_notify_test.cpp
+    integration/postgres_ring_store_test.cpp
     integration/postgres_harness.cpp)
 target_link_libraries(notify_integration_tests PRIVATE ulw::pg_store PkgConfig::LIBPQ)
 target_include_directories(notify_integration_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests

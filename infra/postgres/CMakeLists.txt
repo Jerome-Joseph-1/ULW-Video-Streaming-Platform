@@ -19,6 +19,7 @@ ulw_add_library(pg_store
     src/live_streams.cpp
     src/message_store.cpp
     src/notify_store.cpp
+    src/ring_store.cpp
     src/migrator.cpp
     src/params.cpp
     src/pool.cpp

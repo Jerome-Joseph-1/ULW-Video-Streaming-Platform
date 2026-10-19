@@ -110,3 +110,68 @@ TEST_F(CallBellTest, ANoticeOutsideItsMembersPresenceRoomOrThatDoesNotDecodeIsDr
 }
 
 } // namespace
+
+namespace {
+
+// Answers rings_for when told to; nothing else is asked of it.
+class FakeRings final : public core::ports::IRingStore {
+public:
+    void put_ring(core::ports::StoredRing /*ring*/,
+                  core::ports::RingStoreCallback<void> done) override {
+        done({});
+    }
+    void end_ring(const core::RoomId& /*room*/, const core::Uuid& /*call*/,
+                  core::ports::RingStoreCallback<void> done) override {
+        done({});
+    }
+    void
+    ring_of(const core::RoomId& /*room*/,
+            core::ports::RingStoreCallback<std::optional<core::ports::StoredRing>> done) override {
+        done(std::optional<core::ports::StoredRing>{});
+    }
+    void
+    rings_for(const core::UserId& user,
+              core::ports::RingStoreCallback<std::vector<core::ports::StoredRing>> done) override {
+        asked.emplace_back(user.view());
+        waiting.push_back(std::move(done));
+    }
+    std::vector<std::string> asked;
+    std::vector<core::ports::RingStoreCallback<std::vector<core::ports::StoredRing>>> waiting;
+};
+
+// ADR-0129: a socket hears its user's rings as it connects, from the store.
+TEST_F(CallBellTest, ASocketHearsItsUsersRingsAsItConnects) {
+    FakeRings rings;
+    bell_.replay_from(&rings);
+    Socket phone;
+    static_cast<void>(bell_.attach(phone, user("bob")));
+    ASSERT_EQ(rings.asked, std::vector<std::string>{"bob"});
+    std::move(rings.waiting.back())(std::vector<core::ports::StoredRing>{
+        {.room = room_,
+         .call = call_.uuid(),
+         .caller = user("alice"),
+         .group = false,
+         .callees = {user("bob")},
+         .started_at = clock_.wall_now(),
+         .expires_at = clock_.wall_now() + core::Millis{30'000}}});
+    ASSERT_EQ(phone.got.size(), 1U);
+    const auto json = core::json::parse(phone.got[0]);
+    ASSERT_TRUE(json);
+    EXPECT_EQ(json->find("type")->as_string(), "call_ringing");
+    EXPECT_EQ(json->find("call")->as_string(), call_.to_string());
+    EXPECT_EQ(json->find("from")->as_string(), "alice");
+    EXPECT_EQ(bell_.counters().replayed, 1U);
+    // A socket gone before the answer hears nothing, and a read that failed is counted.
+    Socket laptop;
+    const auto gone = bell_.attach(laptop, user("bob"));
+    bell_.detach(gone);
+    std::move(rings.waiting.back())(std::vector<core::ports::StoredRing>{});
+    EXPECT_TRUE(laptop.got.empty());
+    Socket tablet;
+    static_cast<void>(bell_.attach(tablet, user("bob")));
+    std::move(rings.waiting.back())(std::unexpected(core::ports::RingStoreError::Unavailable));
+    EXPECT_EQ(bell_.counters().replay_failures, 1U);
+    bell_.replay_from(nullptr);
+}
+
+} // namespace

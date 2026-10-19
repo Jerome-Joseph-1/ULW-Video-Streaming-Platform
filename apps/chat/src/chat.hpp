@@ -3,6 +3,7 @@
 #include "core/ports/auth.hpp"
 #include "core/ports/clock.hpp"
 #include "core/ports/random.hpp"
+#include "core/ports/ring_store.hpp"
 #include "http/client_limits.hpp"
 #include "net/ip_address.hpp"
 #include "net/reactor.hpp"
@@ -119,6 +120,8 @@ struct Access {
     std::vector<std::string> allowed_origins;
 };
 
+class RoomLog;
+
 struct Deps {
     core::NodeId node;
     net::IReactor& reactor;
@@ -135,6 +138,12 @@ struct Deps {
     // null when the media server names its own relay. Must outlive the server.
     core::ports::ITurnCredentials* turn = nullptr;
     core::Seconds turn_ttl{0};
+    // The rooms' rings, kept for the next owner and read as a socket connects (ADR-0129); null
+    // without a database for them. Must outlive the server.
+    core::ports::IRingStore* rings = nullptr;
+    // The router's events, which tell the server it took a room; null in tests. Must outlive the
+    // server.
+    RoomLog* room_log = nullptr;
     // The key directory (ADR-0038, ADR-0102); null when none is configured, and every directory
     // command is then answered unavailable. Must outlive the server, or be destroyed first:
     // answers that come back after the server is gone are dropped.
@@ -198,8 +207,13 @@ public:
     void on_peer_refused(std::string_view why) noexcept override;
     void on_node_taken() noexcept override;
 
+    // Who also hears that this node took a room: the call handler, which ends a ring the room's
+    // previous owner left behind (ADR-0129). Set by the server, cleared before it goes.
+    void tell_calls(CallHandler* calls) noexcept { calls_ = calls; }
+
 private:
     core::NodeId self_;
+    CallHandler* calls_ = nullptr;
 };
 
 // The chat service's view of this node's RoomRouter.

@@ -132,3 +132,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0126](0126-a-message-names-who-is-present.md) | A message names who is present | Accepted |
 | [0127](0127-relay-credentials-are-asked-for-again.md) | Relay credentials are asked for again | Accepted |
 | [0128](0128-a-quiet-message.md) | A quiet message | Accepted |
+| [0129](0129-a-ring-outlives-its-owner.md) | A ring outlives its owner | Accepted |

@@ -1047,6 +1047,69 @@ public:
     std::vector<chat::CallEvent> events;
 };
 
+// ADR-0129: a drain ends the rings out loud; answered calls are left to their media rooms.
+TEST_F(RingerTest, LettingTheRoomsGoEndsEveryRingAsMoved) {
+    RecordingWatcher watcher;
+    ringer_.watch(&watcher);
+    const CallId call = ring();
+    const auto answered = ringer_.ticketed(room_id(kOtherRoom), user("alice"), kPair);
+    ASSERT_TRUE(answered && *answered);
+    ASSERT_EQ(ringer_.ticketed(room_id(kOtherRoom), user("bob"), std::nullopt), **answered);
+    plane_.take();
+    watcher.take();
+    ringer_.move_out();
+    EXPECT_EQ(plane_.take(), (std::vector{line(RingEvent::Cancelled, "alice"),
+                                          line(RingEvent::Cancelled, "bob")}));
+    ASSERT_EQ(watcher.events.size(), 1U);
+    EXPECT_EQ(watcher.events[0].call, call);
+    EXPECT_EQ(watcher.events[0].reason, chat::CallReason::OwnerMoved);
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_FALSE(ringer_.idle(room_id(kOtherRoom)));
+    EXPECT_EQ(ringer_.counters().moved, 1U);
+    // Their notices say why, and read back.
+    ring();
+    plane_.take();
+    ringer_.move_out();
+    ASSERT_EQ(plane_.sent.size(), 2U);
+    EXPECT_EQ(plane_.sent[0].reason, chat::CallReason::OwnerMoved);
+    const auto back = chat::decode_notice(chat::encode_notice(plane_.sent[0]));
+    ASSERT_TRUE(back);
+    EXPECT_EQ(back->reason, chat::CallReason::OwnerMoved);
+    EXPECT_EQ(chat::reason_name(chat::CallReason::OwnerMoved), "moved");
+    ringer_.watch(nullptr);
+}
+
+// ADR-0129: a ring the previous owner left is ended for its members by the new one.
+TEST_F(RingerTest, ARingLeftBehindIsEndedAsMovedUnlessThisNodeHoldsOne) {
+    RecordingWatcher watcher;
+    ringer_.watch(&watcher);
+    const CallId left = CallId::generate(clock_, random_);
+    ringer_.end_moved(room_id(), left, chat::CallKind::Direct, user("alice"), {user("bob")},
+                      clock_.wall_now() + core::Millis{30'000});
+    EXPECT_EQ(plane_.take(), (std::vector{line(RingEvent::Cancelled, "alice"),
+                                          line(RingEvent::Cancelled, "bob")}));
+    ASSERT_EQ(watcher.events.size(), 1U);
+    EXPECT_EQ(watcher.events[0].call, left);
+    EXPECT_EQ(watcher.events[0].reason, chat::CallReason::OwnerMoved);
+    // Nothing is kept of it.
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    watcher.take();
+    // A room that rings a call of this node's says nothing of an older one.
+    ring();
+    plane_.take();
+    watcher.take();
+    ringer_.end_moved(room_id(), left, chat::CallKind::Direct, user("alice"), {user("bob")},
+                      clock_.wall_now() + core::Millis{30'000});
+    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_TRUE(watcher.events.empty());
+    // Nor does a node that does not own the room.
+    plane_.owning = false;
+    ringer_.end_moved(room_id(kOtherRoom), left, chat::CallKind::Group, user("alice"),
+                      {user("bob"), user("carol")}, clock_.wall_now() + core::Millis{30'000});
+    EXPECT_TRUE(plane_.take().empty());
+    ringer_.watch(nullptr);
+}
+
 // ADR-0113: the caller is looked for in the media room from caller_grace into the ring, every
 // caller_check; nobody twice in a row ends the ring, which everyone and the watcher hear why.
 TEST_F(RingerTest, ARingNobodyWaitsOnEndsAsCallerLeft) {

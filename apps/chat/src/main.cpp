@@ -6,6 +6,7 @@
 #include "infra/postgres/e2ee_directory.hpp"
 #include "infra/postgres/message_store.hpp"
 #include "infra/postgres/notify_store.hpp"
+#include "infra/postgres/ring_store.hpp"
 #include "infra/postgres/room_store.hpp"
 #include "infra/sfu/livekit/livekit_sfu.hpp"
 #include "infra/turn/turn.hpp"
@@ -114,6 +115,8 @@ struct Services {
     // and the events' sender on its own libcurl multi. The server's sessions tell the notifier
     // as they close, so it outlives the server.
     std::unique_ptr<infra::postgres::PgNotifyStore> notify_store;
+    // The rooms' rings (ADR-0129), when calls are configured.
+    std::unique_ptr<infra::postgres::PgRingStore> rings;
     std::unique_ptr<infra::curl::Multi> notify_multi;
     std::unique_ptr<chat::HookSender> hook;
     std::unique_ptr<chat::Notifier> notifier;
@@ -396,6 +399,15 @@ int run() {
         return fail("ULW_DATABASE_URL", "not a connection string this server can use", kBadConfig);
     }
     s.messages = std::move(*messages);
+    if (config->calls) {
+        auto rings = infra::postgres::PgRingStore::create(*s.reactor, *s.offload,
+                                                          {.conninfo = config->database_url});
+        if (!rings) {
+            return fail("ULW_DATABASE_URL", "not a connection string this server can use",
+                        kBadConfig);
+        }
+        s.rings = std::move(*rings);
+    }
     if (const std::optional<int> code = make_clients(*config, s)) {
         return *code;
     }
@@ -451,6 +463,8 @@ int run() {
                    .sfu = s.sfu.get(),
                    .turn = s.turn.get(),
                    .turn_ttl = turn_ttl_of(*config),
+                   .rings = s.rings.get(),
+                   .room_log = s.room_log.get(),
                    .registry = s.directory.get(),
                    .key_packages = s.directory.get(),
                    .notifier = s.notifier.get(),
