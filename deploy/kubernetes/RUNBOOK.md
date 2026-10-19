@@ -1518,7 +1518,9 @@ it (`publisher_left`) once the publisher has been gone for `ULW_LIVE_PUBLISHER_G
 or `end`. LiveKit posts them, signed with `SFU_SECRET`'s `LIVEKIT_API_KEY`, to the gateway's
 second listener (`ULW_LIVE_WEBHOOK_PORT`, 8081): the Service `video-gateway-hooks`, which no
 HTTPRoute names, admitted by the component's `hooks.yaml` NetworkPolicy from LiveKit's pods
-only. LiveKit's configuration names it in its `webhook` block (`base/livekit/deployment.yaml`).
+only. The component sets LiveKit's `LIVEKIT_WEBHOOK`, which its configuration's `webhook`
+expands (`base/livekit/deployment.yaml`); without the component it is `{}` and LiveKit sends
+nothing.
 Check after a rollout that they arrive and are believed:
 
 ```sh
