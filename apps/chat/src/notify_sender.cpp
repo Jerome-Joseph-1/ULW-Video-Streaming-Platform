@@ -1,5 +1,7 @@
 #include "notify_sender.hpp"
 
+#include "log.hpp"
+
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -67,11 +69,11 @@ public:
     void fail_later() { timer_ = owner_.reactor_.arm_timer(core::Millis{0}, *this); }
 
     void on_transfer_done(infra::curl::Result result) noexcept override {
-        owner_.finished(result && result->status >= kHttpOkFirst && result->status <= kHttpOkLast);
+        owner_.finished(result ? std::optional(result->status) : std::nullopt);
     }
     void on_timeout() noexcept override {
         timer_.reset();
-        owner_.finished(false);
+        owner_.finished(std::nullopt);
     }
     std::size_t read_body(std::span<std::byte> out) noexcept override {
         const std::size_t n = std::min(out.size(), body_.size() - sent_);
@@ -159,14 +161,21 @@ void HookSender::start() noexcept {
     }
 }
 
-void HookSender::finished(bool ok) noexcept {
+void HookSender::finished(std::optional<int> status) noexcept {
     const std::size_t events = request_->events();
     ++counters_.requests;
-    if (ok) {
+    if (status && *status >= kHttpOkFirst && *status <= kHttpOkLast) {
         counters_.sent += events;
     } else {
         counters_.failed += events;
         ++counters_.failed_requests;
+        // Events are sent at most once: these are gone, and the line says how many (#192).
+        if (status) {
+            log_event(R"("level":"warn","msg":"notify hook refused","status":{},"events":{})",
+                      *status, events);
+        } else {
+            log_event(R"("level":"warn","msg":"notify hook unreachable","events":{})", events);
+        }
     }
     // Destroys the request and its transfer, which libcurl has already let go of.
     request_.reset();

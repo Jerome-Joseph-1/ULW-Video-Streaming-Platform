@@ -1,6 +1,7 @@
 #include "call.hpp"
 
 #include "layout.hpp"
+#include "log.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -46,6 +47,34 @@ constexpr core::Millis kRetryEvery{1'000};
 constexpr core::Millis kTicketLifetime{60'000};
 // Tickets remembered per generation, for the above.
 constexpr std::size_t kMaxTicketed = 64;
+
+// How a refused ticket reads in the log: the error the client is sent.
+std::string_view refusal_name(CallOutcome outcome) noexcept {
+    switch (outcome) {
+    case CallOutcome::NotMember:
+        return "not_member";
+    case CallOutcome::NotCallable:
+        return "not_callable";
+    case CallOutcome::Unavailable:
+        return "unavailable";
+    case CallOutcome::Failed:
+        return "call_failed";
+    case CallOutcome::Disabled:
+        return "calls_disabled";
+    case CallOutcome::Busy:
+        return "busy";
+    case CallOutcome::NoCall:
+        return "no_call";
+    case CallOutcome::RingLimited:
+        return "ring_limited";
+    case CallOutcome::Expelled:
+        return "expelled";
+    case CallOutcome::Full:
+        return "call_full";
+    default:
+        return "other";
+    }
+}
 
 // Between a close's tries: 1 s, 2 s, 4 s and so on after the first, 30 s at most.
 core::Millis backoff(std::uint32_t attempt) noexcept {
@@ -506,6 +535,20 @@ void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> re
             signal(room, *s, std::move(answer));
             return;
         }
+        // A ticket refused is one warn line on the owner, with why (#192).
+        const CallRequest& ticket = std::get<CallRequest>(*asked);
+        answer = [inner = std::move(answer), room, user = ticket.user, device = ticket.device](
+                     std::expected<std::vector<std::byte>, rt::RouteError> r) mutable noexcept {
+            if (r) {
+                if (const auto a = decode_answer(*r); a && a->outcome != CallOutcome::Ticket) {
+                    log_event(R"("level":"warn","msg":"call ticket refused","room":"{}",)"
+                              R"("user":"{}","device":"{}","reason":"{}")",
+                              room.to_string(), user.view(), device.to_string(),
+                              refusal_name(a->outcome));
+                }
+            }
+            inner(std::move(r));
+        };
         // The member list, read on the owner at the moment of asking: a client's join may be
         // older than a removal still on its way to its node (ADR-0073).
         messages_.access(

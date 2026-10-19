@@ -348,6 +348,18 @@ counted in `log_messages_dropped_total`. At exit it flushes for at most 2 s and,
 ever dropped, writes one `log lines dropped` line with the total to stderr. The worker writes
 each line directly.
 
+<!-- apps/chat/src/log.hpp (log_event), apps/chat/src/ring.cpp (log_call), apps/chat/src/call.cpp (CallHandler::on_ask), apps/chat/src/notify_sender.cpp (HookSender::finished) -->
+
+Chat writes one JSON object per line to stdout too: `{"ts":...,"level":...,"msg":...,<fields>}`,
+`ts` in UTC to the millisecond as the gateway's. On the room's owner, every call event is one
+`info` line `"msg":"call"` with `event` (`ringing`, `answered`, `declined`, `cancelled`,
+`missed`, `ended`, `left`, `moved`), `room`, `call`, `kind`, `caller`, and `by`, `reason` and
+`users` (who was rung, who missed it, who was put out) where they apply; a ring announced again
+is not a line. A ticket refused is a `warn` line `call ticket refused` with `room`, `user`,
+`device` and `reason` (the error the client is sent). A batch of hook events the receiver did
+not take is a `warn` line `notify hook refused` (with its HTTP `status`) or `notify hook
+unreachable`, with how many `events` were lost.
+
 Worker: no HTTP port. Liveness is a heartbeat file, `<ULW_SCRATCH_DIR>/heartbeat-<node>`,
 touched at least every 20 s; the shipped probe restarts the pod after two minutes without a
 touch. The worker exposes no metrics yet. Alert on its `error` line `transcoder refused its own

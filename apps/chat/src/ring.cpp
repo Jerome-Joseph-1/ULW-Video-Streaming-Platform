@@ -1,11 +1,16 @@
 #include "ring.hpp"
 
 #include "layout.hpp"
+#include "log.hpp"
 #include "presence_room.hpp"
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <new>
+#include <span>
+#include <string>
+#include <string_view>
 
 namespace chat {
 
@@ -17,6 +22,60 @@ constexpr std::uint8_t kNoticeLayout = 1;
 // A direct chat lists two members; the list is read up to a few more, and the call rings at
 // most this many others, whatever a list that grew past two says.
 constexpr std::size_t kMaxCallees = 7;
+
+std::string_view event_name(RingEvent event) noexcept {
+    switch (event) {
+    case RingEvent::Ringing:
+        return "ringing";
+    case RingEvent::Answered:
+        return "answered";
+    case RingEvent::Declined:
+        return "declined";
+    case RingEvent::Cancelled:
+        return "cancelled";
+    case RingEvent::Missed:
+        return "missed";
+    case RingEvent::Ended:
+        return "ended";
+    case RingEvent::Left:
+        return "left";
+    case RingEvent::Moved:
+        return "moved";
+    }
+    return "unknown";
+}
+
+// One line per event of a call on its owner, never per member (#192). User ids need no escaping.
+void log_call(const core::RoomId& room, const CallId& call, CallKind kind,
+              const core::UserId& caller, RingEvent event, const std::optional<core::UserId>& by,
+              std::optional<CallReason> reason, std::span<const core::UserId> users = {}) noexcept {
+    try {
+        std::string extra;
+        if (by) {
+            extra += R"(,"by":")";
+            extra += by->view();
+            extra += '"';
+        }
+        if (reason == CallReason::CallerLeft) {
+            extra += R"(,"reason":"caller_left")";
+        }
+        if (!users.empty()) {
+            extra += R"(,"users":[)";
+            for (std::size_t i = 0; i < users.size(); ++i) {
+                extra += i == 0 ? "\"" : ",\"";
+                extra += users[i].view();
+                extra += '"';
+            }
+            extra += ']';
+        }
+        log_event(R"("level":"info","msg":"call","event":"{}","room":"{}","call":"{}",)"
+                  R"("kind":"{}","caller":"{}"{})",
+                  event_name(event), room.to_string(), call.to_string(),
+                  kind == CallKind::Group ? "group" : "direct", caller.view(), extra);
+    } catch (const std::bad_alloc&) {
+        static_cast<void>(std::fputs("chat_server: log line dropped\n", stderr));
+    }
+}
 
 } // namespace
 
@@ -500,6 +559,8 @@ void Ringer::start(const core::RoomId& room, const core::UserId& caller,
         throw;
     }
     ++counters_.started;
+    log_call(room, call.id, call.kind, call.caller, RingEvent::Ringing, std::nullopt, std::nullopt,
+             call.callees);
     announce(room, call, RingEvent::Ringing, std::nullopt);
     if (watcher_ != nullptr) {
         try {
@@ -727,6 +788,8 @@ void Ringer::moved(const core::RoomId& room, const CallId& call,
         return;
     }
     const Call& c = it->second;
+    log_call(room, c.id, c.kind, c.caller, RingEvent::Moved, by, std::nullopt,
+             std::span(&subject, 1));
     if (!everyone) {
         // Nothing moved: only the one put out needs to know.
         tell(room, c, subject, RingEvent::Moved, by, subject);
@@ -900,6 +963,10 @@ void Ringer::tick_group(const core::RoomId& room, Calls::iterator it, core::Mono
             call.hold_until = now;
         } else {
             // The call goes on; each member still rung missed it, and only they are told.
+            if (!call.ringing.empty()) {
+                log_call(room, call.id, call.kind, call.caller, RingEvent::Missed, std::nullopt,
+                         std::nullopt, call.ringing);
+            }
             for (const core::UserId& member : call.ringing) {
                 ++counters_.missed;
                 tell(room, call, member, RingEvent::Missed, std::nullopt);
@@ -987,6 +1054,14 @@ void Ringer::observe(const core::RoomId& room, const Call& call, RingEvent event
 void Ringer::announce(const core::RoomId& room, const Call& call, RingEvent event,
                       const std::optional<core::UserId>& by,
                       std::optional<CallReason> reason) noexcept {
+    // A ringing call announced again is not news; its first Ringing is logged by start().
+    if (event != RingEvent::Ringing) {
+        std::span<const core::UserId> users;
+        if (event == RingEvent::Missed) {
+            users = call.kind == CallKind::Group ? call.ringing : call.callees;
+        }
+        log_call(room, call.id, call.kind, call.caller, event, by, reason, users);
+    }
     // The first Ringing is observed by start(), with whom it rang; again it is not news, nor is a
     // group call's Left or Moved.
     if (watcher_ != nullptr && event != RingEvent::Ringing && event != RingEvent::Left &&
