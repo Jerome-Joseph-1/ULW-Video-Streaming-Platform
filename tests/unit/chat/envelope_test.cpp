@@ -159,6 +159,12 @@ TEST(Envelope, WhatIsNotACommandIsRefusedWithAReason) {
               *core::RoomId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f9fd"));
     EXPECT_EQ(chat::parse_command(R"({"type":"part",)" + room + R"(,"after":1})"),
               std::unexpected(EnvelopeError::Malformed));
+    // ping takes a rid, and nothing else (ADR-0122).
+    EXPECT_FALSE(std::get<chat::Ping>(*chat::parse_command(R"({"type":"ping"})")).rid);
+    EXPECT_EQ(std::get<chat::Ping>(*chat::parse_command(R"({"type":"ping","rid":"a1"})")).rid,
+              rt::MessageKey::parse("a1"));
+    EXPECT_EQ(chat::parse_command(R"({"type":"ping",)" + room + "}"),
+              std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(chat::parse_command(R"({"type":"join"})"), std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(
         chat::parse_command(R"({"type":"join","room":"01A0EB86-6CCA-7DCE-84CC-3BB47615F9FD"})"),

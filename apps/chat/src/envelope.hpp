@@ -239,6 +239,12 @@ struct Part {
     core::RoomId room;
 };
 
+// ping: answered pong at once, with `rid` echoed, so a browser, which cannot see WebSocket pings,
+// can time its own liveness check (ADR-0122).
+struct Ping {
+    std::optional<rt::MessageKey> rid;
+};
+
 struct ListRooms {
     std::optional<core::RoomId> after;
     std::size_t limit = kDefaultListLimit;
@@ -288,8 +294,8 @@ using DirectoryCommand =
     std::variant<RegisterDevice, RetireDevice, PublishKeyPackages, ListDevices, ClaimKeyPackages>;
 
 using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery,
-                             Part, OpenDirect, CreateGroup, AddMembers, RemoveMember, LeaveRoom,
-                             ListRooms, ListMembers, DirectoryCommand>;
+                             Part, Ping, OpenDirect, CreateGroup, AddMembers, RemoveMember,
+                             LeaveRoom, ListRooms, ListMembers, DirectoryCommand>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -366,6 +372,8 @@ void write_added(std::string& out, const core::RoomId& room, std::span<const cor
 void write_removed(std::string& out, const core::RoomId& room, const core::UserId& user);
 // `promoted`: who became the group's admin because the leaver was its last.
 void write_parted(std::string& out, const core::RoomId& room);
+// {"type":"pong"} and the ping's rid, when it had one.
+void write_pong(std::string& out, const std::optional<rt::MessageKey>& rid);
 void write_left(std::string& out, const core::RoomId& room,
                 const std::optional<core::UserId>& promoted);
 void write_rooms(std::string& out, std::span<const core::ports::RoomEntry> rooms, bool more);

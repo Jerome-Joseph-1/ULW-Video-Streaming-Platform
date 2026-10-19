@@ -807,6 +807,16 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
         }
         return Part{.room = *room};
     }
+    if (name == "ping") {
+        if (!only(*message, {"type", "rid"})) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        auto rid = rid_of(*message);
+        if (!rid) {
+            return std::unexpected(rid.error());
+        }
+        return Ping{.rid = *rid};
+    }
     if (name == "rooms") {
         return rooms_of(*message);
     }
@@ -1150,6 +1160,11 @@ void write_removed(std::string& out, const core::RoomId& room, const core::UserI
     append_room(out, room);
     append_user(out, "user", user);
     out += '}';
+}
+
+void write_pong(std::string& out, const std::optional<rt::MessageKey>& rid) {
+    out += R"({"type":"pong"})";
+    append_echo(out, std::nullopt, rid);
 }
 
 void write_parted(std::string& out, const core::RoomId& room) {
