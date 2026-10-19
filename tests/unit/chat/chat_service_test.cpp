@@ -2052,6 +2052,41 @@ TEST_F(ChatServiceTest, ACallIsChargedAsAJoinAndADetachedClientHearsNoAnswer) {
     EXPECT_TRUE(alice.got.empty());
 }
 
+// ADR-0117: a socket stops following a room it no longer shows, and has its place back, without
+// leaving the room's member list.
+TEST_F(ChatServiceTest, APartedRoomHearsNothingMoreAndItsPlaceIsFreeAtOnce) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    service_->part(a, {.room = room_id()});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
+    std::string room(kRoom);
+    std::vector<rt::IMember*> members;
+    for (int i = 0; i < 64; ++i) {
+        room.replace(room.size() - 2, 2, std::format("{:02x}", i));
+        join(a, std::nullopt, chat::Delivery::Durable, room);
+        members.push_back(&rooms_.admit());
+    }
+    alice.take();
+    // Parted while its list is read: the join answers first.
+    room.replace(room.size() - 2, 2, "ff");
+    service_->part(a, {.room = room_id(room)});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
+    room.replace(room.size() - 2, 2, "00");
+    service_->part(a, {.room = room_id(room)});
+    EXPECT_EQ(alice.take(),
+              std::vector{R"({"type":"parted","room":")" + room_id(room).to_string() + R"("})"});
+    deliver(*members[0], 1, "after", "bob", room);
+    EXPECT_TRUE(alice.take().empty());
+    // The 64th place again (the user's joins refill one a second), and no join of theirs was
+    // spent on the part.
+    clock_.advance(core::Millis{1'000});
+    room.replace(room.size() - 2, 2, "40");
+    join(a, std::nullopt, chat::Delivery::Durable, room);
+    EXPECT_EQ(rooms_.joins.size(), 1U);
+    rooms_.admit();
+    EXPECT_EQ(seen(alice.take().at(0)).type, "joined");
+}
+
 TEST_F(ChatServiceTest, ClientsJoinAtMostTheirShareOfRoomsAndUsersAtMostTheirRate) {
     FakeClient alice;
     const auto a = attach(alice);

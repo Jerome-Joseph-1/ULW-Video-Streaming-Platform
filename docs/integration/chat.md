@@ -61,6 +61,7 @@ Client to server:
 | `type` | Fields | Meaning |
 |---|---|---|
 | `join` | `room`, or `stream` for a live stream's chat; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, or `"direct"`; not with `stream`) | Subscribe this connection to the room. Joining an unknown room creates it, as the closed `kind` it names (see [Member lists](#member-lists)). `stream` names a live stream as its playback URL does, and joins its chat (see [A stream's live chat](#a-streams-live-chat)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
+| `part` | `room`, or `stream` | Stop following a room on this connection, answered `{"type":"parted","room":..}`: nothing more of it arrives here, and its place among the 64 is free at once (ADR-0117). The member list is left as it is (that is `leave`), and no join is charged. `not_joined` for a room this connection has not joined. |
 | `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before` or `after` (a seq, not both), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it. Only once the room's `joined` has arrived; before it, `not_joined`. |
 | `call` | `room`, `device` (a UUID the client keeps per device); `answer` (the ringing call it answers), optional | A ticket to the room's call, for a direct or group chat this connection has joined. See [calls.md](calls.md). |
@@ -321,7 +322,7 @@ As `user-1`:
 | `not_live` | A `stream` join of a stream whose chat the server has not opened, or one whose visibility does not admit the user | Retry once the stream is on air |
 | `too_large` | A live chat message's `body` is over 2000 bytes | Send a shorter message |
 | `not_joined` | `send` or `history` for a room this connection has not joined | Join first |
-| `too_many_rooms` | This connection already holds 64 rooms | Use another connection, or leave some rooms by reconnecting |
+| `too_many_rooms` | This connection already holds 64 rooms | `part` a room you no longer show, or use another connection |
 | `rate_limited` | Past the send allowance, or the member-list allowance; `retry_after_ms` says when one more is allowed | Wait that long; the message was neither sequenced nor delivered, the list not changed |
 | `busy` | Join or history allowance exceeded, too many sends awaiting answers, the room's owner queue is full, or too much unread output for a history page | Back off and retry |
 | `unavailable` | The room's owner or the store could not be reached, or the server could not take the command just then; also sent unasked, with `room`, when the server could not confirm your membership of a room you are in (below), which you then no longer receive | Retry; resend a `send` with the same `id`; `join` a room it was sent unasked for again |

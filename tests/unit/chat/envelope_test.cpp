@@ -149,9 +149,16 @@ TEST(Envelope, WhatIsNotACommandIsRefusedWithAReason) {
     const std::string room = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
     EXPECT_EQ(chat::parse_command("{"), std::unexpected(EnvelopeError::NotJson));
     EXPECT_EQ(chat::parse_command("[]"), std::unexpected(EnvelopeError::Malformed));
-    EXPECT_EQ(chat::parse_command(R"({"type":"part",)" + room + "}"),
+    EXPECT_EQ(chat::parse_command(R"({"type":"wave",)" + room + "}"),
               std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(chat::parse_command("{" + room + "}"), std::unexpected(EnvelopeError::Malformed));
+    // part takes a room (or a stream), and nothing else (ADR-0117).
+    const auto part = chat::parse_command(R"({"type":"part",)" + room + "}");
+    ASSERT_TRUE(part);
+    EXPECT_EQ(std::get<chat::Part>(*part).room,
+              *core::RoomId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f9fd"));
+    EXPECT_EQ(chat::parse_command(R"({"type":"part",)" + room + R"(,"after":1})"),
+              std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(chat::parse_command(R"({"type":"join"})"), std::unexpected(EnvelopeError::Malformed));
     EXPECT_EQ(
         chat::parse_command(R"({"type":"join","room":"01A0EB86-6CCA-7DCE-84CC-3BB47615F9FD"})"),

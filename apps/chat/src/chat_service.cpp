@@ -558,6 +558,27 @@ void ChatService::call_move(ClientId id, const CallMove& move) {
         });
 }
 
+void ChatService::part(ClientId id, const Part& part) {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    if (std::ranges::find(c->rooms, part.room) == c->rooms.end()) {
+        answer(*c->client, reason(rt::RouteError::NotJoined), part.room);
+        return;
+    }
+    // Its member list is still being read: the join's answer comes first.
+    if (std::ranges::find(c->admitting, part.room) != c->admitting.end()) {
+        answer(*c->client, "busy", part.room);
+        return;
+    }
+    leave(id, *c, part.room);
+    std::erase(c->unchecked, part.room);
+    std::string out;
+    write_parted(out, part.room);
+    c->client->push(out);
+}
+
 void ChatService::call_status(ClientId id, const CallStatusQuery& query) {
     Client* c = find(id);
     if (c == nullptr) {
