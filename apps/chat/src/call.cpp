@@ -633,6 +633,10 @@ void CallHandler::checked(const core::RoomId& room, Waiter waiter,
         finish(waiter.answer, {.outcome = CallOutcome::Busy, .ticket = std::nullopt});
         return;
     }
+    restart(room, std::move(waiter));
+}
+
+void CallHandler::restart(const core::RoomId& room, Waiter waiter) noexcept {
     try {
         messages_.members(
             room, std::nullopt, waiter.kind == CallKind::Group ? kGroupMembersRead : kMembersRead,
@@ -1199,12 +1203,15 @@ void CallHandler::opened(
 }
 
 void CallHandler::join(const core::RoomId& room, Entry& entry, Waiter waiter) noexcept {
-    if (entry.kind != CallKind::Group) {
+    // Who is in the media room is asked first for a group call, whose cap the SFU applies only
+    // once the client connects (so that the asker hears why); for a callee answering a ring that
+    // should have its caller in it; and for a ticket asked again of a call that is on, which may
+    // have nobody left in it (ADR-0113).
+    if (entry.kind != CallKind::Group && !ringer_.caller_expected(room, waiter.request.user) &&
+        (waiter.request.answering || !ringer_.settled(room))) {
         issue(room, entry, std::move(waiter));
         return;
     }
-    // A group call's cap is the SFU room's, which refuses a device past it only once the client
-    // connects: counted here first, so that the asker hears why.
     ++entry.joining;
     const std::uint64_t generation = entry.generation;
     try {
@@ -1236,7 +1243,26 @@ void CallHandler::counted(
         return;
     }
     Entry& entry = it->second;
-    if (listed) {
+    const auto call = ringer_.call_of(room);
+    if (listed && call && ringer_.caller_expected(room, waiter.request.user)) {
+        const auto caller = ringer_.caller_of(room);
+        if (std::ranges::none_of(*listed, [&](const auto& p) { return p.user == caller; })) {
+            // Answered, the callee would be alone: the caller is gone, and so is the ring.
+            ringer_.caller_left(room, *call);
+            ++counters_.no_call;
+            --in_flight_;
+            finish(waiter.answer, {.outcome = CallOutcome::NoCall, .ticket = std::nullopt});
+            return;
+        }
+    }
+    if (listed && call && listed->empty() && !waiter.request.answering && ringer_.settled(room)) {
+        // Nobody is in the call any more, though nobody said so: it ends, and this ticket starts
+        // the room's next call, which rings (ADR-0113).
+        ringer_.abandoned(room, *call);
+        restart(room, std::move(waiter));
+        return;
+    }
+    if (listed && entry.kind == CallKind::Group) {
         const auto others = std::ranges::count_if(*listed, [&](const auto& p) {
             return p.user != waiter.request.user || p.device != waiter.request.device;
         });
@@ -1521,9 +1547,9 @@ void CallHandler::sweep_now() noexcept {
     const core::MonoTime now = clock_.now();
     std::erase_if(rooms_, [&](const auto& entry) {
         const Entry& e = entry.second;
-        // A group call's handle is kept while the call lasts: its occupancy is asked through it.
-        const bool group_call = e.kind == CallKind::Group && !ringer_.idle(entry.first);
-        return !e.busy && e.waiting.empty() && e.moves.empty() && e.joining == 0 && !group_call &&
+        // A call's handle is kept while the call lasts: its occupancy is asked through it.
+        const bool call = !ringer_.idle(entry.first);
+        return !e.busy && e.waiting.empty() && e.moves.empty() && e.joining == 0 && !call &&
                now - e.used >= limits_.idle;
     });
 }

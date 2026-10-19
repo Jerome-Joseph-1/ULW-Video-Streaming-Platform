@@ -116,3 +116,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0110](0110-each-rung-states-the-h264-level-it-needs.md) | Each rung states the H.264 level its size and the source's frame rate need | Accepted |
 | [0111](0111-notification-events-for-members-not-connected.md) | Notification events for members who are not connected, as an opt-in hook | Accepted |
 | [0112](0112-a-message-carries-the-time-its-owner-sequenced-it.md) | A message carries the time its room's owner sequenced it | Accepted |
+| [0113](0113-a-call-lasts-while-someone-is-in-its-media-room.md) | A call lasts while someone is in its media room | Accepted |

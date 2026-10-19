@@ -459,6 +459,9 @@ void Notifier::observed(const CallEvent& event) noexcept {
             out += R"(,"users":)";
             append_users(out, event.users);
         }
+        if (event.reason == CallReason::CallerLeft) {
+            out += R"(,"reason":"caller_left")";
+        }
         out += '}';
         // After the call's call_ringing, which may still wait on the registry.
         if (const auto it = lookups_.find(event.call); it != lookups_.end()) {

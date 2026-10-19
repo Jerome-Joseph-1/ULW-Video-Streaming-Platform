@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <memory>
 #include <new>
 #include <optional>
@@ -294,13 +295,24 @@ public:
         o.done(std::move(room));
     }
 
-    // Answers the oldest join with a ticket for its participant, or the error.
+    // Answers the oldest join with a ticket for its participant, or the error. With
+    // connect_on_issue, the participant then connects, as a client does with its ticket.
     void issue(std::expected<void, MediaError> result = {}) {
+        ASSERT_FALSE(joins.empty()) << "no join to answer";
         Joined j = std::move(joins.front());
         joins.erase(joins.begin());
         if (!result) {
             j.done(std::unexpected(result.error()));
             return;
+        }
+        if (connect_on_issue) {
+            const auto user = *core::UserId::parse(j.user);
+            const auto device = *core::DeviceId::parse(j.device);
+            if (std::ranges::none_of(connected, [&](const auto& p) {
+                    return p.user == user && p.device == device;
+                })) {
+                connected.push_back({.user = user, .device = device, .joined_at = {}});
+            }
         }
         j.done(core::ports::MediaTicket{.endpoint = "wss://media.test",
                                         .credential = "jwt-for-" + j.user + "/" + j.device,
@@ -333,6 +345,7 @@ public:
     }
     // Who participants() reports connected, or its error.
     std::vector<core::ports::MediaParticipant> connected;
+    bool connect_on_issue = true;
     std::optional<MediaError> listing_error;
     int listings = 0;
     // participants() answers wait in held_listings while set.
@@ -918,6 +931,13 @@ protected:
         return answers_.back().call.value_or(chat::CallId::generate(clock_, random_));
     }
 
+    // Every device leaves the media room, after the latest ticket is old enough that the SFU would
+    // list a device of its holder by now (RingLimits::caller_grace).
+    void disconnect_all() {
+        sfu_.connected.clear();
+        clock_.advance(chat::RingLimits{}.caller_grace);
+    }
+
     static core::ports::MediaParticipant in_call(std::string_view user, std::string_view device) {
         return {.user = *core::UserId::parse(user),
                 .device = *core::DeviceId::parse(device),
@@ -1049,6 +1069,7 @@ TEST_F(GroupCallHandlerTest, PuttingOutSomeoneStillConnectedFromBeforeMovesAllTh
 TEST_F(GroupCallHandlerTest, AMemberRemovedFromARoomWithNoCallKnownHereIsPutOutIfConnected) {
     const chat::CallId call = ticket("alice");
     move("alice", chat::CallSignal::Leave, call);
+    disconnect_all();
     // Nobody left, as the SFU says.
     handler_->sweep();
     ASSERT_EQ(handler_->calls(), 0U);
@@ -1402,6 +1423,7 @@ TEST_F(GroupCallHandlerTest, WhoWasPutOutMayComeToTheNextCallOnceThisOneEnds) {
     // Alice leaves: generation 2 is this owner's, and nobody was ticketed into it, so nobody is
     // in it and the call ends without a move of its own.
     move("alice", chat::CallSignal::Leave, call);
+    disconnect_all();
     handler_->sweep();
     ASSERT_EQ(handler_->calls(), 0U);
     // Who was put out of it is cleared, and the generation stays.
@@ -1419,6 +1441,7 @@ TEST_F(GroupCallHandlerTest, ACallEndingWithNobodyPutOutWritesNothing) {
     const chat::CallId call = ticket("alice");
     const auto writes = plane_.steps.size();
     move("alice", chat::CallSignal::Leave, call);
+    disconnect_all();
     handler_->sweep();
     ASSERT_EQ(handler_->calls(), 0U);
     EXPECT_EQ(plane_.steps.size(), writes);
@@ -1629,16 +1652,18 @@ TEST_F(BoundedCallHandlerTest, ANewRoomPastTheCapWaitsForAnIdleHandleToGo) {
     ask("alice", kDevice, kOtherRoom);
     EXPECT_EQ(outcomes(), (std::vector{CallOutcome::Ticket, CallOutcome::Busy}));
     EXPECT_TRUE(sfu_.opens.empty());
-    // The first room's handle idles out; the cap makes room for the second at once, with no
-    // sweep of the loop's own in between.
+    // The first room's call ends and its handle idles out (one with a call is kept: its
+    // occupancy is asked through it); the cap makes room for the second at once, with no sweep
+    // of the loop's own in between.
+    move("alice", chat::CallSignal::Cancel, *answers_.at(0).call);
     clock_.advance(chat::CallLimits{}.idle);
     ask("alice", kDevice, kOtherRoom);
     ASSERT_EQ(sfu_.opens.size(), 1U);
     EXPECT_EQ(sfu_.opens[0].room, room_id(kOtherRoom));
     sfu_.open();
     sfu_.issue();
-    EXPECT_EQ(outcomes(),
-              (std::vector{CallOutcome::Ticket, CallOutcome::Busy, CallOutcome::Ticket}));
+    EXPECT_EQ(outcomes(), (std::vector{CallOutcome::Ticket, CallOutcome::Busy, CallOutcome::Done,
+                                       CallOutcome::Ticket}));
     EXPECT_EQ(handler_->rooms(), 1U);
 }
 
@@ -1813,6 +1838,187 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
         chat::encode_answer({.outcome = CallOutcome::NotMember, .ticket = std::nullopt});
     old_refusal[0] = std::byte{2};
     EXPECT_FALSE(chat::decode_answer(old_refusal));
+}
+
+// ADR-0113: a call lasts while someone is in its media room, as the SFU lists it.
+class PresenceCallHandlerTest : public CallHandlerTest {
+protected:
+    // Alice calls bob; the call's id.
+    chat::CallId ring() {
+        ask("alice");
+        sfu_.open();
+        sfu_.issue();
+        EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+        return answers_.back().call.value_or(chat::CallId::generate(clock_, random_));
+    }
+
+    void leave(std::string_view user) {
+        std::erase_if(sfu_.connected,
+                      [&](const auto& p) { return p.user == *core::UserId::parse(user); });
+    }
+
+    // The sweeps of the loop over `d`, a second at a time.
+    void run_for(core::Millis d) {
+        for (core::Millis t{0}; t < d; t += core::Millis{1'000}) {
+            clock_.advance(core::Millis{1'000});
+            handler_->sweep();
+        }
+    }
+
+    [[nodiscard]] std::vector<chat::CallNotice> heard(chat::RingEvent event) const {
+        std::vector<chat::CallNotice> out;
+        std::ranges::copy_if(plane_.sent, std::back_inserter(out),
+                             [&](const chat::CallNotice& n) { return n.event == event; });
+        return out;
+    }
+};
+
+TEST_F(PresenceCallHandlerTest, ARingWhoseCallerLeftTheMediaRoomEndsAsCallerLeft) {
+    const chat::CallId call = ring();
+    // Within the grace the SFU is not asked: the caller may be connecting still.
+    leave("alice");
+    const int listings = sfu_.listings;
+    run_for(chat::RingLimits{}.caller_grace - core::Millis{1'000});
+    EXPECT_EQ(sfu_.listings, listings);
+    // Then every caller_check; once nobody is not enough, twice in a row is.
+    run_for(core::Millis{1'000});
+    EXPECT_EQ(sfu_.listings, listings + 1);
+    EXPECT_TRUE(heard(chat::RingEvent::Cancelled).empty());
+    run_for(chat::RingLimits{}.caller_check);
+    const auto cancelled = heard(chat::RingEvent::Cancelled);
+    ASSERT_EQ(cancelled.size(), 2U);
+    for (const chat::CallNotice& n : cancelled) {
+        EXPECT_EQ(n.call, call);
+        EXPECT_FALSE(n.by);
+        EXPECT_EQ(n.reason, chat::CallReason::CallerLeft);
+    }
+    EXPECT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(handler_->ring_counters().caller_left, 1U);
+    EXPECT_EQ(handler_->ring_counters().missed, 0U);
+}
+
+TEST_F(PresenceCallHandlerTest, ACallerInTheMediaRoomRingsOnToTheTimeout) {
+    ring();
+    run_for(chat::RingLimits{}.ring_timeout);
+    EXPECT_GT(sfu_.listings, 2);
+    EXPECT_TRUE(heard(chat::RingEvent::Cancelled).empty());
+    EXPECT_EQ(heard(chat::RingEvent::Missed).size(), 2U);
+}
+
+TEST_F(PresenceCallHandlerTest, AnSfuThatCannotSayLeavesTheRingToItsTimeout) {
+    ring();
+    leave("alice");
+    sfu_.listing_error = MediaError::Unavailable;
+    run_for(chat::RingLimits{}.ring_timeout);
+    EXPECT_TRUE(heard(chat::RingEvent::Cancelled).empty());
+    EXPECT_EQ(heard(chat::RingEvent::Missed).size(), 2U);
+}
+
+TEST_F(PresenceCallHandlerTest, AnAnswerToARingWhoseCallerIsGoneIsRefusedAndEndsTheRing) {
+    const chat::CallId call = ring();
+    leave("alice");
+    // The caller's ticket is old enough that a device of hers would be listed by now; the checks
+    // of the loop have not run.
+    clock_.advance(chat::RingLimits{}.caller_grace);
+    ask("bob", kOtherDevice, kRoom, call);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::NoCall);
+    // Bob is never issued a ticket into the empty call.
+    EXPECT_TRUE(sfu_.joins.empty());
+    const auto cancelled = heard(chat::RingEvent::Cancelled);
+    ASSERT_EQ(cancelled.size(), 2U);
+    EXPECT_EQ(cancelled[0].reason, chat::CallReason::CallerLeft);
+    EXPECT_TRUE(heard(chat::RingEvent::Answered).empty());
+    EXPECT_EQ(handler_->calls(), 0U);
+}
+
+TEST_F(PresenceCallHandlerTest, AnAnswerFindsTheCallerInTheMediaRoomAndIsIssued) {
+    const chat::CallId call = ring();
+    clock_.advance(chat::RingLimits{}.caller_grace);
+    ask("bob", kOtherDevice, kRoom, call);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(answers_.back().call, call);
+    EXPECT_EQ(heard(chat::RingEvent::Answered).size(), 2U);
+}
+
+TEST_F(PresenceCallHandlerTest, AnAnswerSoonAfterTheRingStartsIsNotHeldUpByTheSfu) {
+    const chat::CallId call = ring();
+    leave("alice");
+    const int listings = sfu_.listings;
+    ask("bob", kOtherDevice, kRoom, call);
+    EXPECT_EQ(sfu_.listings, listings);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+}
+
+TEST_F(PresenceCallHandlerTest, AnAnsweredCallLastsWhileAnyoneIsInItAndEndsWhenNobodyIs) {
+    const chat::CallId call = ring();
+    ask("bob", kOtherDevice, kRoom, call);
+    sfu_.issue();
+    plane_.sent.clear();
+    // Far past the old hold: both are still in it.
+    run_for(chat::RingLimits{}.answered_hold * 3);
+    EXPECT_EQ(handler_->calls(), 1U);
+    EXPECT_TRUE(plane_.sent.empty());
+    // Alice still in it: bob comes back to the same call, and nothing rings.
+    leave("bob");
+    ask("bob", kOtherDevice);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().call, call);
+    EXPECT_TRUE(plane_.sent.empty());
+    sfu_.connected.clear();
+    run_for(chat::RingLimits{}.answered_hold + chat::RingLimits{}.occupancy_check);
+    EXPECT_EQ(heard(chat::RingEvent::Ended).size(), 2U);
+    EXPECT_EQ(handler_->calls(), 0U);
+}
+
+// The second call of the day: everyone closed their tabs without a word, and a member presses
+// call again while the first is still remembered.
+TEST_F(PresenceCallHandlerTest, ATicketForACallNobodyIsInEndsItAndRingsANewOne) {
+    const chat::CallId first = ring();
+    ask("bob", kOtherDevice, kRoom, first);
+    sfu_.issue();
+    sfu_.connected.clear();
+    clock_.advance(chat::RingLimits{}.caller_grace);
+    plane_.sent.clear();
+    ask("alice");
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    ASSERT_TRUE(answers_.back().call);
+    const chat::CallId second = *answers_.back().call;
+    EXPECT_NE(second, first);
+    const auto ended = heard(chat::RingEvent::Ended);
+    ASSERT_EQ(ended.size(), 2U);
+    EXPECT_EQ(ended[0].call, first);
+    const auto ringing = heard(chat::RingEvent::Ringing);
+    ASSERT_EQ(ringing.size(), 2U);
+    EXPECT_EQ(ringing[0].call, second);
+    EXPECT_EQ(handler_->ring_counters().stale, 1U);
+}
+
+TEST_F(PresenceCallHandlerTest, ATicketAskedRightAfterAnotherJoinsTheCallItsHolderMayBeConnecting) {
+    const chat::CallId first = ring();
+    ask("bob", kOtherDevice, kRoom, first);
+    sfu_.connect_on_issue = false;
+    sfu_.issue();
+    sfu_.connected.clear();
+    plane_.sent.clear();
+    ask("alice");
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().call, first);
+    EXPECT_TRUE(plane_.sent.empty());
+}
+
+TEST_F(GroupCallHandlerTest, AGroupCallNobodyIsInAnyMoreIsEndedByTheNextTicketWhichRings) {
+    const chat::CallId first = ticket("alice");
+    ASSERT_EQ(ticket("bob"), first);
+    disconnect_all();
+    plane_.sent.clear();
+    const chat::CallId second = ticket("carol");
+    EXPECT_NE(second, first);
+    // Everyone the call's events went to.
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
+    EXPECT_EQ(heard(chat::RingEvent::Ringing), 4U);
 }
 
 } // namespace

@@ -51,6 +51,13 @@ enum class RingEvent : std::uint8_t {
     Moved = 7,
 };
 
+// Why a ring ended, when its event alone does not say (ADR-0113). The values are the layout's.
+enum class CallReason : std::uint8_t {
+    // Cancelled: the caller's device was no longer in the call's media room while it rang, so
+    // nobody would have been there to answer.
+    CallerLeft = 1,
+};
+
 // Who a room's call is between: the two members of a direct chat, or a group chat's.
 enum class CallKind : std::uint8_t {
     Direct,
@@ -73,6 +80,8 @@ struct CallNotice {
     core::WallTime expires_at;
     // Moved only: who was put out.
     std::optional<core::UserId> subject = std::nullopt;
+    // Cancelled only, when nobody cancelled it: why it ended.
+    std::optional<CallReason> reason = std::nullopt;
 };
 
 // The notices travel between nodes as opaque bytes; a decode that fails is a notice nobody
@@ -103,6 +112,8 @@ struct CallEvent {
     // As CallNotice::by.
     std::optional<core::UserId> by;
     core::WallTime expires_at;
+    // As CallNotice::reason.
+    std::optional<CallReason> reason = std::nullopt;
 };
 
 // Told of a ring's events on the room's owner, from inside the ringer: must not call back into it.
@@ -122,8 +133,11 @@ inline constexpr std::size_t kMaxGroupCallees = 32;
 // out of it; a ticket past either is answered busy.
 inline constexpr std::size_t kMaxGroupJoined = 64;
 inline constexpr std::size_t kMaxExpelled = 32;
-// A group call whose occupancy the SFU could not tell this many checks in a row ends.
+// A call whose occupancy the SFU could not tell this many checks in a row ends.
 inline constexpr std::uint32_t kMaxUnansweredChecks = 3;
+// A direct call's ring ends (call_cancelled, caller_left) once the SFU has listed nobody in its
+// media room this many checks in a row (ADR-0113).
+inline constexpr std::uint32_t kCallerAbsentChecks = 2;
 
 struct RingLimits {
     // How long a call rings with nobody answering before both members are told it was missed.
@@ -152,9 +166,15 @@ struct RingLimits {
     // for the SFU to issue it: an answer just before expires_at is not lost to call_missed. The
     // SFU's open and join take up to 5 s each.
     core::Millis answer_grace{10'000};
-    // A group call nobody has asked a ticket of for answered_hold, then this often, asks the SFU
-    // whether anyone is still connected: it ends (call_ended) when nobody is.
+    // A call nobody has asked a ticket of for answered_hold, then this often, asks the SFU
+    // whether anyone is still connected: it ends (call_ended) when nobody is (ADR-0113).
     core::Millis occupancy_check{30'000};
+    // A direct call's caller connects to the media room as soon as its ticket comes: from this
+    // long after the ring starts, and then every caller_check, the owner asks the SFU whether
+    // anyone is in it, and a ring nobody waits on ends (ADR-0113). A callee's ticket asked that
+    // late is checked first too.
+    core::Millis caller_grace{10'000};
+    core::Millis caller_check{5'000};
     // Rooms whose recent rings are remembered for the two limits above: a History
     // (kMaxRingsPerWindow start times, the declined caller's id inline, and its deadline: under 300
     // bytes) plus its room id and the map's node and bucket, about 340 bytes each, 5.5 MiB in all.
@@ -178,6 +198,11 @@ struct RingCounters {
     // Calls forgotten without a word because this node no longer owns their room: the members'
     // devices stop ringing at expires_at.
     std::uint64_t orphaned = 0;
+    // Direct calls' rings ended because their caller was no longer in the call.
+    std::uint64_t caller_left = 0;
+    // Calls found with nobody in them when a member asked for a ticket again: ended, and the
+    // ticket rang a new call.
+    std::uint64_t stale = 0;
     // Group calls a member left, and group calls ended because nobody was left in them.
     std::uint64_t left = 0;
     std::uint64_t emptied = 0;
@@ -224,9 +249,10 @@ struct RingRefusal {
 
 // The ring state machine of the rooms this node owns. A room has at most one call: ringing
 // from its first ticket until a callee's ticket answers it, a callee declines, the caller
-// cancels, or the ring timeout passes; then answered until a member ends it or answered_hold
-// passes with no ticket asked. Everything runs on the reactor thread; time is the injected
-// clock's, and deadlines are met by tick(), which the server runs after every turn of its loop.
+// cancels or leaves its media room, or the ring timeout passes; then on until a member ends it
+// or the SFU lists nobody in it (ADR-0113). A group call nobody answered stays on while its
+// caller is in it. Everything runs on the reactor thread; time is the injected clock's, and
+// deadlines are met by tick(), which the server runs after every turn of its loop.
 class Ringer {
 public:
     Ringer(IRingPlane& plane, const core::ports::IClock& clock, core::ports::IRandom& random,
@@ -292,6 +318,22 @@ public:
     [[nodiscard]] std::optional<bool>
     ringing(const core::RoomId& room, const CallId& call,
             const std::optional<core::UserId>& user) const noexcept;
+    // Whether a callee's ticket for the room's ringing direct call should first find its caller
+    // in the media room: the ring started caller_grace ago or more (ADR-0113).
+    [[nodiscard]] bool caller_expected(const core::RoomId& room,
+                                       const core::UserId& user) const noexcept;
+    // The SFU lists nobody in the room's ringing direct call `call`: its ring ends, call_cancelled
+    // with reason caller_left. Nothing when the room's call is no longer that, or no longer rings.
+    void caller_left(const core::RoomId& room, const CallId& call) noexcept;
+    // Whether the room's call is on (answered, or a group call whose ring is over) and its
+    // latest ticket is caller_grace old: a ticket asked again then joins it, unless the SFU
+    // lists nobody in it.
+    [[nodiscard]] bool settled(const core::RoomId& room) const noexcept;
+    // The caller of the room's call.
+    [[nodiscard]] std::optional<core::UserId> caller_of(const core::RoomId& room) const noexcept;
+    // The SFU lists nobody in the room's call `call`, which is on: it ends (call_ended, by
+    // nobody), and the room has no call.
+    void abandoned(const core::RoomId& room, const CallId& call) noexcept;
     // The id of the room's call, if it has one, and whose it is.
     [[nodiscard]] std::optional<CallId> call_of(const core::RoomId& room) const noexcept;
     [[nodiscard]] std::optional<CallKind> kind_of(const core::RoomId& room) const noexcept;
@@ -300,8 +342,8 @@ public:
     // Every room with a call.
     [[nodiscard]] std::vector<core::RoomId> rooms() const;
 
-    // Group calls whose occupancy is due to be checked (RingLimits::occupancy_check), taken by
-    // the call handler, which asks the SFU and answers occupied().
+    // Calls whose occupancy is due to be checked (RingLimits::occupancy_check, caller_check),
+    // taken by the call handler, which asks the SFU and answers occupied().
     [[nodiscard]] std::vector<std::pair<core::RoomId, CallId>> take_checks();
     // Told of each group call that ends without a media generation move of its own (missed,
     // emptied, given up on), once the ringer has forgotten it: the owner then clears who was put
@@ -310,8 +352,9 @@ public:
     void on_group_ended(GroupEnded hook) noexcept { group_ended_ = std::move(hook); }
     // Who hears each call's events (ADR-0111); nullptr: nobody, the default.
     void watch(IRingWatcher* watcher) noexcept { watcher_ = watcher; }
-    // Whether anyone is connected to the call's media room: nobody ends it (call_ended), and
-    // nullopt (the SFU did not answer) asks again at the next check.
+    // Whether anyone is connected to the call's media room: nobody ends it (call_ended; a ringing
+    // direct call's ring, call_cancelled caller_left, after kCallerAbsentChecks), and nullopt
+    // (the SFU did not answer) asks again at the next check.
     // `asked` false: the SFU was not asked (nothing to ask with yet, or the media generation
     // is being written), which does not count toward kMaxUnansweredChecks.
     void occupied(const core::RoomId& room, const CallId& call, std::optional<bool> anyone,
@@ -343,10 +386,18 @@ private:
         std::vector<core::UserId> joined = {};
         // Put out of the call while it lasts.
         std::vector<core::UserId> expelled = {};
-        // A group call's occupancy is being asked of the SFU, and how many checks in a row it
-        // could not answer.
+        // Its occupancy is being asked of the SFU, and how many checks in a row it could not
+        // answer.
         bool checking = false;
         std::uint32_t unanswered = 0;
+        // A ringing direct call: when its caller is next looked for in the media room, and how
+        // many checks in a row found nobody.
+        core::MonoTime next_caller_check;
+        std::uint32_t caller_absent = 0;
+        core::MonoTime started;
+        // The latest ticket of the call: its device may be connecting still, which the SFU does
+        // not list yet, so nobody listed within caller_grace of it ends nothing.
+        core::MonoTime last_ticket;
         core::MonoTime ring_deadline;
         core::WallTime expires_at;
         core::MonoTime next_announce;
@@ -379,6 +430,7 @@ private:
     // asked.
     void reschedule(const core::RoomId& room, Call& call);
     void tick_group(const core::RoomId& room, Calls::iterator it, core::MonoTime now) noexcept;
+    void tick_direct(const core::RoomId& room, Calls::iterator it, core::MonoTime now) noexcept;
     // Takes `target` out of a group call, and remembers it put out; Move when it had a ticket.
     [[nodiscard]] MediaStepNeeded put_out(const core::RoomId& room, Call& call,
                                           const core::UserId& target);
@@ -389,15 +441,23 @@ private:
     void forget_ended(Calls::iterator it) noexcept;
     // Tells every member of the call, the caller included, on every node they are connected to.
     void announce(const core::RoomId& room, const Call& call, RingEvent event,
-                  const std::optional<core::UserId>& by) noexcept;
+                  const std::optional<core::UserId>& by,
+                  std::optional<CallReason> reason = std::nullopt) noexcept;
     // The watcher, of an event of the call; `users` as CallEvent::users.
     void observe(const core::RoomId& room, const Call& call, RingEvent event,
-                 const std::optional<core::UserId>& by,
-                 std::vector<core::UserId> users = {}) noexcept;
+                 const std::optional<core::UserId>& by, std::vector<core::UserId> users = {},
+                 std::optional<CallReason> reason = std::nullopt) noexcept;
     // Tells one member.
     void tell(const core::RoomId& room, const Call& call, const core::UserId& to, RingEvent event,
               const std::optional<core::UserId>& by,
-              const std::optional<core::UserId>& subject = std::nullopt) noexcept;
+              const std::optional<core::UserId>& subject = std::nullopt,
+              std::optional<CallReason> reason = std::nullopt) noexcept;
+    // Queues the call's occupancy check, unless one is being asked already.
+    void check(const core::RoomId& room, Call& call) noexcept;
+    // A ringing direct call's ring ends: its caller is not in the call.
+    void ring_off(Calls::iterator it) noexcept;
+    // A call that is on ends: nobody is in it.
+    void empty(Calls::iterator it) noexcept;
     // A group call's ticket for `user`: answered or rejoined.
     void joined_group(const core::RoomId& room, Call& call, const core::UserId& user);
 

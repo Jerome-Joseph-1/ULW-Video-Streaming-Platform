@@ -254,6 +254,17 @@ TEST_F(NotifierTest, ARingingCallNamesEachCalleesConnectedDevicesAndItsLaterEven
     // A call no lookup waits on goes at once.
     notifier_->observed(answered(chat::CallId::generate(clock_, random_)));
     EXPECT_EQ(sink_.events.size(), 1U);
+    EXPECT_EQ(sink_.take()[0].find("reason"), nullptr);
+    // A ring whose caller left the call says so (ADR-0113).
+    chat::CallEvent cancelled = answered(chat::CallId::generate(clock_, random_));
+    cancelled.event = chat::RingEvent::Cancelled;
+    cancelled.by.reset();
+    cancelled.reason = chat::CallReason::CallerLeft;
+    notifier_->observed(cancelled);
+    const auto gone = sink_.take();
+    ASSERT_EQ(gone.size(), 1U);
+    EXPECT_EQ(text(gone[0], "type"), "call_cancelled");
+    EXPECT_EQ(text(gone[0], "reason"), "caller_left");
 }
 
 TEST_F(NotifierTest, ARegistryThatDoesNotAnswerInTimeLeavesTheDevicesUnknownRatherThanTheRingLate) {
