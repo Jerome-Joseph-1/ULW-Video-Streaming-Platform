@@ -796,6 +796,16 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     if (name == "leave") {
         return leave_of(*message);
     }
+    if (name == "part") {
+        if (!only(*message, {"type", "room", "stream"})) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        auto room = joined_room_of(*message);
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        return Part{.room = *room};
+    }
     if (name == "rooms") {
         return rooms_of(*message);
     }
@@ -1138,6 +1148,12 @@ void write_removed(std::string& out, const core::RoomId& room, const core::UserI
     out += R"({"type":"removed",)";
     append_room(out, room);
     append_user(out, "user", user);
+    out += '}';
+}
+
+void write_parted(std::string& out, const core::RoomId& room) {
+    out += R"({"type":"parted",)";
+    append_room(out, room);
     out += '}';
 }
 

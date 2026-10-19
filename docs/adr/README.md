@@ -120,3 +120,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0114](0114-the-rooms-call-is-read-whatever-its-id.md) | The room's call is read whatever its id, and the backend may end it for a member | Accepted |
 | [0115](0115-a-call-says-whom-it-rings-and-who-moderates-it.md) | A call says whom it rings, how many people it takes, and who moderates it | Accepted |
 | [0116](0116-a-browser-may-be-refused-on-the-socket.md) | A browser may ask to be refused on the socket | Accepted |
+| [0117](0117-a-socket-may-stop-following-a-room.md) | A socket may stop following a room | Accepted |

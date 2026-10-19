@@ -630,6 +630,10 @@ void Session::command(const codec::ws::Frame& frame) {
         chat.call_status(*client_, *q);
         return;
     }
+    if (const auto* p = std::get_if<Part>(&*parsed)) {
+        chat.part(*client_, *p);
+        return;
+    }
     if (const auto* o = std::get_if<OpenDirect>(&*parsed)) {
         chat.open_direct(*client_, *o);
         return;

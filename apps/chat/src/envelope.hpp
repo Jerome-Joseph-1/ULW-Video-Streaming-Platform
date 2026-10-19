@@ -230,6 +230,12 @@ struct LeaveRoom {
     core::RoomId room;
 };
 
+// part: this socket stops following a room it joined, and its place is free; the member list is
+// left as it is (ADR-0117).
+struct Part {
+    core::RoomId room;
+};
+
 struct ListRooms {
     std::optional<core::RoomId> after;
     std::size_t limit = kDefaultListLimit;
@@ -279,7 +285,7 @@ using DirectoryCommand =
     std::variant<RegisterDevice, RetireDevice, PublishKeyPackages, ListDevices, ClaimKeyPackages>;
 
 using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery,
-                             OpenDirect, CreateGroup, AddMembers, RemoveMember, LeaveRoom,
+                             Part, OpenDirect, CreateGroup, AddMembers, RemoveMember, LeaveRoom,
                              ListRooms, ListMembers, DirectoryCommand>;
 
 enum class EnvelopeError : std::uint8_t {
@@ -356,6 +362,7 @@ void write_group(std::string& out, const core::RoomId& room, const rt::MessageKe
 void write_added(std::string& out, const core::RoomId& room, std::span<const core::UserId> users);
 void write_removed(std::string& out, const core::RoomId& room, const core::UserId& user);
 // `promoted`: who became the group's admin because the leaver was its last.
+void write_parted(std::string& out, const core::RoomId& room);
 void write_left(std::string& out, const core::RoomId& room,
                 const std::optional<core::UserId>& promoted);
 void write_rooms(std::string& out, std::span<const core::ports::RoomEntry> rooms, bool more);
