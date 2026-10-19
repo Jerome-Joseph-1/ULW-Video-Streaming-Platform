@@ -1,6 +1,6 @@
 # Notifications
 
-<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of), apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, docs/adr/0111-notification-events-for-members-not-connected.md -->
+<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of), apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0111-notification-events-for-members-not-connected.md, docs/adr/0120-video-events-on-the-notification-hook.md -->
 
 Chat reaches a member only through the sockets they have open ([chat.md](chat.md),
 [calls.md](calls.md)). For a member with none (a closed tab, a phone in a pocket), the operator
@@ -136,6 +136,22 @@ interval passes or they connect, whichever is first; a busy room makes at most o
 member per interval, however many messages it carries. A message that owes nobody makes no
 event. Never the body: fetch what to show through your own backend, or show "New message from …".
 
+### `video_ready` and `video_failed`
+
+When one of your users' videos finishes processing, or fails (ADR-0120). Sent by one chat node,
+whichever takes the change first, up to 2 s after it:
+
+```json
+{"id":"...","type":"video_ready","at":1767225800,"video":"0199950c-...","owner":"auth0|123","version":2,"duration_ms":6000}
+{"id":"...","type":"video_failed","at":1767225800,"video":"0199950d-...","owner":"auth0|123","version":3,"error_reason":"no video stream"}
+```
+
+`at` is when the video changed. `version` is the video object's, so an event older than what you
+hold can be ignored. A video deleted before it settled makes no event. A change no node takes
+within an hour (the hook off, or every node down) is forgotten. Like every event, these are at
+most once: keep the [service listing](videos-and-playback.md#service-api-visibility-takedown-and-listing)
+as the source of truth, and poll it now and then for any you missed.
+
 ## Answering and declining from a notification
 
 - **Answer.** The notification opens the app, which connects (`/rt?device=<uuid>`), `join`s the
@@ -160,4 +176,6 @@ the other operations; a stream's live chat is `400` `bad_room`.
 
 With the hook on, each socket open and close is a row write in Postgres, batched a quarter of a
 second; each node renews its lease every 20 s; a ring is one more read on its owner; and a
-message in a direct or group chat is one more statement on its sender's node. With it off, none.
+message in a direct or group chat is one more statement on its sender's node. Each node also
+takes the videos' changes, one statement every 2 s. With it off, none of that; the videos'
+changes are still recorded and forgotten an hour on.

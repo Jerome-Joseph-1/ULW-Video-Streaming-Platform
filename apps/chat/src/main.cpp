@@ -117,6 +117,8 @@ struct Services {
     std::unique_ptr<infra::curl::Multi> notify_multi;
     std::unique_ptr<chat::HookSender> hook;
     std::unique_ptr<chat::Notifier> notifier;
+    // Videos that became ready or failed, sent on the same hook (ADR-0120).
+    std::unique_ptr<chat::VideoRelay> videos;
     std::unique_ptr<chat::ChatServer> server;
     std::unique_ptr<net::SignalWatcher> signals;
 
@@ -410,6 +412,8 @@ int run() {
         s.random.fill(tag);
         s.notifier = std::make_unique<chat::Notifier>(*s.reactor, *s.notify_store, *s.hook, s.clock,
                                                       s.random, std::bit_cast<std::uint64_t>(tag));
+        s.videos = std::make_unique<chat::VideoRelay>(*s.reactor, *s.notify_store, *s.hook, s.clock,
+                                                      s.random);
     }
 
     s.room_log = std::make_unique<chat::RoomLog>(config->node);
@@ -435,7 +439,8 @@ int run() {
                    .registry = s.directory.get(),
                    .key_packages = s.directory.get(),
                    .notifier = s.notifier.get(),
-                   .hook = s.hook.get()},
+                   .hook = s.hook.get(),
+                   .videos = s.videos.get()},
         chat::Access{.cookie = config->auth_cookie, .allowed_origins = config->allowed_origins},
         chat_limits);
     auto signals = net::SignalWatcher::create(*s.reactor, *s.server);
