@@ -132,8 +132,9 @@ std::string_view method_name(http::Method m) noexcept {
     // A second layer for the routes that read a body as JSON: even from an allowed page, a
     // body is believed only under the type no other page can send without a preflight.
     const bool json_body = route == RouteId::CreateUpload || route == RouteId::UpdateVideo ||
-                           route == RouteId::UpdateServiceVideo || route == RouteId::UpdateStream ||
-                           route == RouteId::UpdateServiceStream;
+                           route == RouteId::UpdateServiceVideo ||
+                           route == RouteId::UpdateServiceVideos ||
+                           route == RouteId::UpdateStream || route == RouteId::UpdateServiceStream;
     return !json_body || declares_json(head.headers);
 }
 
@@ -339,6 +340,7 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     case RouteId::CreateUpload:
     case RouteId::UpdateVideo:
     case RouteId::UpdateServiceVideo:
+    case RouteId::UpdateServiceVideos:
     case RouteId::UpdateStream:
     case RouteId::UpdateServiceStream:
         if (const auto refused = check_json_head(match->id, head)) {
@@ -524,8 +526,8 @@ http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept
     last_activity_ = now();
     last_progress_ = last_activity_;
     if (req_.route == RouteId::CreateUpload || req_.route == RouteId::UpdateVideo ||
-        req_.route == RouteId::UpdateServiceVideo || req_.route == RouteId::UpdateStream ||
-        req_.route == RouteId::UpdateServiceStream) {
+        req_.route == RouteId::UpdateServiceVideo || req_.route == RouteId::UpdateServiceVideos ||
+        req_.route == RouteId::UpdateStream || req_.route == RouteId::UpdateServiceStream) {
         std::ranges::transform(bytes, std::back_inserter(req_.body),
                                [](std::byte b) { return static_cast<char>(b); });
         return http::BodyVerdict::Continue;
@@ -590,6 +592,7 @@ void Connection::advance() noexcept {
     // stream's owner's (ADR-0105).
     case RouteId::UpdateVideo:
     case RouteId::UpdateServiceVideo:
+    case RouteId::UpdateServiceVideos:
     case RouteId::UpdateStream:
     case RouteId::UpdateServiceStream:
         if (req_.message_complete && !req_.started) {
@@ -635,7 +638,8 @@ void Connection::advance() noexcept {
 
 // The PATCHes that carry a visibility start once their body is in.
 void Connection::start_patch() noexcept {
-    if (req_.route == RouteId::UpdateServiceVideo || req_.route == RouteId::UpdateServiceStream) {
+    if (req_.route == RouteId::UpdateServiceVideo || req_.route == RouteId::UpdateServiceVideos ||
+        req_.route == RouteId::UpdateServiceStream) {
         start_service_route();
     } else if (req_.route == RouteId::UpdateStream) {
         start_stream_route();
@@ -1105,6 +1109,7 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     case RouteId::RevokeAccess:
     case RouteId::ListServiceVideos:
     case RouteId::UpdateServiceVideo:
+    case RouteId::UpdateServiceVideos:
     case RouteId::DeleteServiceVideo:
     case RouteId::UpdateServiceStream:
     case RouteId::MasterPlaylist:
@@ -1327,6 +1332,10 @@ void Connection::start_service_route() noexcept {
         set_service_stream_visibility();
         return;
     }
+    if (req_.route == RouteId::UpdateServiceVideos) {
+        set_service_visibilities();
+        return;
+    }
     const auto id = core::VideoId::parse(req_.params[0]);
     if (!id) {
         fail_with(Status::NotFound, "not_found");
@@ -1386,6 +1395,73 @@ void Connection::start_service_route() noexcept {
     } else {
         deps().catalog.revoke_access(*id, *user, std::move(done));
     }
+}
+
+// PATCH /api/v1/service/videos (ADR-0119): the single PATCH's change and checks, for each video
+// in turn. One video's refusal is reported with it and stops none of the others, so the answer
+// is 200 once the body is good, with the videos changed and those that were not.
+void Connection::set_service_visibilities() noexcept {
+    if (!visibility_from_body(req_.body)) {
+        fail_with(Status::BadRequest, "bad_visibility");
+        return;
+    }
+    auto bulk = bulk_visibility_from_body(req_.body);
+    if (!bulk) {
+        fail_with(Status::BadRequest, "bad_videos");
+        return;
+    }
+    req_.bulk = std::move(*bulk);
+    req_.bulk_next = 0;
+    req_.bulk_changed = "[";
+    req_.bulk_failed = "[";
+    next_service_visibility(request_seq_);
+}
+
+void Connection::next_service_visibility(std::uint64_t request) noexcept {
+    const BulkVisibility* bulk = get(req_.bulk);
+    if (bulk == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (req_.bulk_next == bulk->videos.size()) {
+        respond_json(Status::Ok, R"({"videos":)" + req_.bulk_changed + R"(],"failed":)" +
+                                     req_.bulk_failed + "]}");
+        return;
+    }
+    const core::VideoId id = bulk->videos[req_.bulk_next];
+    ++pending_;
+    deps().catalog.set_visibility(id, std::nullopt, bulk->visibility,
+                                  [this, request, id](auto changed) noexcept {
+                                      --pending_;
+                                      on_service_visibility_set(request, id, std::move(changed));
+                                  });
+}
+
+void Connection::on_service_visibility_set(
+    std::uint64_t request, const core::VideoId& id,
+    core::ports::CatalogResult<core::VideoRecord> result) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    if (result) {
+        if (req_.bulk_changed.size() > 1) {
+            req_.bulk_changed += ',';
+        }
+        req_.bulk_changed += video_json(*result, core::VideoAccess::Owner);
+    } else {
+        if (req_.bulk_failed.size() > 1) {
+            req_.bulk_failed += ',';
+        }
+        // Forbidden: the room does not list the video's owner. Anything else is worth a retry.
+        const std::string_view error = result.error() == CatalogError::NotFound    ? "not_found"
+                                       : result.error() == CatalogError::Forbidden ? "not_member"
+                                                                                   : "unavailable";
+        req_.bulk_failed += R"({"id":")" + id.to_string() + R"(","error":")";
+        req_.bulk_failed += error;
+        req_.bulk_failed += "\"}";
+    }
+    ++req_.bulk_next;
+    next_service_visibility(request);
 }
 
 // PATCH /api/v1/service/live/{id} (ADR-0105): the owner's PATCH, for any stream. The room must

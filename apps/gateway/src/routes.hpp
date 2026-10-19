@@ -32,6 +32,7 @@ enum class RouteId : std::uint8_t {
     RevokeAccess,
     ListServiceVideos,
     UpdateServiceVideo,
+    UpdateServiceVideos,
     DeleteServiceVideo,
     UpdateServiceStream,
     Healthz,
@@ -39,7 +40,7 @@ enum class RouteId : std::uint8_t {
     Metrics,
 };
 
-inline constexpr std::array<http::Route<RouteId>, 30> kRoutes{{
+inline constexpr std::array<http::Route<RouteId>, 31> kRoutes{{
     {.method = http::Method::Post, .pattern = "/api/v1/uploads", .id = RouteId::CreateUpload},
     {.method = http::Method::Patch, .pattern = "/api/v1/uploads/{id}", .id = RouteId::AppendChunk},
     {.method = http::Method::Head, .pattern = "/api/v1/uploads/{id}", .id = RouteId::UploadOffset},
@@ -95,6 +96,10 @@ inline constexpr std::array<http::Route<RouteId>, 30> kRoutes{{
     {.method = http::Method::Patch,
      .pattern = "/api/v1/service/videos/{id}",
      .id = RouteId::UpdateServiceVideo},
+    // One visibility for many videos at once (ADR-0119).
+    {.method = http::Method::Patch,
+     .pattern = "/api/v1/service/videos",
+     .id = RouteId::UpdateServiceVideos},
     {.method = http::Method::Delete,
      .pattern = "/api/v1/service/videos/{id}",
      .id = RouteId::DeleteServiceVideo},
@@ -161,6 +166,8 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "list_service_videos";
     case RouteId::UpdateServiceVideo:
         return "update_service_video";
+    case RouteId::UpdateServiceVideos:
+        return "update_service_videos";
     case RouteId::DeleteServiceVideo:
         return "delete_service_video";
     case RouteId::UpdateServiceStream:
@@ -204,6 +211,7 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::RevokeAccess:
     case RouteId::ListServiceVideos:
     case RouteId::UpdateServiceVideo:
+    case RouteId::UpdateServiceVideos:
     case RouteId::DeleteServiceVideo:
     case RouteId::UpdateServiceStream:
         return true;

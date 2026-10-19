@@ -130,6 +130,12 @@ private:
         // PATCH /api/v1/videos/{id}: what the owner asked for, held while the catalog says
         // whether they own the video.
         std::optional<core::Visibility> visibility;
+        // PATCH /api/v1/service/videos: what is asked, the next video to change, and the
+        // answer's two lists so far, each still open.
+        std::optional<BulkVisibility> bulk;
+        std::size_t bulk_next = 0;
+        std::string bulk_changed;
+        std::string bulk_failed;
         std::string body;
         http::PathParams params{};
         std::string_view token;
@@ -224,6 +230,11 @@ private:
     void fetch_live(std::string_view stream) noexcept;
     // PATCH /api/v1/service/live/{id}: the operator's backend sets who may watch a stream.
     void set_service_stream_visibility() noexcept;
+    // PATCH /api/v1/service/videos: one visibility for many videos, one after another.
+    void set_service_visibilities() noexcept;
+    void next_service_visibility(std::uint64_t request) noexcept;
+    void on_service_visibility_set(std::uint64_t request, const core::VideoId& id,
+                                   core::ports::CatalogResult<core::VideoRecord> result) noexcept;
     void on_videos(std::uint64_t request, const core::UserId& owner,
                    core::ports::CatalogResult<core::ports::VideoPage> result) noexcept;
     void on_service_deleted(std::uint64_t request,

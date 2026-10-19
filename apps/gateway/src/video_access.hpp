@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace gateway {
 
@@ -63,6 +64,16 @@ cursor_from_text(std::string_view text) noexcept;
 
 // PATCH /api/v1/videos/{id}'s body: {"visibility": "<private|unlisted|room:<room id>>"}.
 [[nodiscard]] std::optional<core::Visibility> visibility_from_body(std::string_view body);
+
+// PATCH /api/v1/service/videos (ADR-0119): one visibility for up to kMaxBulkVideos videos.
+inline constexpr std::size_t kMaxBulkVideos = 50;
+struct BulkVisibility {
+    std::vector<core::VideoId> videos;
+    core::Visibility visibility;
+};
+// {"videos": ["<id>", ...], "visibility": "..."}: nullopt when `videos` is missing, empty, longer
+// than kMaxBulkVideos, or names a malformed id or one twice, or when the visibility is bad.
+[[nodiscard]] std::optional<BulkVisibility> bulk_visibility_from_body(std::string_view body);
 
 // The video state's name in the API: init, uploading, processing, ready or failed.
 [[nodiscard]] std::string_view state_name(core::VideoState state) noexcept;

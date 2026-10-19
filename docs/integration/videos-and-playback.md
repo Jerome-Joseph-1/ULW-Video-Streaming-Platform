@@ -339,7 +339,7 @@ page's `next`, percent-encoded) in its query, and returns grants in bytewise ord
 
 ### Service API: visibility, takedown and listing
 
-<!-- apps/gateway/src/connection.cpp (start_service_route, on_videos, on_service_deleted), apps/gateway/src/video_access.cpp (video_query, videos_json), infra/postgres/src/upload_catalog.cpp (kSetVisibility, kDeleteVideo, kListVideos), docs/adr/0100-the-operators-backend-controls-vod.md -->
+<!-- apps/gateway/src/connection.cpp (start_service_route, on_videos, on_service_deleted, set_service_visibilities), apps/gateway/src/video_access.cpp (video_query, videos_json, bulk_visibility_from_body), infra/postgres/src/upload_catalog.cpp (kSetVisibility, kDeleteVideo, kListVideos), docs/adr/0100-the-operators-backend-controls-vod.md, docs/adr/0119-one-visibility-for-many-videos.md -->
 
 The operator's backend controls any user's videos: what the policy is (who may see what, what
 is taken down) is the product's; these routes are how it applies it. The same token as for
@@ -349,6 +349,7 @@ or the query is looked at.
 | Endpoint | Success | Errors |
 |---|---|---|
 | `PATCH /api/v1/service/videos/{id}` | `200`, `application/json`, the video object as its owner sees it | `400`, `401`, `403`, `404`, `413`, `503`, `500` |
+| `PATCH /api/v1/service/videos` | `200`, `application/json`, the videos changed and those that were not | `400`, `401`, `403`, `413`, `500` |
 | `DELETE /api/v1/service/videos/{id}` | `204`: the video is taken down | `400`, `401`, `403`, `404`, `409`, `503`, `500` |
 | `GET /api/v1/service/videos` | `200`, `application/json`, `Cache-Control: no-store`, a page of the videos of the user `?owner=` names | `400`, `401`, `403`, `503`, `500` |
 
@@ -357,6 +358,25 @@ or the query is looked at.
 whatever its state, as its owner may. A room must list the video's owner at that moment (`403`
 `not_member` otherwise): a room shares a video only while it lists the owner, so any other room
 would share it with nobody.
+
+**Many at once.** `PATCH /api/v1/service/videos` sets one visibility on up to 50 videos, for
+publishing or unpublishing a course in one request. Its body is the single `PATCH`'s with the
+videos' ids added, each at most once:
+
+```json
+{"visibility":"room:0192f3c4-...","videos":["0199950c-...","0199950d-..."]}
+```
+
+Each video is changed in turn, exactly as the single `PATCH` would change it, so some may change
+and others not. Once the body is good the answer is `200`:
+
+```json
+{"videos":[{"id":"0199950c-...","title":"lesson 1","state":"ready","version":2,"duration_ms":6000,"progress":null,"visibility":"room:0192f3c4-..."}],"failed":[{"id":"0199950d-...","error":"not_member"}]}
+```
+
+`videos` lists the ones changed, in the order asked, as the single `PATCH` answers each one.
+`failed` lists the others and why: `not_found` (no such video), `not_member` (the room does not
+list its owner), or `unavailable` (the catalog could not be reached: retry that id).
 
 **Takedown.** The `DELETE` has exactly the effect of the owner's
 [delete](#deleting-a-video), for any user's video: gone for everyone at once, grants removed,
@@ -388,6 +408,7 @@ Refusals carry a JSON body, `{"error":"<code>"}`:
 | Status | `error` | Meaning |
 |---|---|---|
 | `400` | `bad_visibility` | `PATCH`: the body is not an object with one of the three forms; an empty body is `400` with no body |
+| `400` | `bad_videos` | `PATCH` of many: `videos` is missing, empty, longer than 50, or has a malformed or repeated id |
 | `400` | `bad_query` | `GET`: no `owner`, or `owner`, `limit` or `after` malformed, or one given twice |
 | `403` | `forbidden` | Not a service token |
 | `403` | `not_member` | `PATCH`: the room does not list the video's owner |
