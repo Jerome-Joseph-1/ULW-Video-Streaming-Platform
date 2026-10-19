@@ -236,6 +236,8 @@ public:
     void call_move(ClientId id, const CallMove& move);
     // The room's call, whatever its id (ADR-0114), on a socket that joined the room.
     void call_status(ClientId id, const CallStatusQuery& query);
+    // A history page around a seq (ADR-0118).
+    void around(ClientId id, const History& history);
     // The socket stops following a room it joined, freeing its place (ADR-0117).
     void part(ClientId id, const Part& part);
     // Member lists as their users change them (ADR-0096, membership.cpp). None needs the room

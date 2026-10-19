@@ -114,18 +114,21 @@ public:
 class FakeMessages final : public ulw::test::NoMembershipStore {
 public:
     void history_before(
-        const core::RoomId& /*room*/, std::optional<std::uint64_t> /*before*/,
-        std::size_t /*limit*/,
+        const core::RoomId& /*room*/, std::optional<std::uint64_t> before, std::size_t limit,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override {
         directions.emplace_back("before");
+        cursors.emplace_back(before, limit);
         pages.push_back(std::move(done));
     }
     void history_after(
-        const core::RoomId& /*room*/, std::uint64_t /*after*/, std::size_t /*limit*/,
+        const core::RoomId& /*room*/, std::uint64_t after, std::size_t limit,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override {
         directions.emplace_back("after");
+        cursors.emplace_back(after, limit);
         pages.push_back(std::move(done));
     }
+    // Each read's cursor and limit, in order.
+    std::vector<std::pair<std::optional<std::uint64_t>, std::size_t>> cursors;
     void last_seq(const core::RoomId& /*room*/,
                   core::ports::MessageCallback<std::uint64_t> done) override {
         done(std::uint64_t{0});
@@ -770,6 +773,58 @@ TEST_F(ChatServiceTest, AfterReadsForwardFromTheCursorAndBeforeOrNoCursorBackwar
     history(a, 9);
     history(a);
     EXPECT_EQ(messages_.directions, (std::vector<std::string>{"after", "before", "before"}));
+}
+
+// ADR-0118: a page centred on a seq, oldest first, for one request's charge.
+TEST_F(ChatServiceTest, AHistoryPageAroundASeqIsItAndThoseEitherSideOldestFirst) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit(20);
+    alice.take();
+    service_->history(a, {.room = room_id(),
+                          .before = std::nullopt,
+                          .after = std::nullopt,
+                          .limit = 5,
+                          .around = 10});
+    ASSERT_EQ(messages_.pages.size(), 1U);
+    EXPECT_EQ(messages_.cursors.at(0),
+              (std::pair{std::optional<std::uint64_t>{11}, std::size_t{3}}));
+    // The seq and two older, newest first as the store answers; then two newer.
+    messages_.pages[0](std::vector{stored(10, "ten"), stored(9, "nine"), stored(7, "seven")});
+    ASSERT_EQ(messages_.pages.size(), 2U);
+    EXPECT_EQ(messages_.cursors.at(1),
+              (std::pair{std::optional<std::uint64_t>{10}, std::size_t{2}}));
+    EXPECT_TRUE(alice.got.empty());
+    messages_.pages[1](std::vector{stored(11, "eleven"), stored(12, "twelve")});
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 6U);
+    std::vector<std::uint64_t> seqs;
+    for (std::size_t i = 0; i < 5; ++i) {
+        seqs.push_back(seen(got[i]).seq);
+    }
+    EXPECT_EQ(seqs, (std::vector<std::uint64_t>{7, 9, 10, 11, 12}));
+    EXPECT_EQ(seen(got[5]).type, "history");
+    // A store that fails the second read fails the page.
+    service_->history(a, {.room = room_id(),
+                          .before = std::nullopt,
+                          .after = std::nullopt,
+                          .limit = 4,
+                          .around = 3});
+    messages_.pages[2](std::vector{stored(3, "three")});
+    messages_.pages[3](std::unexpected(core::ports::MessageStoreError::Unavailable));
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
+}
+
+TEST(Envelope, AHistoryAroundASeqTakesNoOtherCursor) {
+    const std::string head = R"({"type":"history","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
+    const auto around = chat::parse_command(head + R"(,"around":42,"limit":10})");
+    ASSERT_TRUE(around);
+    EXPECT_EQ(std::get<chat::History>(*around).around, 42U);
+    EXPECT_EQ(chat::parse_command(head + R"(,"around":42,"after":1})"),
+              std::unexpected(chat::EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(head + R"(,"around":"42"})"),
+              std::unexpected(chat::EnvelopeError::Malformed));
 }
 
 TEST_F(ChatServiceTest, HistoryIsRefusedWhileTheMemberCheckIsStillOut) {
