@@ -84,6 +84,13 @@ ON CONFLICT (room_id, user_id) DO UPDATE SET told_at = excluded.told_at
  WHERE notify_marks.told_at <= now() - $4::float8 * interval '1 millisecond'
 RETURNING user_id)sql";
 
+// The oldest changes nobody holds, taken for good. RETURNING has no order: decode sorts by id.
+constexpr Sql kTakeVideoEvents = R"sql(
+DELETE FROM video_events
+ WHERE id IN (SELECT id FROM video_events ORDER BY id LIMIT $1 FOR UPDATE SKIP LOCKED)
+RETURNING id, video_id, owner_id, state, version, duration_ms, error_reason,
+          (extract(epoch FROM at) * 1000)::bigint)sql";
+
 NotifyError to_notify_error(DbError /*e*/) noexcept {
     // A constraint is a sync after the node was forgotten (its row gone): renewing writes it
     // again, which is what an unavailable store asks of the caller too.
@@ -209,6 +216,50 @@ NotifyResult<std::vector<core::UserId>> decode_users(const Result& rows) {
     return out;
 }
 
+NotifyResult<std::vector<core::ports::VideoEvent>> decode_video_events(const Result& rows) {
+    std::vector<std::pair<std::int64_t, core::ports::VideoEvent>> taken;
+    taken.reserve(static_cast<std::size_t>(rows.rows()));
+    for (int i = 0; i < rows.rows(); ++i) {
+        const auto id = rows.get(i, 0).and_then(parse_int64);
+        const auto video =
+            rows.get(i, 1).transform([](std::string_view t) { return core::VideoId::parse(t); });
+        const auto owner =
+            rows.get(i, 2).transform([](std::string_view t) { return core::UserId::parse(t); });
+        const auto state = rows.get(i, 3);
+        const auto version = rows.get(i, 4).and_then(parse_int64);
+        const auto at = rows.get(i, 7).and_then(parse_int64);
+        if (!id || !video || !*video || !owner || !*owner || !state || !version || !at ||
+            (*state != "ready" && *state != "failed")) {
+            return std::unexpected(NotifyError::Corrupt);
+        }
+        core::ports::VideoEvent event{.video = **video,
+                                      .owner = **owner,
+                                      .ready = *state == "ready",
+                                      .version = static_cast<std::int32_t>(*version),
+                                      .duration = std::nullopt,
+                                      .error_reason = std::nullopt,
+                                      .at_ms = *at};
+        if (const auto duration = rows.get(i, 5)) {
+            const auto ms = parse_int64(*duration);
+            if (!ms) {
+                return std::unexpected(NotifyError::Corrupt);
+            }
+            event.duration = core::Millis{*ms};
+        }
+        if (const auto reason = rows.get(i, 6)) {
+            event.error_reason = std::string(*reason);
+        }
+        taken.emplace_back(*id, std::move(event));
+    }
+    std::ranges::sort(taken, {}, &std::pair<std::int64_t, core::ports::VideoEvent>::first);
+    std::vector<core::ports::VideoEvent> out;
+    out.reserve(taken.size());
+    for (auto& [id, event] : taken) {
+        out.push_back(std::move(event));
+    }
+    return out;
+}
+
 } // namespace
 
 class PgNotifyStore::Impl {
@@ -331,6 +382,20 @@ void PgNotifyStore::message_targets(const core::RoomId& room, const core::UserId
                                 millis(impl_->timing().message_interval)},
         [done = std::move(done)](Outcome outcome) mutable noexcept {
             done(outcome ? decode_users(*outcome)
+                         : std::unexpected(to_notify_error(outcome.error())));
+        }));
+}
+
+void PgNotifyStore::take_video_events(std::size_t max,
+                                      NotifyCallback<std::vector<core::ports::VideoEvent>> done) {
+    if (max == 0 || max > core::ports::kMaxVideoEvents) {
+        impl_->refuse(std::move(done));
+        return;
+    }
+    impl_->pool().submit(std::make_unique<Bound>(
+        kTakeVideoEvents, std::vector<Bound::Arg>{static_cast<std::int64_t>(max)},
+        [done = std::move(done)](Outcome outcome) mutable noexcept {
+            done(outcome ? decode_video_events(*outcome)
                          : std::unexpected(to_notify_error(outcome.error())));
         }));
 }

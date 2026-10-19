@@ -1,6 +1,7 @@
 #pragma once
 
 #include "core/ports/notify.hpp"
+#include "core/ports/video_events.hpp"
 #include "net/offload_pool.hpp"
 #include "net/reactor.hpp"
 
@@ -32,7 +33,11 @@ struct NotifyStoreConfig {
 //
 // The offload pool resolves host names and must be stopped before this is destroyed. Calls
 // still outstanding at destruction are dropped without their callbacks.
-class PgNotifyStore final : public core::ports::IConnectivityStore {
+//
+// take_video_events() deletes the rows it answers (migration 0023), skipping those another node's
+// call holds, so each change goes to one node.
+class PgNotifyStore final : public core::ports::IConnectivityStore,
+                            public core::ports::IVideoEvents {
     class Impl;
     struct Token {
         explicit Token() = default;
@@ -60,6 +65,9 @@ public:
               core::ports::NotifyCallback<std::vector<core::ports::SocketDevice>> done) override;
     void message_targets(const core::RoomId& room, const core::UserId& sender,
                          core::ports::NotifyCallback<std::vector<core::UserId>> done) override;
+    void take_video_events(
+        std::size_t max,
+        core::ports::NotifyCallback<std::vector<core::ports::VideoEvent>> done) override;
 
 private:
     std::unique_ptr<Impl> impl_;

@@ -123,3 +123,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0117](0117-a-socket-may-stop-following-a-room.md) | A socket may stop following a room | Accepted |
 | [0118](0118-a-history-page-around-a-seq.md) | A history page around a seq | Accepted |
 | [0119](0119-one-visibility-for-many-videos.md) | One visibility for many videos | Accepted |
+| [0120](0120-video-events-on-the-notification-hook.md) | Video events on the notification hook | Accepted |

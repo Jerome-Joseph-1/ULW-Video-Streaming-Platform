@@ -102,6 +102,11 @@ public:
     void wait(core::Millis d) override {
         ulw::test::pump_for(*reactor_, std::chrono::milliseconds(d.count()));
     }
+    infra::postgres::PgNotifyStore& pg() { return *store_; }
+    void exec(infra::postgres::Sql sql) {
+        auto conn = db_->session();
+        ASSERT_TRUE(conn.exec(sql, Params{})) << sql.c_str();
+    }
 
 private:
     ulw::test::FakeClock clock_;
@@ -164,6 +169,89 @@ TEST(PgNotifyStoreTest, ConcurrentAsksTellEachMemberOnce) {
     }
     std::ranges::sort(expected);
     EXPECT_EQ(told, expected);
+}
+
+using VideoEvents = core::ports::NotifyResult<std::vector<core::ports::VideoEvent>>;
+
+VideoEvents take(PgNotifyHarness& harness, std::size_t max = core::ports::kMaxVideoEvents) {
+    std::optional<VideoEvents> taken;
+    harness.pg().take_video_events(max, [&](VideoEvents r) noexcept { taken = std::move(r); });
+    EXPECT_TRUE(ulw::test::pump_until(
+        harness.reactor(), [&] { return taken.has_value(); }, std::chrono::seconds(10)));
+    return taken.value_or(std::unexpected(core::ports::NotifyError::Unavailable));
+}
+
+// ADR-0120: a video that becomes ready or failed is one change, taken once, oldest first.
+TEST(PgNotifyStoreTest, AVideoThatSettlesIsTakenOnce) {
+    auto harness = PgNotifyHarness::open();
+    if (::testing::Test::IsSkipped() || ::testing::Test::HasFatalFailure()) {
+        return;
+    }
+    ASSERT_NE(harness, nullptr);
+    harness->exec(R"sql(INSERT INTO videos (id, owner_id, title, state) VALUES
+        ('01890a5d-ac96-774b-bcce-b302099a0001', 'alice', 'one', 'processing'),
+        ('01890a5d-ac96-774b-bcce-b302099a0002', 'bob', 'two', 'processing'),
+        ('01890a5d-ac96-774b-bcce-b302099a0003', 'carol', 'three', 'uploading'))sql");
+    // Nothing settled yet: a change of title, or to processing, is not one.
+    harness->exec("UPDATE videos SET title = 'renamed'");
+    harness->exec("UPDATE videos SET state = 'processing' WHERE owner_id = 'carol'");
+    const auto none = take(*harness);
+    ASSERT_TRUE(none);
+    EXPECT_TRUE(none->empty());
+
+    harness->exec("UPDATE videos SET state = 'ready', duration_ms = 6000, version = 2 "
+                  "WHERE owner_id = 'alice'");
+    harness->exec("UPDATE videos SET state = 'failed', error_reason = 'bad input', version = 4 "
+                  "WHERE owner_id = 'bob'");
+    // A deleted video's change is nobody's business.
+    harness->exec("UPDATE videos SET deleted_at = now() WHERE owner_id = 'carol'");
+    harness->exec("UPDATE videos SET state = 'ready', duration_ms = 1 WHERE owner_id = 'carol'");
+    // Setting the same state again is no change.
+    harness->exec("UPDATE videos SET state = 'ready' WHERE owner_id = 'alice'");
+
+    const auto first = take(*harness, 1);
+    ASSERT_TRUE(first);
+    ASSERT_EQ(first->size(), 1U);
+    const core::ports::VideoEvent& ready = first->front();
+    EXPECT_EQ(ready.video.to_string(), "01890a5d-ac96-774b-bcce-b302099a0001");
+    EXPECT_EQ(ready.owner.view(), "alice");
+    EXPECT_TRUE(ready.ready);
+    EXPECT_EQ(ready.version, 2);
+    EXPECT_EQ(ready.duration, core::Millis{6000});
+    EXPECT_FALSE(ready.error_reason);
+    EXPECT_GT(ready.at_ms, 1'700'000'000'000);
+
+    const auto rest = take(*harness);
+    ASSERT_TRUE(rest);
+    ASSERT_EQ(rest->size(), 1U);
+    EXPECT_EQ(rest->front().owner.view(), "bob");
+    EXPECT_FALSE(rest->front().ready);
+    EXPECT_EQ(rest->front().error_reason, "bad input");
+    EXPECT_FALSE(rest->front().duration);
+
+    const auto after = take(*harness);
+    ASSERT_TRUE(after);
+    EXPECT_TRUE(after->empty());
+    EXPECT_FALSE(take(*harness, 0));
+}
+
+// Changes nobody takes are gone an hour on, at the next one.
+TEST(PgNotifyStoreTest, ChangesNobodyTakesAreForgottenAnHourOn) {
+    auto harness = PgNotifyHarness::open();
+    if (::testing::Test::IsSkipped() || ::testing::Test::HasFatalFailure()) {
+        return;
+    }
+    ASSERT_NE(harness, nullptr);
+    harness->exec(R"sql(INSERT INTO videos (id, owner_id, title, state) VALUES
+        ('01890a5d-ac96-774b-bcce-b302099a0001', 'alice', 'one', 'processing'),
+        ('01890a5d-ac96-774b-bcce-b302099a0002', 'bob', 'two', 'processing'))sql");
+    harness->exec("UPDATE videos SET state = 'ready', duration_ms = 1 WHERE owner_id = 'alice'");
+    harness->exec("UPDATE video_events SET at = now() - interval '61 minutes'");
+    harness->exec("UPDATE videos SET state = 'ready', duration_ms = 1 WHERE owner_id = 'bob'");
+    const auto taken = take(*harness);
+    ASSERT_TRUE(taken);
+    ASSERT_EQ(taken->size(), 1U);
+    EXPECT_EQ(taken->front().owner.view(), "bob");
 }
 
 } // namespace

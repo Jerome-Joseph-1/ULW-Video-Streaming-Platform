@@ -18,6 +18,7 @@
 #include "presence.hpp"
 #include "service_api.hpp"
 #include "token_bucket.hpp"
+#include "video_relay.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -140,6 +141,9 @@ struct Deps {
     Notifier* notifier = nullptr;
     // Where the notifier's events go, for its counters; set with the notifier.
     const HookSender* hook = nullptr;
+    // Videos that became ready or failed (ADR-0120), on the same hook; set with the notifier.
+    // Started by the server, stopped by its drain; must outlive it.
+    VideoRelay* videos = nullptr;
 };
 
 struct Counters {

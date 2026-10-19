@@ -398,7 +398,9 @@ newest first (by creation, then by id, so the order is stable across pages). Its
 
 Each video is the [video object](#endpoints) as its owner sees it (`visibility`, `progress` while
 processing, and `error_reason` when failed), with `created_at` in Unix seconds. A backend that
-shows its users' uploads polls this page for their progress instead of one video at a time. `next` is `null` on the last page.
+shows its users' uploads polls this page for their progress instead of one video at a time. With
+the notification hook on, it also hears `video_ready` and `video_failed` as they happen
+([Notifications](notifications.md#video_ready-and-video_failed)). `next` is `null` on the last page.
 A user with no videos, or one who never signed in, has an empty list. Each page is read on its
 own: a video created after the first page is not on the later ones, one deleted meanwhile is
 left out, and none is listed twice.

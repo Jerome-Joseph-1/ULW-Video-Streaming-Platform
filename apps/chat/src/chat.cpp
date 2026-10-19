@@ -130,6 +130,9 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
         calls_.watch_rings(deps_.notifier);
         deps_.notifier->start();
     }
+    if (deps_.videos != nullptr) {
+        deps_.videos->start();
+    }
 }
 
 ChatServer::~ChatServer() {
@@ -308,6 +311,10 @@ void ChatServer::begin_drain() noexcept {
     // A release that fails leaves the rooms to go stale, which costs the other nodes
     // rt::kOwnerStaleAfter; the drain goes on either way.
     deps_.router.release_rooms([this](rt::StoreResult<void>) noexcept { released_ = true; });
+    // Another node takes the videos' changes from here on.
+    if (deps_.videos != nullptr) {
+        deps_.videos->stop();
+    }
     // The registry forgets this node's sockets now rather than when its lease lapses: its members
     // are reconnecting elsewhere, and a ring meanwhile should push to them.
     if (deps_.notifier != nullptr) {
@@ -350,10 +357,12 @@ void ChatServer::retire(net::Slab<Session>::Handle handle) noexcept {
 
 namespace {
 
-std::string render_notify_metrics(const Notifier* notifier, const HookSender* hook) {
+std::string render_notify_metrics(const Notifier* notifier, const HookSender* hook,
+                                  const VideoRelay* videos) {
     if (notifier == nullptr || hook == nullptr) {
         return "notify_enabled 0\n";
     }
+    const VideoRelayCounters v = videos != nullptr ? videos->counters() : VideoRelayCounters{};
     const NotifyCounters& n = notifier->counters();
     const SenderCounters& h = hook->counters();
     return std::format("notify_enabled 1\n"
@@ -372,11 +381,13 @@ std::string render_notify_metrics(const Notifier* notifier, const HookSender* ho
                        "notify_sockets_unwritten {}\n"
                        "notify_ringing_devices_unknown_total {}\n"
                        "notify_message_lookups_failed_total {}\n"
-                       "notify_allocation_failures_total {}\n",
+                       "notify_allocation_failures_total {}\n"
+                       "notify_video_events_total {}\n"
+                       "notify_video_takes_failed_total {}\n",
                        h.sent, h.dropped, h.failed, hook->queued(), h.requests - h.failed_requests,
                        h.failed_requests, n.renewals, n.renew_failures, n.syncs, n.sync_failures,
                        n.resyncs, notifier->sockets(), notifier->unwritten(), n.lookups_unknown,
-                       n.message_failures, n.allocation_failures);
+                       n.message_failures, n.allocation_failures, v.events, v.take_failures);
 }
 
 } // namespace
@@ -573,7 +584,7 @@ std::string ChatServer::render_metrics() const {
            // The key directory (ADR-0102), on the node the asking client is on.
            render_directory_metrics(directory_.counters()) +
            // The notification hook (ADR-0111), when it is set.
-           render_notify_metrics(deps_.notifier, deps_.hook);
+           render_notify_metrics(deps_.notifier, deps_.hook, deps_.videos);
 }
 
 } // namespace chat
