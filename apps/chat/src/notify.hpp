@@ -93,6 +93,8 @@ public:
     void on_timeout() noexcept override;
 
     [[nodiscard]] const NotifyCounters& counters() const noexcept { return counters_; }
+    // The registry this notifier writes, for those who read it.
+    [[nodiscard]] core::ports::IConnectivityStore& store() noexcept { return store_; }
     // Distinct (user, device) pairs with a socket here, and those the registry may not have yet.
     [[nodiscard]] std::size_t sockets() const noexcept;
     [[nodiscard]] std::size_t unwritten() const noexcept { return dirty_.size(); }

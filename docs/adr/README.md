@@ -127,3 +127,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0121](0121-a-public-video-plays-without-a-token.md) | A public video plays without a token | Accepted |
 | [0122](0122-ping-on-the-socket.md) | Ping on the socket | Accepted |
 | [0123](0123-the-service-sets-a-members-role.md) | The service sets a member's role | Accepted |
+| [0124](0124-the-service-asks-who-is-connected.md) | The service asks who is connected | Accepted |

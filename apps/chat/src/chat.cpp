@@ -126,6 +126,7 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     chat_.also_tell(&calls_);
     chat_.also_tell(&presence_);
     if (deps_.notifier != nullptr) {
+        service_api_.see_connections(&deps_.notifier->store());
         chat_.watch_messages(deps_.notifier);
         calls_.watch_rings(deps_.notifier);
         deps_.notifier->start();

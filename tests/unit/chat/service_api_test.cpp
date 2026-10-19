@@ -3,6 +3,7 @@
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
 #include "infra/messages/memory_message_store.hpp"
+#include "infra/notify/memory_connectivity.hpp"
 #include "net/reactor_factory.hpp"
 #include "net/socket.hpp"
 
@@ -510,6 +511,50 @@ TEST_F(ServiceApiTest, TheServiceSetsAMembersRole) {
         ask("set_role", R"({"room":")" + direct + R"(","user":"bob","role":"admin"})");
     EXPECT_EQ(not_group.status, 400);
     EXPECT_EQ(not_group.field("reason"), "bad_room");
+}
+
+// ADR-0124: who is connected, and on which devices, from the hook's registry.
+TEST_F(ServiceApiTest, PresenceSaysWhoIsConnectedAndOnWhichDevices) {
+    const Answer off = ask("presence", R"({"users":["alice"]})");
+    EXPECT_EQ(off.status, 409);
+    EXPECT_EQ(off.field("reason"), "notify_off");
+
+    infra::notify::MemoryConnectivity registry(*reactor_, clock_, core::ports::NotifyTiming{});
+    const auto wait = [&](auto call) {
+        bool done = false;
+        call([&done](auto) noexcept { done = true; });
+        ASSERT_TRUE(pump_until(*reactor_, [&] { return done; }));
+    };
+    wait([&](auto done) { registry.renew(7, std::move(done)); });
+    const auto phone = core::DeviceId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f001");
+    ASSERT_TRUE(phone);
+    wait([&](auto done) {
+        registry.sync(7,
+                      {{.user = user("alice"), .device = *phone},
+                       {.user = user("bob"), .device = std::nullopt}},
+                      {}, std::move(done));
+    });
+    api_->see_connections(&registry);
+    const Answer a = ask("presence", R"({"users":["carol","alice","bob","alice"]})");
+    EXPECT_EQ(a.status, 200) << a.body;
+    EXPECT_EQ(
+        a.body,
+        R"({"type":"presence","users":[)"
+        R"({"user":"carol","connected":false,"devices":[]},)"
+        R"({"user":"alice","connected":true,"devices":["01a0eb86-6cca-7dce-84cc-3bb47615f001"]},)"
+        R"({"user":"bob","connected":true,"devices":[]}]})");
+    std::string many = R"({"users":[)";
+    for (int i = 0; i < 65; ++i) {
+        many += std::format(R"({}"u{}")", i == 0 ? "" : ",", i);
+    }
+    many += "]}";
+    for (const std::string& body :
+         {std::string(R"({"users":[]})"), many, std::string(R"({"users":["alice"],"x":1})")}) {
+        const Answer bad = ask("presence", body);
+        EXPECT_EQ(bad.status, 400) << body;
+        EXPECT_EQ(bad.field("reason"), "malformed") << body;
+    }
+    api_->see_connections(nullptr);
 }
 
 TEST_F(ServiceApiTest, ChangesTheStoreRefusesAreAnsweredWithWhy) {

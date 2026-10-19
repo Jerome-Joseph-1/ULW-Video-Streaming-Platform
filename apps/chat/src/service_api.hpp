@@ -3,6 +3,7 @@
 #include "core/ports/auth.hpp"
 #include "core/ports/clock.hpp"
 #include "core/ports/message_store.hpp"
+#include "core/ports/notify.hpp"
 #include "core/util/time.hpp"
 #include "net/ip_address.hpp"
 #include "net/reactor.hpp"
@@ -107,6 +108,12 @@ public:
     // Closes every connection and accepts no more: for a drain.
     void stop() noexcept;
 
+    // The notification hook's registry of who is connected where (ADR-0111), which `presence`
+    // reads (ADR-0124); null while the hook is off, and `presence` is then refused.
+    void see_connections(core::ports::IConnectivityStore* connectivity) noexcept {
+        connectivity_ = connectivity;
+    }
+
     [[nodiscard]] const ServiceApiCounters& counters() const noexcept { return counters_; }
     [[nodiscard]] std::size_t connections() const noexcept { return connections_.size(); }
 
@@ -120,6 +127,7 @@ private:
     core::ports::IJwtVerifier& verifier_;
     core::ports::IMessageStore& store_;
     IRooms* rooms_;
+    core::ports::IConnectivityStore* connectivity_ = nullptr;
     ServiceApiLimits limits_;
     ServiceApiCounters counters_;
     TokenBucket bucket_;
