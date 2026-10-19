@@ -53,6 +53,9 @@ enum class Op : std::uint8_t {
     Rooms,
     Members,
     DeclineCall,
+    CancelCall,
+    EndCall,
+    LeaveCall,
     CallStatus,
 };
 
@@ -61,7 +64,7 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 9> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 12> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
@@ -70,6 +73,9 @@ Op op_of(std::string_view target) noexcept {
         {"rooms", Op::Rooms},
         {"members", Op::Members},
         {"decline_call", Op::DeclineCall},
+        {"cancel_call", Op::CancelCall},
+        {"end_call", Op::EndCall},
+        {"leave_call", Op::LeaveCall},
         {"call_status", Op::CallStatus},
     }};
     const auto* found = std::ranges::find(kOps, name, &std::pair<std::string_view, Op>::first);
@@ -541,7 +547,16 @@ private:
             started = members(*json);
             break;
         case Op::DeclineCall:
-            started = decline_call(*json);
+            started = signal_call(*json, CallSignal::Decline, "call_declined");
+            break;
+        case Op::CancelCall:
+            started = signal_call(*json, CallSignal::Cancel, "call_cancelled");
+            break;
+        case Op::EndCall:
+            started = signal_call(*json, CallSignal::End, "call_ended");
+            break;
+        case Op::LeaveCall:
+            started = signal_call(*json, CallSignal::Leave, "call_left");
             break;
         case Op::CallStatus:
             started = call_status(*json);
@@ -880,7 +895,7 @@ private:
 
     // What the owner answered an ask about a call, as the backend sees it; `done` writes the
     // answer to the outcomes the ask is for.
-    using CallDone = std::move_only_function<bool(std::string& out, CallOutcome outcome)>;
+    using CallDone = std::move_only_function<bool(std::string& out, const CallAnswer& answer)>;
 
     // Joins the room here for as long as the ask takes, as a client's socket would be, asks its
     // owner, and leaves.
@@ -930,7 +945,7 @@ private:
         }
         try {
             std::string out;
-            if (done(out, decoded->outcome)) {
+            if (done(out, *decoded)) {
                 ++(call_read_ ? api_.counters_.reads : api_.counters_.changes);
                 answered(Status::Ok, out);
                 return;
@@ -973,7 +988,11 @@ private:
         asking_.reset();
     }
 
-    Parsed<void> decline_call(const core::json::Value& body) {
+    // A member's decline, cancel, end or leave of the room's call, as their socket would ask it
+    // (ADR-0111, ADR-0114): checked against the member list on the owner, and allowed only in the
+    // call's state the socket's would be. Answered with the event everyone hears.
+    Parsed<void> signal_call(const core::json::Value& body, CallSignal signal,
+                             std::string_view type) {
         if (!only(body, {"room", "call", "user"})) {
             return std::unexpected(kMalformed);
         }
@@ -989,17 +1008,17 @@ private:
         if (!user) {
             return std::unexpected(user.error());
         }
-        // The owner's own decline, from a member as from their socket: checked against the
-        // member list there, and allowed only to a callee the call still rings.
         return ask_call(
             *room,
-            encode_request(
-                CallSignalRequest{.user = *user, .signal = CallSignal::Decline, .call = *call}),
-            [room = *room, call = *call, user = *user](std::string& out, CallOutcome outcome) {
-                if (outcome != CallOutcome::Done) {
+            encode_request(CallSignalRequest{.user = *user, .signal = signal, .call = *call}),
+            [room = *room, call = *call, user = *user, type](std::string& out,
+                                                             const CallAnswer& answer) {
+                if (answer.outcome != CallOutcome::Done) {
                     return false;
                 }
-                out += R"({"type":"call_declined","room":")";
+                out += R"({"type":")";
+                out += type;
+                out += R"(","room":")";
                 out += room.to_string();
                 out += R"(","call":")";
                 out += call.to_string();
@@ -1018,6 +1037,26 @@ private:
         if (!room) {
             return std::unexpected(room.error());
         }
+        if (body.find("call") == nullptr) {
+            // The room's call whatever its id, and who is in it (ADR-0114).
+            if (body.find("user") != nullptr) {
+                return std::unexpected(kMalformed);
+            }
+            return ask_call(
+                *room, encode_request(CallCurrentRequest{}),
+                [room = *room](std::string& out, const CallAnswer& answer) {
+                    if (answer.outcome == CallOutcome::NoCall) {
+                        write_call_status(out, room, std::nullopt);
+                        return true;
+                    }
+                    if (answer.outcome != CallOutcome::Current || !answer.snapshot) {
+                        return false;
+                    }
+                    write_call_status(out, room, answer.snapshot);
+                    return true;
+                },
+                /*read=*/true);
+        }
         auto call = call_of(body);
         if (!call) {
             return std::unexpected(call.error());
@@ -1032,9 +1071,9 @@ private:
         }
         return ask_call(
             *room, encode_request(CallStatusRequest{.call = *call, .user = user}),
-            [room = *room, call = *call](std::string& out, CallOutcome outcome) {
+            [room = *room, call = *call](std::string& out, const CallAnswer& answer) {
                 std::string_view status;
-                switch (outcome) {
+                switch (answer.outcome) {
                 case CallOutcome::Ringing:
                     status = "ringing";
                     break;

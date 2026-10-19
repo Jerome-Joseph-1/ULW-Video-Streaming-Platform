@@ -208,10 +208,40 @@ What the ring does not cover:
   call, which rings as a first ticket does: the ticket names the new `call`. Within 10 s of
   someone else's ticket in the call, it joins it as it stands, since that device may still be
   connecting.
+- **Joining.** A socket that `join`s the room while its call rings that socket's user hears
+  `call_ringing` at once, without waiting for the next announcement: a page that reloads, a
+  socket that reconnects or a phone that wakes up. A socket that has joined no room still waits
+  for the next announcement (within 15 s).
 - **A change of the room's owner** (a deploy, a node failure) forgets a ringing call without a
   word: devices stop at `expires_at`, and a decline or cancel then is `no_call`. A callee who
   answers by asking for a ticket rings the caller as a new call, which the caller's client,
   connected to LiveKit and waiting, answers as above.
+
+## After a reload
+
+<!-- apps/chat/src/chat_service.cpp (ChatService::call_status, ChatService::statused), apps/chat/src/call.cpp (CallHandler::current), apps/chat/src/envelope.cpp (write_call_status), docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md -->
+
+A page that reloads, or a socket that reconnects, does not know the room's call: ask, on a socket
+that joined the room, with `{"type":"call_status","room":...}`. The room's owner answers:
+
+```json
+{"type":"call_status","room":"...","call":"01a0f3c2-55d1-7e2a-9b3c-4d5e6f708192","status":"answered","kind":"direct","caller":"user-42","ringing":[],"joined":["user-42","user-7"],"connected":["user-42"],"started_at":1790000000,"answered_at":1790000007,"expires_at":1790000045}
+{"type":"call_status","room":"...","call":null,"status":"none"}
+```
+
+| Field | Meaning |
+|---|---|
+| `status` | `ringing` (nobody but the caller has come yet), `answered` (on), or `none` (the room has no call; `call` is `null` and nothing else follows) |
+| `kind`, `caller` | `direct` or `group`, and who started it |
+| `ringing` | Who it still rings |
+| `joined` | Who holds a ticket in it and has not left |
+| `connected` | Who LiveKit lists in its room now; `null` when LiveKit could not say |
+| `started_at`, `answered_at`, `expires_at` | Unix seconds: its first ticket; when someone other than the caller first came (`null` until then); when it stops ringing anyone still rung |
+
+So a reloaded caller shows "Calling…" again, a reloaded callee shows "Rejoin" (ask for a ticket,
+which joins the call), and an inbox shows "Live" while `connected` is not empty. It is counted
+with joins. The service API answers the same to `call_status` with `room` alone
+([chat.md](chat.md#the-service-api)).
 
 ## Group calls
 

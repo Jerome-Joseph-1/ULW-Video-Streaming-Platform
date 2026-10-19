@@ -234,6 +234,8 @@ public:
     // Declines, cancels or ends the room's call, on its owner (ADR-0091), for a client in the
     // room. Charged as a join, as a ticket is: each costs the owner a store read.
     void call_move(ClientId id, const CallMove& move);
+    // The room's call, whatever its id (ADR-0114), on a socket that joined the room.
+    void call_status(ClientId id, const CallStatusQuery& query);
     // Member lists as their users change them (ADR-0096, membership.cpp). None needs the room
     // joined: the store decides from the list itself, under the room's lock. Changes are charged
     // to the user's membership allowance, listings to the join allowance (each is a read of the
@@ -338,6 +340,10 @@ private:
     void subscribe(Room& room, ClientId id, const Join& join);
     void called(ClientId id, const core::RoomId& room, const std::optional<CallId>& answering,
                 std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
+    // A call_status answer from the room's owner: `asked` false when the join asked it, which
+    // tells the socket only of a ring that is ringing it.
+    void statused(ClientId id, const core::RoomId& room, bool asked,
+                  std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
     void moved(ClientId id, const CallMove& move,
                std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
     // The client in the room, charged a join; told why not and nullptr otherwise.

@@ -186,6 +186,11 @@ struct CallMove {
     std::optional<core::UserId> target = std::nullopt;
 };
 
+// call_status: the room's call, whatever its id, and who is in it (ADR-0114).
+struct CallStatusQuery {
+    core::RoomId room;
+};
+
 // A page of rooms or of members (core::ports::kMaxListPage at most).
 inline constexpr std::size_t kMaxListLimit = 100;
 inline constexpr std::size_t kDefaultListLimit = 50;
@@ -264,9 +269,9 @@ struct ClaimKeyPackages {
 using DirectoryCommand =
     std::variant<RegisterDevice, RetireDevice, PublishKeyPackages, ListDevices, ClaimKeyPackages>;
 
-using Command =
-    std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, OpenDirect, CreateGroup,
-                 AddMembers, RemoveMember, LeaveRoom, ListRooms, ListMembers, DirectoryCommand>;
+using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery,
+                             OpenDirect, CreateGroup, AddMembers, RemoveMember, LeaveRoom,
+                             ListRooms, ListMembers, DirectoryCommand>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -324,6 +329,10 @@ void write_ticket(std::string& out, const core::RoomId& room,
 void write_call_event(std::string& out, const CallNotice& notice);
 // A ticket answering a call that is over: no_call, naming the call it answered.
 void write_call_over(std::string& out, const core::RoomId& room, const CallId& call);
+// The room's call as its owner knows it, or that it has none (ADR-0114): the socket's and the
+// service API's call_status alike.
+void write_call_status(std::string& out, const core::RoomId& room,
+                       const std::optional<CallSnapshot>& snapshot);
 // A call refused, with a hint of when to ask again for a refusal a retry may cure.
 void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,
                       std::optional<core::Millis> retry_after);

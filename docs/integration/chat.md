@@ -54,6 +54,7 @@ Client to server:
 | `call_decline`, `call_cancel`, `call_end` | `room`, `call` | Turn a ringing call down (a callee), give up ringing (the caller), or end an answered call (either member of a direct chat; a group call's caller, for everyone), for a room this connection has joined. See [calls.md](calls.md#ringing). |
 | `call_leave` | `room`, `call` | Leave a group call, which goes on for the others. See [calls.md](calls.md#group-calls). |
 | `call_expel` | `room`, `call`, `user` | A group call's caller puts `user` out of the call. See [calls.md](calls.md#group-calls). |
+| `call_status` | `room` | The room's call, whatever its id, and who is in it: answered `call_status` (below). See [calls.md](calls.md#after-a-reload). |
 | `open_direct`, `create_group`, `add_members`, `remove_member`, `leave`, `rooms`, `members` | See [Changing member lists](#changing-member-lists) | A user's direct and group chats, and who is in them. |
 | `register_device`, `retire_device`, `publish_key_packages`, `devices`, `claim_key_packages` | See [e2ee.md](e2ee.md#key-directory) | The MLS key directory: a user's devices and their key packages. |
 
@@ -464,7 +465,9 @@ alive; requests on one connection are answered in order, one at a time.
 | `rooms` | `user`, optional `after` (a room id), `limit` (1 to 100, default 50) | `{"type":"rooms","rooms":[{"room","kind","role","peer"}],"more":..}`, as the socket's `rooms` answers that user. |
 | `members` | `room`, optional `after` (a user id), `limit` (1 to 100, default 50) | `{"type":"members","room":..,"members":[{"user","role"}],"more":..}` for any room; a room nobody is listed in answers no members. |
 | `decline_call` | `room`, `call`, `user` | `{"type":"call_declined","room":..,"call":..,"by":<user>}`: the user's own decline of a call ringing them, from a notification ([notifications.md](notifications.md#answering-and-declining-from-a-notification)). `409` `no_call` or `not_member` as their socket's would be |
+| `cancel_call`, `end_call`, `leave_call` | `room`, `call`, `user` | `{"type":"call_cancelled"\|"call_ended"\|"call_left","room":..,"call":..,"by":<user>}`: the user's own `call_cancel`, `call_end` or `call_leave`, for a page that is going away and reaches your backend (`navigator.sendBeacon`) rather than chat ([calls.md](calls.md#ringing)). Checked as their socket's would be; `409` `no_call` or `not_member` likewise |
 | `call_status` | `room`, `call`, optional `user` | `{"type":"call_status","room":..,"call":..,"status":"ringing"\|"answered"\|"over"}`: whether the call still rings (for `user`), from the room's owner |
+| `call_status` | `room` alone | The room's call whatever its id, as the socket's `call_status` answers ([calls.md](calls.md#after-a-reload)) |
 
 Changes go through exactly the database statements users' commands do, under the room's lock:
 the same kinds (a direct chat's pair never changes), the 100-member cap, the 1000-room cap on

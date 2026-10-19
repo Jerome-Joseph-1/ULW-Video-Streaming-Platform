@@ -3,6 +3,31 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
+## Unreleased
+
+<!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md -->
+
+Additive (versioning rule 1), with calls that last as long as someone is in them.
+
+| Before | Now |
+|---|---|
+| A `message` frame carried no time | It carries `at`, Unix milliseconds, the same live, resumed and from history ([Chat](chat.md#messages)) |
+| A direct call rang on after its caller's page went away, and an answer could land in an empty call | The ring ends within about 20 s, `call_cancelled` with `reason: "caller_left"`; an answer then is `no_call` ([Calls](calls.md#ringing)) |
+| An answered call was forgotten 2 minutes after its last ticket; a group ring that ran out ended the call | A call lasts while anyone is in its LiveKit room, and ends with `call_ended` (no `by`) when nobody is; a group call nobody answered stays joinable while its caller is in it |
+| A second call within 2 minutes of an abandoned one joined it in silence | It ends the abandoned call (`call_ended`) and rings |
+| A socket that joined mid-ring heard the ring at the next announcement, up to 15 s later | It hears `call_ringing` at once |
+| The room's call could be read only by its id, from the backend | `call_status` with `room` alone, on the socket and the service API, answers the room's call and who is in it ([Calls](calls.md#after-a-reload)) |
+| Only a decline could be made by the backend | `cancel_call`, `end_call` and `leave_call` too ([Chat](chat.md#the-service-api)) |
+
+What to do:
+
+- **Clients:** show `at` instead of the time a message arrived. Treat `call_cancelled` with
+  `reason: "caller_left"` as the caller gone, and `call_ended` with no `by` as the call over.
+  Follow calls.md's advice for a page that unloads. Ask `call_status` after a reload.
+- **Backends:** pass a leaving page's beacon on with `cancel_call` or `end_call`.
+- **Operators:** chat's node channel moves to version 6: roll this release out with the chat
+  Deployment set to `Recreate` (RUNBOOK.md, section 3). No migration.
+
 ## 2026-10-15: notification events for members who are not connected (v1.2.0)
 
 <!-- apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender), apps/chat/src/session.cpp (device_of), apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/call.cpp (CallStatusRequest), migrations/0022_notify.sql, deploy/kubernetes/components/notifications/kustomization.yaml, docs/adr/0111-notification-events-for-members-not-connected.md -->
