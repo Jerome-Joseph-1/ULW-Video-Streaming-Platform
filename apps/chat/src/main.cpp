@@ -32,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <format>
 #include <fstream>
 #include <memory>
 #include <optional>
@@ -427,11 +428,13 @@ int run() {
             return fail("ULW_NOTIFY_URL", "libcurl multi for the hook failed to start");
         }
         s.notify_multi = std::move(*multi);
-        s.hook = std::make_unique<chat::HookSender>(*s.reactor, *s.notify_multi, s.clock,
-                                                    notify->url, notify->secret);
-        // This run's tag in the registry: another run of the same pod is another node there.
+        // This run's tag in the registry: another run of the same pod is another node there. The
+        // hook's requests name it too, as their run (ADR-0130).
         std::array<std::byte, sizeof(std::uint64_t)> tag{};
         s.random.fill(tag);
+        s.hook = std::make_unique<chat::HookSender>(
+            *s.reactor, *s.notify_multi, s.clock, notify->url, notify->secret,
+            std::format("{:016x}", std::bit_cast<std::uint64_t>(tag)));
         chat::NotifyLimits notify_limits;
         notify_limits.message_present = notify->message_present;
         s.notifier = std::make_unique<chat::Notifier>(*s.reactor, *s.notify_store, *s.hook, s.clock,

@@ -41,7 +41,7 @@ protected:
 
     void make(const std::string& url, chat::SenderLimits limits = {}) {
         sender = std::make_unique<chat::HookSender>(*reactor, *multi, clock, url,
-                                                    std::string(kSecret), limits);
+                                                    std::string(kSecret), "run-1", limits);
     }
     bool idle() {
         return pump_until(
@@ -80,8 +80,8 @@ TEST_F(NotifySenderTest, EventsGoOutBatchedAndSignedInTheOrderOffered) {
     EXPECT_EQ(requests[0].path(), "/ulw/events");
     EXPECT_EQ(requests[0].header("content-type").value_or(""), "application/json");
     // The first went at once, alone; the two that waited behind it went together.
-    EXPECT_EQ(requests[0].body, R"({"events":[{"n":1}]})");
-    EXPECT_EQ(requests[1].body, R"({"events":[{"n":2},{"n":3}]})");
+    EXPECT_EQ(requests[0].body, R"({"run":"run-1","seq":1,"lost":0,"events":[{"n":1}]})");
+    EXPECT_EQ(requests[1].body, R"({"run":"run-1","seq":2,"lost":0,"events":[{"n":2},{"n":3}]})");
     for (const ServedRequest& r : requests) {
         const auto seconds =
             std::chrono::duration_cast<std::chrono::seconds>(clock.wall_now().time_since_epoch())
@@ -133,6 +133,30 @@ TEST_F(NotifySenderTest, ARefusedOrSlowRequestDropsItsEventsAndTheNextGoesOut) {
     EXPECT_EQ(sender->counters().failed, 2U);
     EXPECT_EQ(sender->counters().failed_requests, 2U);
     EXPECT_EQ(sender->counters().sent, 1U);
+}
+
+// ADR-0130: each request says its run and seq, and how many events were lost since the last
+// one went out, so that the receiver sees what it never got.
+TEST_F(NotifySenderTest, EveryRequestSaysItsSeqAndWhatWasLostBeforeIt) {
+    int served = 0;
+    const HttpTestServer receiver([&served](const ServedRequest&) {
+        ++served;
+        return Reply{.status = served == 1 ? 500 : 204, .headers = {}, .body = {}};
+    });
+    make(receiver.base_url(), {.max_queued = 1, .batch = 1});
+    sender->offer(R"({"n":1})");
+    sender->offer(R"({"n":2})");
+    // The queue holds one: this one is lost.
+    sender->offer(R"({"n":3})");
+    ASSERT_TRUE(idle());
+    sender->offer(R"({"n":4})");
+    ASSERT_TRUE(idle());
+    const auto requests = receiver.requests();
+    ASSERT_EQ(requests.size(), 3U);
+    EXPECT_EQ(requests[0].body, R"({"run":"run-1","seq":1,"lost":0,"events":[{"n":1}]})");
+    // The full queue's one and the refused request's, told with the next request.
+    EXPECT_EQ(requests[1].body, R"({"run":"run-1","seq":2,"lost":2,"events":[{"n":2}]})");
+    EXPECT_EQ(requests[2].body, R"({"run":"run-1","seq":3,"lost":0,"events":[{"n":4}]})");
 }
 
 TEST_F(NotifySenderTest, AnUnreachableReceiverFailsWithoutBlockingTheCaller) {

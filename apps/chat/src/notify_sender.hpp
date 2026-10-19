@@ -52,12 +52,15 @@ struct SenderCounters {
                                            std::string_view body);
 
 // One request at a time, so a node's events arrive in the order it made them; each request
-// carries up to SenderLimits::batch events as {"events":[...]}, signed. Nothing is retried: a
-// request that fails drops its events (at most once). Reactor thread only.
+// carries up to SenderLimits::batch events as {"run":..,"seq":..,"lost":..,"events":[...]},
+// signed. Nothing is retried: a request that fails drops its events (at most once). `run` names
+// this run of the node; `seq` counts its requests from 1, so a request that never arrived is a
+// gap the receiver sees; `lost` counts the events this run dropped since the previous request it
+// sent, a full queue's and a failed request's (ADR-0130). Reactor thread only.
 class HookSender final : public IEventSink {
 public:
     HookSender(net::IReactor& reactor, infra::curl::Multi& multi, const core::ports::IClock& clock,
-               std::string url, std::string secret, SenderLimits limits = {});
+               std::string url, std::string secret, std::string run, SenderLimits limits = {});
     ~HookSender() override;
     HookSender(const HookSender&) = delete;
     HookSender& operator=(const HookSender&) = delete;
@@ -82,6 +85,10 @@ private:
     const core::ports::IClock& clock_;
     std::string url_;
     std::string secret_;
+    std::string run_;
+    // The last request's seq, and the events lost since a request went out.
+    std::uint64_t seq_ = 0;
+    std::uint64_t lost_ = 0;
     SenderLimits limits_;
     SenderCounters counters_;
     std::deque<std::string> queue_;
