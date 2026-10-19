@@ -152,6 +152,8 @@ struct Counters {
     std::uint64_t upgrades = 0;
     std::uint64_t auth_failures = 0;
     std::uint64_t origin_rejections = 0;
+    // Upgrades refused on the socket, as /rt?refusals=close asks (ADR-0116).
+    std::uint64_t refused_on_socket = 0;
     std::uint64_t messages_received = 0;
     std::uint64_t protocol_errors = 0;
     std::uint64_t control_floods = 0;

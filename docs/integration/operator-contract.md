@@ -385,7 +385,7 @@ or the socket refused its options or the reactor would not take it),
 `{table="user"}` and `{table="ip_block"}`, `rate_limit_evictions_total{table="client"}`
 (ADR-0076),
 `connections_current`, `websocket_upgrades_total`, `auth_failures_total`,
-`origin_rejections_total`, `messages_received_total`, `messages_delivered_total`,
+`origin_rejections_total`, `upgrades_refused_on_socket_total` (ADR-0116), `messages_received_total`, `messages_delivered_total`,
 `messages_rate_limited_total`, `messages_deduplicated_total`, `lossy_drops_total`,
 `messages_replayed_total`, `history_messages_total`, `messages_kept_bytes`,
 `protocol_errors_total`, `control_floods_total`, `slow_consumers_total`, `stalled_readers_total`,

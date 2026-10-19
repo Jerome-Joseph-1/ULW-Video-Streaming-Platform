@@ -35,12 +35,24 @@ namespace chat {
 // Close code for a socket whose token expired: reconnect with a fresh token
 // (docs/integration/chat.md). In the range RFC 6455 section 7.4.2 leaves to applications.
 inline constexpr codec::ws::CloseCode kTokenExpired{4001};
+// With `/rt?refusals=close` (ADR-0116), an upgrade refused for the token, the origin, a limit or
+// the key server is accepted and closed at once with one of these, which a browser can read where
+// it hides an HTTP status: sign in again (as kTokenExpired), not allowed, too many (the reason
+// says when to retry), or the key server is down (retry).
+inline constexpr codec::ws::CloseCode kRefusedUnauthorized = kTokenExpired;
+inline constexpr codec::ws::CloseCode kRefusedForbidden{4003};
+inline constexpr codec::ws::CloseCode kRefusedTooMany{4029};
+inline constexpr codec::ws::CloseCode kRefusedUnavailable{4503};
 
 // The device a socket names in its upgrade's query, `/rt?device=<uuid>` (ADR-0111): nullopt when
 // it names none; an error when the value is not a UUID or is given twice. Other parameters are
 // ignored.
 [[nodiscard]] std::expected<std::optional<core::DeviceId>, std::monostate>
 device_of(std::string_view target) noexcept;
+
+// Whether the upgrade asks, `/rt?refusals=close`, to be refused on the socket rather than with an
+// HTTP status (ADR-0116). Any other value, or none, is the HTTP status, as before.
+[[nodiscard]] bool refusals_on_socket(std::string_view target) noexcept;
 
 // When a socket opened at `now` (monotonic) with a token that expires at `expires_at` stops
 // being accepted: exp plus kTokenClockSkew, on the monotonic clock. A token that outlives what
@@ -103,6 +115,8 @@ private:
     void answer_request();
     void respond(std::string_view bytes);
     void refuse_for_now();
+    // ADR-0116: the upgrade accepted, then closed at once with `code` and `reason`.
+    void refuse_on_socket(codec::ws::CloseCode code, std::string_view reason);
     void accept_upgrade(const codec::ws::UpgradeResponse& response);
     void leave_http();
     void release_request_hold() noexcept;
@@ -154,6 +168,8 @@ private:
     std::optional<core::UserId> user_;
     // What the upgrade named (device_of), told to the notifier with the user.
     std::optional<core::DeviceId> device_;
+    // refusals_on_socket.
+    bool socket_refusals_ = false;
     bool notified_ = false;
     net::IpAddress peer_;
     // ADR-0076: the direct peer's connection, for the socket's life; a forwarded client's

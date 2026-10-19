@@ -523,6 +523,7 @@ std::string ChatServer::render_metrics() const {
                        calls_.retired(), call.occupancy_checks, call.occupancy_unavailable,
                        call.resync_checks, call.expulsions_kept, call.expulsions_cleared,
                        call.announcements_dropped) +
+           std::format("upgrades_refused_on_socket_total {}\n", c.refused_on_socket) +
            // Calls that last while someone is in them (ADR-0113).
            std::format("call_rings_total{{outcome=\"caller_left\"}} {}\n"
                        "call_rings_total{{outcome=\"stale\"}} {}\n",
