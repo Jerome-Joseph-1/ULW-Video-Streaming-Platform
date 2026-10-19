@@ -30,6 +30,8 @@ What ships:
 | `overlays/production/` | An example environment pinned to a published commit, with room for a larger worker and two live streams, which stay off until its operator turns them on (step 9) |
 | `cluster/stunner/` | The STUNner gateway operator, its dataplane template, the GatewayClass and GatewayConfig: once per cluster (step 7) |
 | `cluster/seccomp/ulw-worker.json` | The worker's seccomp profile, installed on each node (step 2) |
+| `cluster/apparmor/ulw-worker` | The worker's AppArmor profile, loaded on each node that enforces AppArmor (step 2) |
+| `components/worker-apparmor/` | The component that runs the worker under that profile (step 2) |
 | `live-packager/job.yaml` | One stream's packager, a Job made from this template per stream by the gateway, which carries it in its image, or by hand; in no kustomization, so applying an overlay never creates one (step 9, docs/adr/0083, 0092) |
 
 The base carries example values (namespace `ulw`, `video.example.com`, `id.example.com`) only so
@@ -84,8 +86,9 @@ unshare --user --map-root-user --net --mount \
   permitted`, and so would the worker's start-up check. The e2e workflow sets it to `0` on its
   runner for this reason. The nodes need the same unless they run a kernel without the key:
   `echo kernel.apparmor_restrict_unprivileged_userns=0 | sudo tee /etc/sysctl.d/60-ulw-userns.conf`
-  then `sudo sysctl --system`. It is host-wide; the alternative, an AppArmor profile for the
-  worker that allows `userns`, has not been written or tested.
+  then `sudo sysctl --system`. It is host-wide. The alternative, on nodes that enforce
+  AppArmor, is the worker's own profile, which allows `userns` for the worker alone (step 2,
+  "AppArmor").
 - If the sysfs mount fails, a file is mounted over part of the node's `/sys`
   (`grep ' /sys/' /proc/self/mountinfo` shows it). The kernel then refuses a fresh sysfs in any
   user namespace, and every `hostUsers: false` pod stays in `ContainerCreating` with "error
@@ -95,9 +98,9 @@ unshare --user --map-root-user --net --mount \
 
 One difference the sandbox cannot show: containerd inside a kind node never applies AppArmor,
 while a node where `cat /sys/module/apparmor/parameters/enabled` prints `Y` usually gives every
-pod its default AppArmor profile, which denies `mount`. On such a node watch the worker's first
-start; a `mount /proc` error in its log means the worker needs its own AppArmor profile
-(`securityContext.appArmorProfile`) before it can run.
+pod its default AppArmor profile, which denies `mount`. There the worker exits with
+`ulw_sandbox: make mounts private: Permission denied`, and needs its own profile (step 2,
+"AppArmor").
 
 The gateway's and chat's NetworkPolicies admit only Envoy's data plane, found by labels, in
 Envoy Gateway's default layout. Confirm them, or patch `video-gateway` and `chat`'s
@@ -226,6 +229,30 @@ sudo install -D -m 0644 cluster/seccomp/ulw-worker.json /var/lib/kubelet/seccomp
 
 Without it the worker pod stays in `CreateContainerError`, and so does every live packager
 (step 9), which runs ffmpeg under the same sandbox and profile.
+
+### AppArmor
+
+On a node that enforces AppArmor (`cat /sys/module/apparmor/parameters/enabled` prints `Y`, as
+on Ubuntu), the container runtime's default profile denies every mount, so the worker's sandbox
+cannot start. `cluster/apparmor/ulw-worker` is that default profile plus the sandbox's mounts
+and its user namespace, and nothing else; CI runs the sandbox under it on an Ubuntu 24.04 host,
+and checks that the sandbox is refused without those rules (`tools/check-apparmor.sh`). It also
+makes the `apparmor_restrict_unprivileged_userns` change of step 1 unnecessary for the worker.
+
+Once per node that may run the worker, and again whenever the file changes:
+
+```sh
+sudo install -D -m 0644 cluster/apparmor/ulw-worker /etc/apparmor.d/ulw-worker
+sudo apparmor_parser -r -W /etc/apparmor.d/ulw-worker
+sudo aa-status | grep ulw-worker     # listed in enforce mode
+```
+
+`/etc/apparmor.d` is loaded again at boot. Then list `components/worker-apparmor` after
+`components/operator-config` in the overlay; it sets the worker's
+`securityContext.appArmorProfile` to `Localhost` `ulw-worker`. Do not list it while a node that
+may run the worker lacks the profile: the pod would not start there. A live packager (step 9)
+runs the same sandbox, but its Job keeps the runtime's default profile, which denies the
+mounts: keep `LIVE_NAMESPACE`'s packagers on nodes that do not enforce AppArmor.
 
 ## 3. Secrets and the database
 

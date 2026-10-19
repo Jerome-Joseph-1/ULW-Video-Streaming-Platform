@@ -87,6 +87,8 @@ jobs:
           while IFS= read -r path; do
             [[ -n $path ]] || continue
             case $path in
+              # The worker's AppArmor profile is checked against the built sandbox.
+              deploy/kubernetes/cluster/apparmor/*) code=true deploy=true ;;
               deploy/*) deploy=true ;;
               clients/web-mls/*) code=true web_mls=true ;;
               docs/* | .github/* | *.md) ;;
@@ -142,6 +144,11 @@ jobs:
       - name: binary hardening
         if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.preset == 'ci' }}
         run: tools/check-hardening.sh build/ci
+      # The worker's AppArmor profile (RUNBOOK.md step 2): this runner enforces AppArmor as an
+      # Ubuntu node does, so the sandbox is run under the profile, and refused without its rules.
+      - name: worker AppArmor profile
+        if: ${{ !cancelled() && steps.build.outcome == 'success' && matrix.preset == 'ci' }}
+        run: tools/check-apparmor.sh build/ci/apps/worker/ulw_sandbox
       # The runner is not root, so the step above skips these; only root can change to another
       # user's ids, and the drop's order and checks are only proven by doing it. The gateway's
       # own run covers both reactors, since it binds its listener before the drop.
