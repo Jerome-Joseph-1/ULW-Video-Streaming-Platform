@@ -18,6 +18,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <exception>
 #include <format>
 #include <initializer_list>
 #include <iterator>
@@ -26,6 +27,7 @@
 #include <span>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace chat {
 
@@ -58,6 +60,7 @@ enum class Op : std::uint8_t {
     LeaveCall,
     CallStatus,
     SetRole,
+    Presence,
 };
 
 Op op_of(std::string_view target) noexcept {
@@ -65,7 +68,7 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 13> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 14> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
@@ -79,6 +82,7 @@ Op op_of(std::string_view target) noexcept {
         {"leave_call", Op::LeaveCall},
         {"call_status", Op::CallStatus},
         {"set_role", Op::SetRole},
+        {"presence", Op::Presence},
     }};
     const auto* found = std::ranges::find(kOps, name, &std::pair<std::string_view, Op>::first);
     return found == kOps.end() ? Op::None : found->second;
@@ -566,6 +570,9 @@ private:
         case Op::SetRole:
             started = set_role(*json);
             break;
+        case Op::Presence:
+            started = presence(*json);
+            break;
         case Op::None:
             started = std::unexpected(Refusal{.status = Status::NotFound, .reason = "not_found"});
             break;
@@ -818,6 +825,80 @@ private:
                     out += change.changed.empty() ? R"(,"changed":false})" : R"(,"changed":true})";
                 });
             }));
+        return {};
+    }
+
+    // Who of `users` has a socket open, and on which devices, as the notification hook's registry
+    // has it (ADR-0124): what a backend reads before it decides to push.
+    Parsed<void> presence(const core::json::Value& body) {
+        if (!only(body, {"users"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto users = users_of(body, 1, core::ports::kMaxConnectedQuery);
+        if (!users) {
+            return std::unexpected(users.error());
+        }
+        if (api_.connectivity_ == nullptr) {
+            return std::unexpected(Refusal{.status = Status::Conflict, .reason = "notify_off"});
+        }
+        std::vector<core::UserId> asked;
+        for (const core::UserId& user : *users) {
+            if (std::ranges::find(asked, user) == asked.end()) {
+                asked.push_back(user);
+            }
+        }
+        api_.connectivity_->connected(
+            asked,
+            [api = &api_, id = id_, asked](
+                core::ports::NotifyResult<std::vector<core::ports::SocketDevice>> result) noexcept {
+                Connection* c = api->find(id);
+                if (c == nullptr) {
+                    return;
+                }
+                if (!result) {
+                    ++api->counters_.unavailable;
+                    c->refused(
+                        Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
+                    return;
+                }
+                try {
+                    ++api->counters_.reads;
+                    std::string out = R"({"type":"presence","users":[)";
+                    for (const core::UserId& user : asked) {
+                        if (out.back() != '[') {
+                            out += ',';
+                        }
+                        out += R"({"user":)";
+                        core::json::append_string(out, user.view());
+                        bool connected = false;
+                        std::string devices = "[";
+                        for (const core::ports::SocketDevice& socket : *result) {
+                            if (socket.user != user) {
+                                continue;
+                            }
+                            connected = true;
+                            if (socket.device) {
+                                if (devices.size() > 1) {
+                                    devices += ',';
+                                }
+                                devices += '"';
+                                devices += socket.device->to_string();
+                                devices += '"';
+                            }
+                        }
+                        out += connected ? R"(,"connected":true,"devices":)"
+                                         : R"(,"connected":false,"devices":)";
+                        out += devices;
+                        out += "]}";
+                    }
+                    out += "]}";
+                    c->answered(Status::Ok, out);
+                } catch (const std::exception&) {
+                    ++api->counters_.unavailable;
+                    c->refused(
+                        Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
+                }
+            });
         return {};
     }
 

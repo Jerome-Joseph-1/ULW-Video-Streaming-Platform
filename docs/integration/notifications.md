@@ -152,6 +152,12 @@ within an hour (the hook off, or every node down) is forgotten. Like every event
 most once: keep the [service listing](videos-and-playback.md#service-api-visibility-takedown-and-listing)
 as the source of truth, and poll it now and then for any you missed.
 
+### Asking who is connected
+
+The service API's `presence` ([chat.md](chat.md#the-service-api)) reads the same registry: for
+up to 64 users, whether each has a socket open on any node and which devices those sockets named.
+Use it before a push you would rather skip for someone who can see the app.
+
 ## Answering and declining from a notification
 
 - **Answer.** The notification opens the app, which connects (`/rt?device=<uuid>`), `join`s the
