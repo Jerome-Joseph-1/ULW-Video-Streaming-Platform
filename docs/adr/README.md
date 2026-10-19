@@ -134,3 +134,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0128](0128-a-quiet-message.md) | A quiet message | Accepted |
 | [0129](0129-a-ring-outlives-its-owner.md) | A ring outlives its owner | Accepted |
 | [0130](0130-a-hook-batch-says-what-was-lost.md) | A hook batch says what was lost | Accepted |
+| [0131](0131-a-direct-call-takes-two-devices-of-each-member.md) | A direct call takes two devices of each member | Accepted |

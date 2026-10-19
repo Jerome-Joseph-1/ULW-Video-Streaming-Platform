@@ -30,8 +30,11 @@
 // media generation by the owner's fenced write before the SFU hears of it (ADR-0050, ADR-0095).
 namespace chat {
 
-// A direct chat's call: two participants at most, each a device (ADR-0050).
-inline constexpr std::uint16_t kCallParticipants = 2;
+// A direct chat's call: each member on up to two devices (a laptop and a phone), so that one
+// member's second device never takes the other's place (ADR-0131); four participants at most,
+// each a device (ADR-0050).
+inline constexpr std::uint16_t kDirectDevicesPerMember = 2;
+inline constexpr std::uint16_t kCallParticipants = 2 * kDirectDevicesPerMember;
 // A group chat's call: CallLimits::group_participants devices, within these bounds (ADR-0095).
 inline constexpr std::uint16_t kMinGroupParticipants = 3;
 inline constexpr std::uint16_t kMaxGroupParticipants = 16;

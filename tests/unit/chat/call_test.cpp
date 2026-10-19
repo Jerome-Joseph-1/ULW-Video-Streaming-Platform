@@ -437,8 +437,8 @@ TEST_F(CallHandlerTest, AMemberOfADirectChatGetsATicketForItsDeviceInTheRoomsCal
     EXPECT_EQ(sfu_.opens[0].room, room_id());
     EXPECT_EQ(sfu_.opens[0].generation, chat::kCallGeneration);
     EXPECT_EQ(sfu_.opens[0].kind, core::ports::MediaRoomKind::Call);
-    // 1:1: two participants at most (ADR-0050, ADR-0058).
-    EXPECT_EQ(sfu_.opens[0].max_participants, 2U);
+    // 1:1: each member on two devices at most, four participants (ADR-0050, ADR-0131).
+    EXPECT_EQ(sfu_.opens[0].max_participants, 4U);
     sfu_.open();
     ASSERT_EQ(sfu_.joins.size(), 1U);
     EXPECT_EQ(sfu_.joins[0].user, "alice");
@@ -853,6 +853,49 @@ TEST_F(CallHandlerTest, EachRingIsKeptWhileItRingsAndANewOwnerEndsOneLeftBehind)
     EXPECT_EQ(plane_.sent[0].reason, chat::CallReason::OwnerMoved);
     EXPECT_TRUE(rings.rows.empty());
     handler_->keep_rings(nullptr);
+}
+
+// ADR-0131: a member's second device joins a direct call beside their first, a third is
+// refused, and the other member always gets in.
+TEST_F(CallHandlerTest, ADirectCallTakesTwoDevicesOfEachMemberAndNoMore) {
+    constexpr std::string_view kPhone = "01a0eb86-6cca-7dce-84cc-3bb47615f9c1";
+    constexpr std::string_view kTablet = "01a0eb86-6cca-7dce-84cc-3bb47615f9c2";
+    constexpr std::string_view kAlicePhone = "01a0eb86-6cca-7dce-84cc-3bb47615f9c3";
+    ask("alice");
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.at(0).call;
+    ask("bob", kOtherDevice, kRoom, call);
+    sfu_.issue();
+    ASSERT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    sfu_.connected = {{.user = *core::UserId::parse("alice"),
+                       .device = *core::DeviceId::parse(kDevice),
+                       .joined_at = {}},
+                      {.user = *core::UserId::parse("bob"),
+                       .device = *core::DeviceId::parse(kOtherDevice),
+                       .joined_at = {}}};
+    // Bob answers on his phone too, while his laptop is in.
+    ask("bob", kPhone, kRoom, call);
+    sfu_.issue();
+    ASSERT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(answers_.back().call, call);
+    sfu_.connected.push_back({.user = *core::UserId::parse("bob"),
+                              .device = *core::DeviceId::parse(kPhone),
+                              .joined_at = {}});
+    // A third device of his is refused, and says why.
+    const std::size_t joins = sfu_.joins.size();
+    ask("bob", kTablet, kRoom, call);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Full);
+    EXPECT_EQ(sfu_.joins.size(), joins);
+    // His phone asking again, already in, is not another device.
+    ask("bob", kPhone, kRoom, call);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    // Alice is never locked out: her second device fits beside his two.
+    ask("alice", kAlicePhone);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(answers_.back().call, call);
 }
 
 TEST_F(CallHandlerTest, AnAnswerToARingTheCallerCancelledIsRefusedAndRingsNobodyBack) {

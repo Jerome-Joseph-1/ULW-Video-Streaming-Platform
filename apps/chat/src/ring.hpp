@@ -399,6 +399,8 @@ public:
     // latest ticket is caller_grace old: a ticket asked again then joins it, unless the SFU
     // lists nobody in it.
     [[nodiscard]] bool settled(const core::RoomId& room) const noexcept;
+    // Whether the room's call is on: answered, or a group call whose ring is over.
+    [[nodiscard]] bool on(const core::RoomId& room) const noexcept;
     // The caller of the room's call.
     [[nodiscard]] std::optional<core::UserId> caller_of(const core::RoomId& room) const noexcept;
     // The room's call, if it has one, as this owner knows it; `connected` is left for the caller
