@@ -51,7 +51,7 @@ listed origin. Native apps send the bearer header.
 
 ## Messages
 
-<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/chat_service.cpp, apps/chat/src/key_directory.cpp, docs/adr/0043-chat-service-policy-between-edge-and-rooms.md, docs/adr/0054-messages-stored-with-their-seq.md -->
+<!-- apps/chat/src/envelope.hpp, apps/chat/src/envelope.cpp, apps/chat/src/chat_service.cpp, apps/chat/src/key_directory.cpp, apps/chat/src/session.cpp (Session::command), docs/adr/0122-ping-on-the-socket.md, docs/adr/0043-chat-service-policy-between-edge-and-rooms.md, docs/adr/0054-messages-stored-with-their-seq.md -->
 
 Every message is one JSON object in one text frame. Unknown `type`s and unknown fields are
 refused with an `error`, not ignored. Room ids are canonical lowercase UUIDs.
@@ -62,6 +62,7 @@ Client to server:
 |---|---|---|
 | `join` | `room`, or `stream` for a live stream's chat; optional `after` (seq), `delivery` (`"durable"`, the default, or `"lossy"`), `kind` (`"group"`, the default, or `"direct"`; not with `stream`) | Subscribe this connection to the room. Joining an unknown room creates it, as the closed `kind` it names (see [Member lists](#member-lists)). `stream` names a live stream as its playback URL does, and joins its chat (see [A stream's live chat](#a-streams-live-chat)). With `after`, the node also sends what it still holds above that seq (see [Resume and history](#resume-and-history)). |
 | `part` | `room`, or `stream` | Stop following a room on this connection, answered `{"type":"parted","room":..}`: nothing more of it arrives here, and its place among the 64 is free at once (ADR-0117). The member list is left as it is (that is `leave`), and no join is charged. `not_joined` for a room this connection has not joined. |
+| `ping` | optional `rid` | Answered `{"type":"pong"}` at once, with `rid` echoed when given (ADR-0122). A browser cannot see the WebSocket pings the server sends, so time your own: a `pong` that has not come within a few seconds means the socket is dead (a phone in a tunnel can hold one open for minutes), so close it and reconnect. Charged as a control frame (see [Limits](#limits)): one every few seconds is plenty. |
 | `send` | `room`, `id`, `body` | Post a message, once the room's `joined` has arrived; before it, the send is refused with `not_joined`. `id` is 1 to 64 characters of `A-Z a-z 0-9 _ -`, unique per sender and room: use a UUID or ULID per message. `body` is the message's bytes in base64url without padding (RFC 4648 section 5). |
 | `history` | `room`; optional `before`, `after` or `around` (a seq, one of them), `limit` (1 to 100, default 50) | A page of the room's stored messages. Without a cursor, or with `before`, newest first below it; with `after`, oldest first above it; with `around`, up to `limit` messages centred on that seq (it included when stored, half the page at or below it), oldest first, for one request's charge (ADR-0118). Only once the room's `joined` has arrived; before it, `not_joined`. |
 | `call` | `room`, `device` (a UUID the client keeps per device); `answer` (the ringing call it answers), optional | A ticket to the room's call, for a direct or group chat this connection has joined. See [calls.md](calls.md). |
@@ -338,7 +339,7 @@ As `user-1`:
 |---|---|---|
 | Message size | 64 KiB per message (after reassembly) | Close `1009` |
 | Binary frames | Not accepted | Close `1003` |
-| Control frames | 8 per read; token bucket of 20, refilling 10/s | Close `1008` |
+| Control frames | 8 per read; token bucket of 20, refilling 10/s, shared with `ping` | Close `1008` |
 | Connections per address | 20 open at once from one address (IPv6: one /64) connecting directly, and 80 from all the /64s of one IPv6 /48 together; 10 new ones a second, 10 saved | Connection reset before the upgrade is read; back off and reconnect |
 | Sockets per user | 16 open at once on a node | Upgrade answered `429`, `Retry-After: 5` |
 | Rooms per connection | 64 | `error` `too_many_rooms` |

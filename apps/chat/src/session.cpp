@@ -596,6 +596,18 @@ void Session::command(const codec::ws::Frame& frame) {
         close_with(kInternalError);
         return;
     }
+    // Answered here, from the control frames' allowance: a ping costs what a WebSocket ping does.
+    if (const auto* p = std::get_if<Ping>(&*parsed)) {
+        if (!within_control_budget(0)) {
+            ++server_.counters().control_floods;
+            close_with(kPolicyViolation);
+            return;
+        }
+        std::string out;
+        write_pong(out, p->rid);
+        send_text(out);
+        return;
+    }
     // The key directory's commands go to their own service, not the chat service (ADR-0043).
     if (auto* d = std::get_if<DirectoryCommand>(&*parsed)) {
         server_.directory().command(*directory_, std::move(*d));

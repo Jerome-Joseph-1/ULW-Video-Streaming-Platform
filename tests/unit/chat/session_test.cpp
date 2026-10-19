@@ -559,6 +559,30 @@ TEST_P(ChatSessionTest, AnUpgradeAskedToBeRefusedOnTheSocketIsClosedWithACodeTha
                                   "Authorization: Bearer user.alice\r\n", nullptr));
 }
 
+// ADR-0122: a ping is answered at once, its rid echoed, from the control frames' allowance.
+TEST_P(ChatSessionTest, APingIsAnsweredWithAPong) {
+    auto alice = open("Authorization: Bearer user.alice\r\n");
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(alice->send_text(R"({"type":"ping"})"));
+    EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"pong"})");
+    ASSERT_TRUE(alice->send_text(R"({"type":"ping","rid":"t-42"})"));
+    EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"pong","rid":"t-42"})");
+    ASSERT_TRUE(alice->send_text(R"({"type":"ping","rid":7})"));
+    EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"malformed"})");
+    // Past the allowance (a burst of 20), the socket is closed as for a flood of pings.
+    for (int i = 0; i < 30; ++i) {
+        ASSERT_TRUE(alice->send_text(R"({"type":"ping"})"));
+    }
+    bool closed = false;
+    while (const auto frame = alice->next_frame(seconds(10))) {
+        if (frame->first == codec::ws::Opcode::Close) {
+            closed = true;
+            break;
+        }
+    }
+    EXPECT_TRUE(closed);
+}
+
 TEST(SessionQuery, RefusalsOnTheSocketAreAskedByTheirParameterAlone) {
     EXPECT_TRUE(chat::refusals_on_socket("/rt?refusals=close"));
     EXPECT_TRUE(chat::refusals_on_socket("/rt?device=x&refusals=close"));
