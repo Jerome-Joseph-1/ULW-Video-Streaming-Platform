@@ -103,7 +103,9 @@ SELECT coalesce((SELECT kind FROM recorded), (SELECT kind FROM created)),
 inline constexpr Sql kAccess = R"sql(
 SELECT (SELECT CASE WHEN closed_at IS NULL THEN kind ELSE 'group_chat' END
           FROM chat_rooms WHERE room_id = $1),
-       EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2))sql";
+       EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2),
+       COALESCE((SELECT role = 'admin' FROM chat_members WHERE room_id = $1 AND user_id = $2),
+                false))sql";
 
 // Records the room as open unless its id is not a stream's (version 8, tagged 0x01 in its first
 // byte, ADR-0070), it lists

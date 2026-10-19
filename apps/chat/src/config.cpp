@@ -431,6 +431,11 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
     if (!group) {
         return std::unexpected(std::move(group.error()));
     }
+    auto people = bounded<std::uint16_t>(env, "ULW_CALL_GROUP_PEOPLE", kMinGroupPeople,
+                                         kMaxGroupParticipants);
+    if (!people) {
+        return std::unexpected(std::move(people.error()));
+    }
     auto limits = client_limits(env);
     if (!limits) {
         return std::unexpected(std::move(limits.error()));
@@ -463,6 +468,7 @@ std::expected<Config, ConfigError> load_config(const EnvLookup& env) {
                   .presence_grace = *grace,
                   .ring_timeout = *ring,
                   .group_participants = *group,
+                  .group_people = *people,
                   .client_limits = std::move(*limits),
                   .calls = std::move(*calls),
                   .service_api = std::nullopt,

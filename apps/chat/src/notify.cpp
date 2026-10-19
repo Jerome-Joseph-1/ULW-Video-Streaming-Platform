@@ -459,8 +459,14 @@ void Notifier::observed(const CallEvent& event) noexcept {
             out += R"(,"users":)";
             append_users(out, event.users);
         }
-        if (event.reason == CallReason::CallerLeft) {
-            out += R"(,"reason":"caller_left")";
+        if (event.reason) {
+            out += R"(,"reason":")";
+            out += reason_name(*event.reason);
+            out += '"';
+        }
+        if (event.event == RingEvent::Declined && !event.text.empty()) {
+            out += R"(,"text":)";
+            core::json::append_string(out, event.text);
         }
         out += '}';
         // After the call's call_ringing, which may still wait on the registry.

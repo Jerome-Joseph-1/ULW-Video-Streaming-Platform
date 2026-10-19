@@ -993,8 +993,27 @@ private:
     // call's state the socket's would be. Answered with the event everyone hears.
     Parsed<void> signal_call(const core::json::Value& body, CallSignal signal,
                              std::string_view type) {
-        if (!only(body, {"room", "call", "user"})) {
+        const bool decline = signal == CallSignal::Decline;
+        if (decline ? !only(body, {"room", "call", "user", "reason", "text"})
+                    : !only(body, {"room", "call", "user"})) {
             return std::unexpected(kMalformed);
+        }
+        // A decline's reason and quick reply, as the socket's (ADR-0115).
+        std::optional<CallReason> reason;
+        std::string text;
+        if (const core::json::Value* named = body.find("reason")) {
+            const auto name = named->as_string();
+            reason = name ? decline_reason(*name) : std::nullopt;
+            if (!reason) {
+                return std::unexpected(kMalformed);
+            }
+        }
+        if (const core::json::Value* said = body.find("text")) {
+            const auto value = said->as_string();
+            if (!value || value->size() > kMaxDeclineText) {
+                return std::unexpected(kMalformed);
+            }
+            text = std::string(*value);
         }
         auto room = call_room_of(body);
         if (!room) {
@@ -1008,25 +1027,38 @@ private:
         if (!user) {
             return std::unexpected(user.error());
         }
-        return ask_call(
-            *room,
-            encode_request(CallSignalRequest{.user = *user, .signal = signal, .call = *call}),
-            [room = *room, call = *call, user = *user, type](std::string& out,
-                                                             const CallAnswer& answer) {
-                if (answer.outcome != CallOutcome::Done) {
-                    return false;
-                }
-                out += R"({"type":")";
-                out += type;
-                out += R"(","room":")";
-                out += room.to_string();
-                out += R"(","call":")";
-                out += call.to_string();
-                out += R"(","by":)";
-                core::json::append_string(out, user.view());
-                out += '}';
-                return true;
-            });
+        return ask_call(*room,
+                        encode_request(CallSignalRequest{.user = *user,
+                                                         .signal = signal,
+                                                         .call = *call,
+                                                         .target = std::nullopt,
+                                                         .reason = reason,
+                                                         .text = text}),
+                        [room = *room, call = *call, user = *user, type, reason,
+                         text](std::string& out, const CallAnswer& answer) {
+                            if (answer.outcome != CallOutcome::Done) {
+                                return false;
+                            }
+                            out += R"({"type":")";
+                            out += type;
+                            out += R"(","room":")";
+                            out += room.to_string();
+                            out += R"(","call":")";
+                            out += call.to_string();
+                            out += R"(","by":)";
+                            core::json::append_string(out, user.view());
+                            if (reason) {
+                                out += R"(,"reason":")";
+                                out += reason_name(*reason);
+                                out += '"';
+                            }
+                            if (!text.empty()) {
+                                out += R"(,"text":)";
+                                core::json::append_string(out, text);
+                            }
+                            out += '}';
+                            return true;
+                        });
     }
 
     Parsed<void> call_status(const core::json::Value& body) {

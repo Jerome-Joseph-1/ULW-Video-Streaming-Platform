@@ -186,8 +186,60 @@ std::expected<core::UserId, EnvelopeError> user_of(const core::json::Value& mess
     return *user;
 }
 
+// "rid", the client's id for a call command, echoed in its answer: as a message id (ADR-0115).
+std::expected<std::optional<rt::MessageKey>, EnvelopeError>
+rid_of(const core::json::Value& message) {
+    if (message.find("rid") == nullptr) {
+        return std::optional<rt::MessageKey>{};
+    }
+    const auto text = string_of(message, "rid");
+    if (!text) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto rid = rt::MessageKey::parse(*text);
+    if (!rid) {
+        return std::unexpected(EnvelopeError::BadId);
+    }
+    return rid;
+}
+
+// "ring": true (the default: every other member), false (nobody), or the members to ring; and
+// "max_people" (ADR-0115).
+std::expected<RingOptions, EnvelopeError> ring_of(const core::json::Value& message) {
+    RingOptions options;
+    if (const core::json::Value* ring = message.find("ring")) {
+        if (const auto all = ring->as_bool()) {
+            options.mode = *all ? RingOptions::Mode::All : RingOptions::Mode::None;
+        } else if (const auto* items = ring->as_array();
+                   items != nullptr && items->size() <= kMaxGroupCallees) {
+            options.mode = RingOptions::Mode::Only;
+            for (const core::json::Value& item : *items) {
+                const auto text = item.as_string();
+                if (!text) {
+                    return std::unexpected(EnvelopeError::Malformed);
+                }
+                const auto user = core::UserId::parse(*text);
+                if (!user) {
+                    return std::unexpected(EnvelopeError::BadUser);
+                }
+                options.only.push_back(*user);
+            }
+        } else {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+    }
+    if (const core::json::Value* most = message.find("max_people")) {
+        const auto n = most->as_u64();
+        if (!n || *n < kMinCallPeople || *n > kMaxCallPeople) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        options.max_people = static_cast<std::uint16_t>(*n);
+    }
+    return options;
+}
+
 std::expected<Command, EnvelopeError> call_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "device", "answer"})) {
+    if (!only(message, {"type", "room", "device", "answer", "ring", "max_people", "rid"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }
     auto room = room_of(message);
@@ -214,7 +266,19 @@ std::expected<Command, EnvelopeError> call_of(const core::json::Value& message) 
         }
         answering = *parsed;
     }
-    return Call{.room = *room, .device = *device, .answering = answering};
+    auto ring = ring_of(message);
+    if (!ring) {
+        return std::unexpected(ring.error());
+    }
+    auto rid = rid_of(message);
+    if (!rid) {
+        return std::unexpected(rid.error());
+    }
+    return Call{.room = *room,
+                .device = *device,
+                .answering = answering,
+                .ring = std::move(*ring),
+                .rid = *rid};
 }
 
 // A list of user ids, 1 (or 0, when `empty_ok`) to kMaxMembersPerChange of them, as given.
@@ -625,9 +689,15 @@ void append_users(std::string& out, std::span<const core::UserId> users) {
 std::expected<Command, EnvelopeError> call_move_of(const core::json::Value& message,
                                                    CallSignal signal) {
     const bool expel = signal == CallSignal::Expel;
-    if (expel ? !only(message, {"type", "room", "call", "user"})
-              : !only(message, {"type", "room", "call"})) {
+    const bool decline = signal == CallSignal::Decline;
+    if (expel     ? !only(message, {"type", "room", "call", "user", "rid"})
+        : decline ? !only(message, {"type", "room", "call", "reason", "text", "rid"})
+                  : !only(message, {"type", "room", "call", "rid"})) {
         return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto rid = rid_of(message);
+    if (!rid) {
+        return std::unexpected(rid.error());
     }
     auto room = room_of(message);
     if (!room) {
@@ -641,8 +711,26 @@ std::expected<Command, EnvelopeError> call_move_of(const core::json::Value& mess
     if (!call) {
         return std::unexpected(EnvelopeError::BadCall);
     }
+    if (decline) {
+        CallMove move{.room = *room, .signal = signal, .call = *call, .rid = *rid};
+        if (message.find("reason") != nullptr) {
+            const auto named = string_of(message, "reason");
+            move.reason = named ? decline_reason(*named) : std::nullopt;
+            if (!move.reason) {
+                return std::unexpected(EnvelopeError::Malformed);
+            }
+        }
+        if (message.find("text") != nullptr) {
+            const auto said = string_of(message, "text");
+            if (!said || said->size() > kMaxDeclineText) {
+                return std::unexpected(EnvelopeError::Malformed);
+            }
+            move.text = std::string(*said);
+        }
+        return move;
+    }
     if (!expel) {
-        return CallMove{.room = *room, .signal = signal, .call = *call};
+        return CallMove{.room = *room, .signal = signal, .call = *call, .rid = *rid};
     }
     const auto named = string_of(message, "user");
     if (!named) {
@@ -652,7 +740,7 @@ std::expected<Command, EnvelopeError> call_move_of(const core::json::Value& mess
     if (!target) {
         return std::unexpected(EnvelopeError::BadUser);
     }
-    return CallMove{.room = *room, .signal = signal, .call = *call, .target = *target};
+    return CallMove{.room = *room, .signal = signal, .call = *call, .target = *target, .rid = *rid};
 }
 
 void append_room(std::string& out, const core::RoomId& room) {
@@ -715,14 +803,18 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
         return members_of(*message);
     }
     if (name == "call_status") {
-        if (!only(*message, {"type", "room"})) {
+        if (!only(*message, {"type", "room", "rid"})) {
             return std::unexpected(EnvelopeError::Malformed);
         }
         auto room = room_of(*message);
         if (!room) {
             return std::unexpected(room.error());
         }
-        return CallStatusQuery{.room = *room};
+        auto rid = rid_of(*message);
+        if (!rid) {
+            return std::unexpected(rid.error());
+        }
+        return CallStatusQuery{.room = *room, .rid = *rid};
     }
     if (name == "call_decline") {
         return call_move_of(*message, CallSignal::Decline);
@@ -918,8 +1010,32 @@ void write_call_event(std::string& out, const CallNotice& notice) {
         out += R"(,"expelled":)";
         core::json::append_string(out, notice.subject->view());
     }
-    if (notice.reason == CallReason::CallerLeft) {
-        out += R"(,"reason":"caller_left")";
+    if (notice.reason) {
+        out += R"(,"reason":")";
+        out += reason_name(*notice.reason);
+        out += '"';
+    }
+    if (notice.event == RingEvent::Declined && !notice.text.empty()) {
+        out += R"(,"text":)";
+        core::json::append_string(out, notice.text);
+    }
+    out += '}';
+}
+
+void append_echo(std::string& out, const std::optional<CallId>& call,
+                 const std::optional<rt::MessageKey>& rid) {
+    if ((!call && !rid) || out.empty() || out.back() != '}') {
+        return;
+    }
+    out.pop_back();
+    if (call) {
+        out += R"(,"call":")";
+        out += call->to_string();
+        out += '"';
+    }
+    if (rid) {
+        out += R"(,"rid":)";
+        core::json::append_string(out, rid->view());
     }
     out += '}';
 }

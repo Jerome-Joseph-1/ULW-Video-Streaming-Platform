@@ -12,6 +12,8 @@
 #include <optional>
 #include <set>
 #include <span>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -51,11 +53,42 @@ enum class RingEvent : std::uint8_t {
     Moved = 7,
 };
 
-// Why a ring ended, when its event alone does not say (ADR-0113). The values are the layout's.
+// Why a ring ended, when its event alone does not say (ADR-0113, ADR-0115). The values are the
+// layout's.
 enum class CallReason : std::uint8_t {
     // Cancelled: the caller's device was no longer in the call's media room while it rang, so
     // nobody would have been there to answer.
     CallerLeft = 1,
+    // Declined: the callee is busy (another call), may not take calls now, or said no.
+    Busy = 2,
+    NotAllowed = 3,
+    Declined = 4,
+};
+// How a reason reads on the wire to clients, the hook and the log: caller_left, busy, not_allowed,
+// declined.
+[[nodiscard]] std::string_view reason_name(CallReason reason) noexcept;
+// The reason a client names, if it is one a decline may give (busy, not_allowed, declined).
+[[nodiscard]] std::optional<CallReason> decline_reason(std::string_view name) noexcept;
+
+// A decline's quick reply ("In a meeting, call you at 6") is at most this many bytes of UTF-8.
+inline constexpr std::size_t kMaxDeclineText = 200;
+
+// A call's own cap on people (RingOptions::max_people) is within these: the caller and one other,
+// and the most devices a group call ever takes (call.hpp, kMaxGroupParticipants).
+inline constexpr std::uint16_t kMinCallPeople = 2;
+inline constexpr std::uint16_t kMaxCallPeople = 16;
+
+// How the first ticket of a call rings (ADR-0115): every other member, only those named (who
+// must be on the room's member list), or nobody. A call that rings nobody is on at once, for
+// whoever comes; it ends, as any call, when nobody is in it.
+struct RingOptions {
+    enum class Mode : std::uint8_t { All = 0, Only = 1, None = 2 };
+    Mode mode = Mode::All;
+    std::vector<core::UserId> only = {};
+    // A group call's cap on people (each user once, whatever their devices); 0 is the operator's.
+    std::uint16_t max_people = 0;
+
+    friend bool operator==(const RingOptions&, const RingOptions&) = default;
 };
 
 // Who a room's call is between: the two members of a direct chat, or a group chat's.
@@ -80,8 +113,10 @@ struct CallNotice {
     core::WallTime expires_at;
     // Moved only: who was put out.
     std::optional<core::UserId> subject = std::nullopt;
-    // Cancelled only, when nobody cancelled it: why it ended.
+    // Cancelled when nobody cancelled it, and Declined when the callee said why: why it ended.
     std::optional<CallReason> reason = std::nullopt;
+    // Declined only: the callee's quick reply, at most kMaxDeclineText bytes, or empty.
+    std::string text = {};
 };
 
 // The notices travel between nodes as opaque bytes; a decode that fails is a notice nobody
@@ -134,8 +169,9 @@ struct CallEvent {
     // As CallNotice::by.
     std::optional<core::UserId> by;
     core::WallTime expires_at;
-    // As CallNotice::reason.
+    // As CallNotice::reason and text.
     std::optional<CallReason> reason = std::nullopt;
+    std::string text = {};
 };
 
 // Told of a ring's events on the room's owner, from inside the ringer: must not call back into it.
@@ -297,26 +333,32 @@ public:
     // to: the one ringing or answered (a callee's ticket answers a ringing call), or one this
     // ticket starts ringing for the other members. nullopt when there is none: nobody else is
     // on the list, or the ask found a call that has ended since.
+    // `options` say how a call this ticket starts rings; a ticket joining a call ignores them.
     [[nodiscard]] std::expected<std::optional<CallId>, RingRefusal>
     ticketed(const core::RoomId& room, const core::UserId& user,
              const std::optional<std::vector<core::UserId>>& members,
-             CallKind kind = CallKind::Direct) noexcept;
+             CallKind kind = CallKind::Direct, const RingOptions& options = {}) noexcept;
+    // The room's call's own cap on people (RingOptions::max_people); 0 when it has none.
+    [[nodiscard]] std::uint16_t max_people(const core::RoomId& room) const noexcept;
     // `user` was put out of the room's call and may not have a ticket for it while it lasts.
     [[nodiscard]] bool expelled(const core::RoomId& room, const core::UserId& user) const noexcept;
     // Whether a group call has room for one more member in it: kMaxGroupJoined. A member in it
     // already always fits.
     [[nodiscard]] bool fits(const core::RoomId& room, const core::UserId& user) const noexcept;
 
-    // The caller of a group call ending it for everyone, or putting `target` out: whether the
-    // step is allowed, and what it needs of the SFU. nullopt when the room has no such call, or
-    // `user` is not its caller, or the target is the caller. An expulsion is remembered at once
-    // (the target's tickets are refused); nothing is announced until the call handler's fenced
-    // write is done and it calls ended() or moved().
-    [[nodiscard]] std::optional<MediaStepNeeded>
-    may_end(const core::RoomId& room, const core::UserId& user, const CallId& call) const noexcept;
+    // The caller of a group call, or an admin of the group (`admin`, ADR-0115), ending it for
+    // everyone, or putting `target` out: whether the step is allowed, and what it needs of the
+    // SFU. nullopt when the room has no such call, or `user` may not, or the target is `user`.
+    // An expulsion is remembered at once (the target's tickets are refused); nothing is announced
+    // until the call handler's fenced write is done and it calls ended() or moved().
+    [[nodiscard]] std::optional<MediaStepNeeded> may_end(const core::RoomId& room,
+                                                         const core::UserId& user,
+                                                         const CallId& call,
+                                                         bool admin = false) const noexcept;
     [[nodiscard]] std::optional<MediaStepNeeded> expel(const core::RoomId& room,
                                                        const core::UserId& user, const CallId& call,
-                                                       const core::UserId& target) noexcept;
+                                                       const core::UserId& target,
+                                                       bool admin = false) noexcept;
     // `user` is no longer on the room's member list: out of its call, as an expulsion by
     // nobody. What it needs of the SFU (Move when the user had a ticket in the call).
     [[nodiscard]] MediaStepNeeded removed(const core::RoomId& room,
@@ -384,12 +426,13 @@ public:
     // is being written), which does not count toward kMaxUnansweredChecks.
     void occupied(const core::RoomId& room, const CallId& call, std::optional<bool> anyone,
                   bool asked = true) noexcept;
-    // A callee declines, the caller cancels, or a member of an answered call ends it. Answers
-    // the call's caller when it did, nullopt when the room has no such call for this member to
-    // end that way.
-    [[nodiscard]] std::optional<core::UserId> signal(const core::RoomId& room,
-                                                     const core::UserId& user, CallSignal signal,
-                                                     const CallId& call) noexcept;
+    // A callee declines (saying why, `reason` and `text`, when they did), the caller cancels, or
+    // a member of an answered call ends it. Answers the call's caller when it did, nullopt when
+    // the room has no such call for this member to end that way.
+    [[nodiscard]] std::optional<core::UserId>
+    signal(const core::RoomId& room, const core::UserId& user, CallSignal signal,
+           const CallId& call, std::optional<CallReason> reason = std::nullopt,
+           std::string_view text = {}) noexcept;
     // Rings out the calls whose timeout passed, announces again those due, and forgets answered
     // calls past their hold and calls of rooms this node no longer owns. Cheap when nothing is
     // due.
@@ -422,6 +465,8 @@ private:
         core::MonoTime started;
         core::WallTime started_at;
         std::optional<core::WallTime> answered_at = std::nullopt;
+        // RingOptions::max_people.
+        std::uint16_t max_people = 0;
         // The latest ticket of the call: its device may be connecting still, which the SFU does
         // not list yet, so nobody listed within caller_grace of it ends nothing.
         core::MonoTime last_ticket;
@@ -450,8 +495,10 @@ private:
     // there is none.
     [[nodiscard]] bool remember(const core::RoomId& room);
     void prune(core::MonoTime now) noexcept;
+    // `quiet`: it rings nobody, and is on at once.
     void start(const core::RoomId& room, const core::UserId& caller,
-               std::vector<core::UserId> callees, const CallId& id, CallKind kind);
+               std::vector<core::UserId> callees, const CallId& id, CallKind kind, bool quiet,
+               std::uint16_t max_people);
     void schedule(const core::RoomId& room, Call& call, core::MonoTime due);
     // Schedules the call's next deadline from its state, or none while its occupancy is being
     // asked.
@@ -469,16 +516,18 @@ private:
     // Tells every member of the call, the caller included, on every node they are connected to.
     void announce(const core::RoomId& room, const Call& call, RingEvent event,
                   const std::optional<core::UserId>& by,
-                  std::optional<CallReason> reason = std::nullopt) noexcept;
+                  std::optional<CallReason> reason = std::nullopt,
+                  std::string_view text = {}) noexcept;
     // The watcher, of an event of the call; `users` as CallEvent::users.
     void observe(const core::RoomId& room, const Call& call, RingEvent event,
                  const std::optional<core::UserId>& by, std::vector<core::UserId> users = {},
-                 std::optional<CallReason> reason = std::nullopt) noexcept;
+                 std::optional<CallReason> reason = std::nullopt,
+                 std::string_view text = {}) noexcept;
     // Tells one member.
     void tell(const core::RoomId& room, const Call& call, const core::UserId& to, RingEvent event,
               const std::optional<core::UserId>& by,
               const std::optional<core::UserId>& subject = std::nullopt,
-              std::optional<CallReason> reason = std::nullopt) noexcept;
+              std::optional<CallReason> reason = std::nullopt, std::string_view text = {}) noexcept;
     // Queues the call's occupancy check, unless one is being asked already.
     void check(const core::RoomId& room, Call& call) noexcept;
     // A ringing direct call's ring ends: its caller is not in the call.

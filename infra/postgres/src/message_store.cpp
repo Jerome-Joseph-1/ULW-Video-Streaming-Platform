@@ -274,11 +274,15 @@ public:
         }
         const auto text = outcome->get(0, 0);
         const auto member = outcome->get(0, 1).and_then(parse_bool);
-        if (!member) {
+        const auto admin = outcome->get(0, 2).and_then(parse_bool);
+        if (!member || !admin) {
             done_(std::unexpected(MessageStoreError::Corrupt));
             return std::nullopt;
         }
-        core::ports::RoomAccess access{.kind = std::nullopt, .member = *member};
+        core::ports::RoomAccess access{.kind = std::nullopt,
+                                       .member = *member,
+                                       .role = *admin ? core::ports::MemberRole::Admin
+                                                      : core::ports::MemberRole::Member};
         if (text) {
             access.kind = kind_of(*text);
             if (!access.kind) {

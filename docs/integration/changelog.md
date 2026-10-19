@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## Unreleased
 
-<!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md -->
+<!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md, docs/adr/0115-a-call-says-whom-it-rings-and-who-moderates-it.md -->
 
 Additive (versioning rule 1), with calls that last as long as someone is in them.
 
@@ -18,6 +18,11 @@ Additive (versioning rule 1), with calls that last as long as someone is in them
 | A socket that joined mid-ring heard the ring at the next announcement, up to 15 s later | It hears `call_ringing` at once |
 | The room's call could be read only by its id, from the backend | `call_status` with `room` alone, on the socket and the service API, answers the room's call and who is in it ([Calls](calls.md#after-a-reload)) |
 | Only a decline could be made by the backend | `cancel_call`, `end_call` and `leave_call` too ([Chat](chat.md#the-service-api)) |
+| Every first ticket rang every member (up to 32) | `call` may say `ring: false` (a call on at once, ringing nobody) or name the members to ring, and `max_people` ([Calls](calls.md)) |
+| A group call's cap counted devices | It counts people too (`ULW_CALL_GROUP_PEOPLE`, `max_people`): another device of someone in the call always fits |
+| Only a group call's caller could end it or put someone out | The group's admins can too |
+| A decline said nothing more | `call_decline` and `decline_call` may give `reason` (`declined`, `busy`, `not_allowed`) and `text`, which `call_declined` carries on the sockets and the hook |
+| An error answering a call command did not say which call | It names the `call`, and every call command may carry `rid`, echoed in its answer |
 
 What to do:
 

@@ -827,6 +827,23 @@ protected:
     const core::UserId dave_ = user("auth0|dave");
 };
 
+// The owner reads who may moderate a group's call (ADR-0115): the group's admins.
+TEST_P(MembershipConformance, AccessSaysWhetherAMemberIsTheGroupsAdmin) {
+    using core::ports::MemberRole;
+    using core::ports::RoomAccess;
+    const core::RoomId room = group();
+    const auto access = [&](const core::UserId& user) {
+        return ask<RoomAccess>([&](auto done) { store().access(room, user, std::move(done)); });
+    };
+    EXPECT_EQ(access(alice_), (RoomAccess{.kind = core::ports::RoomKind::GroupChat,
+                                          .member = true,
+                                          .role = MemberRole::Admin}));
+    EXPECT_EQ(access(bob_)->role, MemberRole::Member);
+    EXPECT_TRUE(access(bob_)->member);
+    EXPECT_EQ(access(dave_)->role, MemberRole::Member);
+    EXPECT_FALSE(access(dave_)->member);
+}
+
 TEST_P(MembershipConformance, ADirectChatListsItsPairOnceWhicheverOfThemOpensIt) {
     const core::RoomId room = named_room("03");
     EXPECT_EQ(open_direct(room, alice_, bob_), done({alice_, bob_}));

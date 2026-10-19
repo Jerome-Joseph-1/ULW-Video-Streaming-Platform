@@ -66,6 +66,18 @@ passes to the SDK ([step 4](#the-flow)).
    stop ringing, and say the call ended before you answered. Without `answer`, the same ticket
    would start a new call that rings the other member. If the caller has rung again meanwhile,
    the ticket answers that call, and its `call` names it: take that id from then on.
+
+   A ticket that starts the room's call may also say how it rings (ADR-0115); a ticket joining a
+   call ignores these:
+
+   | Field | Meaning |
+   |---|---|
+   | `ring` | `true` (the default): every other member, as below. `false`: nobody. The call is on at once, and whoever asks for a ticket joins it, everyone hearing `call_answered` (a call to start now and share). A list of user ids: only those members (up to 32; ids not on the room's member list are left out, and a list with nobody left rings nobody) |
+   | `max_people` | A group call's cap on people, each once whatever their devices: 2 to 16, at most the operator's (`ULW_CALL_GROUP_PEOPLE`). Someone new past it is refused `call_full` |
+   | `rid` | Your id for the request (as a message `id`): echoed as `rid` in its answer, error or not. Every call command takes one |
+
+   An error answering a call command names the `call` it was about when there is one, as well as
+   your `rid`.
 3. The answer is a ticket:
 
    ```json
@@ -138,7 +150,7 @@ Server to client, unasked:
 |---|---|---|
 | `call_ringing` | `room`, `call`, `from`, `expires_at` | `from` is calling. On the caller's own devices (`from` is you), the call you or your other device started is ringing. It rings until `expires_at` (Unix seconds); stop ringing then even if nothing else arrives |
 | `call_answered` | `room`, `call`, `from`, `by` | `by` asked for a ticket and is joining. On `by`'s other devices: stop ringing |
-| `call_declined` | `room`, `call`, `from`, `by` | `by` turned the call down |
+| `call_declined` | `room`, `call`, `from`, `by`; `reason`, `text` when `by` gave them | `by` turned the call down: show "can't take calls right now" for `not_allowed`, "busy" for `busy`, and `text` as their reply |
 | `call_cancelled` | `room`, `call`, `from`, `by`, or `reason` | The caller gave up before anyone answered. With no `by` and `reason: "caller_left"`: the caller's device left the call's LiveKit room while it rang, so nobody would be there to answer |
 | `call_missed` | `room`, `call`, `from` | Nobody answered within the ring timeout (45 s) |
 | `call_ended` | `room`, `call`, `from`, `by` | `by` ended the answered call. With no `by`: nobody was left in its LiveKit room |
@@ -152,7 +164,7 @@ Client to server, on a socket that joined the room (`not_joined` otherwise):
 
 | `type` | Fields | Who | Meaning |
 |---|---|---|---|
-| `call_decline` | `room`, `call` | The callee, while it rings | Turn it down: everyone hears `call_declined` |
+| `call_decline` | `room`, `call`, optional `reason` and `text` | The callee, while it rings | Turn it down: everyone hears `call_declined`, with `reason` (`declined`, `busy`, `not_allowed`) and `text` (a quick reply, at most 200 bytes) when given |
 | `call_cancel` | `room`, `call` | The caller, while it rings | Give up: everyone hears `call_cancelled` |
 | `call_end` | `room`, `call` | Either member, once answered | End it: everyone hears `call_ended` |
 
@@ -250,9 +262,11 @@ with joins. The service API answers the same to `call_status` with `room` alone
 A group chat's call is asked, answered and connected as a direct chat's is (steps 1 to 4 above);
 what differs is how many are in it, how it rings, and how it ends.
 
-- **Size.** Up to 8 devices (the operator may set 3 to 16, `ULW_CALL_GROUP_PARTICIPANTS`). A
-  ticket for a device that would not fit is refused `call_full`; a device already in the call
-  (reconnecting with a new ticket) always fits.
+- **Size.** Up to 8 devices (the operator may set 3 to 16, `ULW_CALL_GROUP_PARTICIPANTS`), and
+  as many people as devices unless the operator sets fewer (`ULW_CALL_GROUP_PEOPLE`, 2 to 16) or
+  the call's first ticket did (`max_people`). A ticket for a device that would not fit, or for
+  someone new past the people cap, is refused `call_full`; a device already in the call
+  (reconnecting with a new ticket), or another device of someone in it, fits the people cap.
 - **Ringing.** The first ticket rings up to 32 other members (the first of the member list); a
   member it did not ring may still join. Everyone rung hears `call_ringing` until `expires_at`,
   announced again every 15 s to those still ringing. Anyone who asks for a ticket is in the call,
@@ -271,10 +285,11 @@ what differs is how many are in it, how it rings, and how it ends.
   ends by itself: two minutes after its last ticket the owner asks LiveKit whether anyone is still
   connected, and every 30 s after that; when nobody is, or LiveKit has not answered three times
   in a row, everyone hears `call_ended` with no `by`.
-- **Ending for everyone.** The caller's `call_end` ends the call for everyone: LiveKit closes the
-  call's room, which disconnects every device in it (`Disconnected` with `ROOM_DELETED`), and
-  everyone hears `call_ended` with `by`. A `call_end` from anyone else is `no_call`; leave instead.
-- **Putting someone out.** The caller sends
+- **Ending for everyone.** The caller's `call_end`, or an admin of the group's (ADR-0115), ends
+  the call for everyone: LiveKit closes the call's room, which disconnects every device in it
+  (`Disconnected` with `ROOM_DELETED`), and everyone hears `call_ended` with `by`. A `call_end`
+  from anyone else is `no_call`; leave instead.
+- **Putting someone out.** The caller, or an admin of the group, sends
   `{"type":"call_expel","room":...,"call":...,"user":"<member>"}` (`user` must be a member of
   the chat). The caller is answered `call_moved` as soon as it is decided; the call moves to a new
   media room, and everyone else, the one put out included, hears `call_moved` with `expelled`

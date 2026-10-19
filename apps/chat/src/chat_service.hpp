@@ -339,11 +339,13 @@ private:
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
     void called(ClientId id, const core::RoomId& room, const std::optional<CallId>& answering,
+                const std::optional<rt::MessageKey>& rid,
                 std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
     // A call_status answer from the room's owner: `asked` false when the join asked it, which
     // tells the socket only of a ring that is ringing it.
     void statused(ClientId id, const core::RoomId& room, bool asked,
-                  std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
+                  std::expected<std::vector<std::byte>, rt::RouteError> result,
+                  const std::optional<rt::MessageKey>& rid = std::nullopt) noexcept;
     void moved(ClientId id, const CallMove& move,
                std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept;
     // The client in the room, charged a join; told why not and nullptr otherwise.
