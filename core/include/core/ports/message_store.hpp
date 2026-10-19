@@ -121,17 +121,19 @@ enum class Admission : std::uint8_t {
 // What a room is recorded as, and whether a user is on its member list: what a call's handler
 // checks on the room's owner before it hands out a ticket (ADR-0050). Unlike admits, it records
 // nothing and widens nothing: a room with no kind recorded has no kind here.
-struct RoomAccess {
-    std::optional<RoomKind> kind;
-    bool member = false;
-
-    friend bool operator==(const RoomAccess&, const RoomAccess&) = default;
-};
-
 // What a member may do to a room's member list (ADR-0096). A group chat's creator is its first
 // admin; admins add and remove members; anyone listed may leave a group chat. Members of a direct
 // chat, and rows an operator inserts without a role, are plain members.
 enum class MemberRole : std::uint8_t { Member, Admin };
+
+struct RoomAccess {
+    std::optional<RoomKind> kind;
+    bool member = false;
+    // The member's role; Member for anyone not listed.
+    MemberRole role = MemberRole::Member;
+
+    friend bool operator==(const RoomAccess&, const RoomAccess&) = default;
+};
 
 // A small group (ADR-0016): each member's device is an MLS member, and every commit reaches all
 // of them. Counted with the creator and every admin.

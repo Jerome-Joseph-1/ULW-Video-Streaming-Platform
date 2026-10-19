@@ -91,8 +91,13 @@ public:
             done(std::unexpected(core::ports::MessageStoreError::Unavailable));
             return;
         }
-        done(core::ports::RoomAccess{
-            .kind = kind, .member = std::ranges::find(members_, user.view()) != members_.end()});
+        const bool listed = std::ranges::find(members_, user.view()) != members_.end();
+        done(core::ports::RoomAccess{.kind = kind,
+                                     .member = listed,
+                                     .role = listed && std::ranges::find(admins_, user.view()) !=
+                                                           admins_.end()
+                                                 ? core::ports::MemberRole::Admin
+                                                 : core::ports::MemberRole::Member});
     }
     void record_live(const core::RoomId& /*room*/,
                      core::ports::MessageCallback<void> done) override {
@@ -102,6 +107,7 @@ public:
 
     std::optional<RoomKind> kind = RoomKind::DirectChat;
     std::vector<std::string> members_{"alice", "bob"};
+    std::vector<std::string> admins_;
     bool down = false;
     // access fails to take the ask at all, as an allocation inside it would.
     bool throwing = false;
@@ -1825,7 +1831,7 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
 
     // Layouts 1 (#132's) and 2 (#181's, which drops a ticket's relays) are other nodes': neither
     // their asks nor their answers are read.
-    for (const auto layout : {std::byte{1}, std::byte{2}}) {
+    for (const auto layout : {std::byte{1}, std::byte{2}, std::byte{3}}) {
         auto other_ask = chat::encode_request(request);
         other_ask[0] = layout;
         EXPECT_FALSE(chat::decode_request(other_ask));
@@ -1836,8 +1842,108 @@ TEST(CallCodec, RequestsAndAnswersComeBackAsTheyWereSent) {
 
     auto old_refusal =
         chat::encode_answer({.outcome = CallOutcome::NotMember, .ticket = std::nullopt});
-    old_refusal[0] = std::byte{2};
+    old_refusal[0] = std::byte{3};
     EXPECT_FALSE(chat::decode_answer(old_refusal));
+}
+
+// ADR-0115: layout 4 carries how a ticket's call rings and why a decline was given.
+TEST(CallCodec, ARingsOptionsAndADeclinesReasonComeBackAsTheyWereSent) {
+    const chat::CallRequest request{
+        .user = *core::UserId::parse("alice"),
+        .device = *core::DeviceId::parse(kDevice),
+        .answering = std::nullopt,
+        .ring = {.mode = chat::RingOptions::Mode::Only,
+                 .only = {*core::UserId::parse("bob"), *core::UserId::parse("carol")},
+                 .max_people = 4}};
+    const auto back = chat::decode_request(chat::encode_request(request));
+    ASSERT_TRUE(back);
+    EXPECT_EQ(std::get<chat::CallRequest>(*back).ring, request.ring);
+    auto bad_mode = chat::encode_request(request);
+    // The mode follows the user (1 + 5 bytes) and the device (16).
+    bad_mode[2 + 1 + 5 + 16] = std::byte{3};
+    EXPECT_FALSE(chat::decode_request(bad_mode));
+
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    const chat::CallSignalRequest decline{.user = *core::UserId::parse("bob"),
+                                          .signal = chat::CallSignal::Decline,
+                                          .call = chat::CallId::generate(clock, random),
+                                          .target = std::nullopt,
+                                          .reason = chat::CallReason::Busy,
+                                          .text = "later"};
+    const auto declined = chat::decode_request(chat::encode_request(decline));
+    ASSERT_TRUE(declined);
+    EXPECT_EQ(std::get<chat::CallSignalRequest>(*declined).reason, chat::CallReason::Busy);
+    EXPECT_EQ(std::get<chat::CallSignalRequest>(*declined).text, "later");
+    // caller_left is no decline's reason.
+    auto wrong = decline;
+    wrong.reason = chat::CallReason::CallerLeft;
+    EXPECT_FALSE(chat::decode_request(chat::encode_request(wrong)));
+}
+
+TEST_F(GroupCallHandlerTest, AGroupsAdminPutsMembersOutAsItsCallerDoes) {
+    store_.admins_ = {"bob"};
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    ASSERT_EQ(ticket("carol"), call);
+    // Carol is no admin.
+    move("carol", chat::CallSignal::End, call);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::NoCall);
+    move("carol", chat::CallSignal::Expel, call, kRoom, "bob");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::NoCall);
+    move("bob", chat::CallSignal::Expel, call, kRoom, "carol");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(plane_.expelled, std::vector{*core::UserId::parse("carol")});
+}
+
+TEST_F(GroupCallHandlerTest, AGroupsAdminEndsItsCallForEveryone) {
+    store_.admins_ = {"bob"};
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    move("bob", chat::CallSignal::End, call);
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Done);
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
+    EXPECT_EQ(handler_->calls(), 0U);
+}
+
+class PeopleCappedCallHandlerTest : public GroupCallHandlerTest {
+protected:
+    PeopleCappedCallHandlerTest() {
+        handler_ = make(chat::CallLimits{.group_participants = 8, .group_people = 2});
+    }
+};
+
+// ADR-0115: a group call's cap counts people, each once whatever their devices.
+TEST_F(PeopleCappedCallHandlerTest, ACallTakesSoManyPeopleWhateverTheirDevices) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("alice", kOtherDevice), call);
+    ASSERT_EQ(ticket("bob"), call);
+    // Bob's second device fits: he is in it already.
+    ASSERT_EQ(ticket("bob", kOtherDevice), call);
+    ask("carol");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Full);
+    EXPECT_TRUE(sfu_.joins.empty());
+}
+
+TEST_F(GroupCallHandlerTest, ACallsOwnCapOnPeopleIsTheOneItsFirstTicketNamed) {
+    const auto request = chat::encode_request(chat::CallRequest{
+        .user = *core::UserId::parse("alice"),
+        .device = *core::DeviceId::parse(kDevice),
+        .answering = std::nullopt,
+        .ring = {.mode = chat::RingOptions::Mode::None, .only = {}, .max_people = 2}});
+    handler_->on_ask(room_id(), request,
+                     [this](std::expected<std::vector<std::byte>, rt::RouteError> r) noexcept {
+                         answers_.push_back(*chat::decode_answer(*r));
+                     });
+    sfu_.open();
+    sfu_.issue();
+    const chat::CallId call = *answers_.back().call;
+    // It rang nobody.
+    EXPECT_EQ(heard(chat::RingEvent::Ringing), 0U);
+    ASSERT_EQ(ticket("bob"), call);
+    ask("carol");
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Full);
 }
 
 // ADR-0113: a call lasts while someone is in its media room, as the SFU lists it.

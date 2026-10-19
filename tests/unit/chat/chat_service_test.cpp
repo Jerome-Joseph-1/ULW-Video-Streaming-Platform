@@ -1687,6 +1687,71 @@ TEST_F(CallStatusTest, ACallsStatusIsAskedOfTheOwnerForAJoinedRoomAndAnsweredWha
     EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
 }
 
+// ADR-0115: a call command's answer echoes its request id, and an error names the call it was
+// about.
+TEST_F(ChatServiceTest, ACallCommandsAnswerEchoesItsRequestIdAndAnErrorItsCall) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    const auto call = chat::CallId::generate(clock, random);
+    service_->call_move(a, {.room = room_id(),
+                            .signal = chat::CallSignal::Decline,
+                            .call = call,
+                            .target = std::nullopt,
+                            .reason = chat::CallReason::Busy,
+                            .text = "soon",
+                            .rid = rt::MessageKey::parse("d-1")});
+    ASSERT_EQ(rooms_.asks.size(), 1U);
+    const auto asked = chat::decode_request(rooms_.asks[0].request);
+    ASSERT_TRUE(asked);
+    EXPECT_EQ(std::get<chat::CallSignalRequest>(*asked).reason, chat::CallReason::Busy);
+    EXPECT_EQ(std::get<chat::CallSignalRequest>(*asked).text, "soon");
+    rooms_.asks[0].done(answer(chat::CallOutcome::NoCall));
+    const auto refused = core::json::parse(alice.take().at(0));
+    ASSERT_TRUE(refused);
+    EXPECT_EQ(refused->find("reason")->as_string(), "no_call");
+    EXPECT_EQ(refused->find("call")->as_string(), call.to_string());
+    EXPECT_EQ(refused->find("rid")->as_string(), "d-1");
+    // Done: the event names its call, and the request id is echoed.
+    service_->call_move(a, {.room = room_id(),
+                            .signal = chat::CallSignal::Decline,
+                            .call = call,
+                            .target = std::nullopt,
+                            .reason = chat::CallReason::Busy,
+                            .text = "soon",
+                            .rid = rt::MessageKey::parse("d-2")});
+    rooms_.asks[1].done(chat::encode_answer({.outcome = chat::CallOutcome::Done,
+                                             .ticket = std::nullopt,
+                                             .call = call,
+                                             .caller = *core::UserId::parse("bob")}));
+    const auto done = core::json::parse(alice.take().at(0));
+    ASSERT_TRUE(done);
+    EXPECT_EQ(done->find("type")->as_string(), "call_declined");
+    EXPECT_EQ(done->find("reason")->as_string(), "busy");
+    EXPECT_EQ(done->find("text")->as_string(), "soon");
+    EXPECT_EQ(done->find("rid")->as_string(), "d-2");
+    // A ticket's ask carries how it rings, and its answer the request id.
+    service_->call(a, {.room = room_id(),
+                       .device = *core::DeviceId::parse(kDevice),
+                       .answering = std::nullopt,
+                       .ring = {.mode = chat::RingOptions::Mode::None, .only = {}, .max_people = 3},
+                       .rid = rt::MessageKey::parse("t-1")});
+    const auto ticket_ask = chat::decode_request(rooms_.asks[2].request);
+    ASSERT_TRUE(ticket_ask);
+    EXPECT_EQ(std::get<chat::CallRequest>(*ticket_ask).ring.mode, chat::RingOptions::Mode::None);
+    EXPECT_EQ(std::get<chat::CallRequest>(*ticket_ask).ring.max_people, 3U);
+    rooms_.asks[2].done(answer(chat::CallOutcome::Busy));
+    const auto busy = core::json::parse(alice.take().at(0));
+    ASSERT_TRUE(busy);
+    EXPECT_EQ(busy->find("reason")->as_string(), "busy");
+    EXPECT_EQ(busy->find("rid")->as_string(), "t-1");
+    EXPECT_EQ(busy->find("call"), nullptr);
+}
+
 TEST_F(ChatServiceTest, ACallIsAskedOfTheRoomsOwnerAndItsTicketHandedToTheClient) {
     FakeClient alice;
     const auto a = attach(alice);

@@ -1199,4 +1199,138 @@ TEST_F(GroupRingerTest, AGroupCallStillRingsForThoseNotYetInItWhileOthersTalk) {
     EXPECT_EQ(ringer_.ringing(room_id(), call, user("carol")), false);
 }
 
+// ADR-0115: a call may ring only the members named, or nobody.
+TEST_F(GroupRingerTest, AGroupCallRingsOnlyTheMembersNamedAndAnyOtherMayStillJoin) {
+    const chat::RingOptions only{.mode = chat::RingOptions::Mode::Only,
+                                 .only = {user("carol"), user("mallory")}};
+    const auto call =
+        ringer_.ticketed(room_id(), user("alice"), kGroup, chat::CallKind::Group, only);
+    ASSERT_TRUE(call && *call);
+    // Mallory is not on the list: only carol rings, and the caller hears it rings.
+    EXPECT_EQ(plane_.take(),
+              (std::vector{line(RingEvent::Ringing, "alice"), line(RingEvent::Ringing, "carol")}));
+    EXPECT_EQ(join("bob"), *call);
+    EXPECT_EQ(plane_.take(), (std::vector{line(RingEvent::Answered, "alice", "bob"),
+                                          line(RingEvent::Answered, "carol", "bob"),
+                                          line(RingEvent::Answered, "bob", "bob")}));
+}
+
+TEST_F(GroupRingerTest, ACallThatRingsNobodyIsOnAtOnceAndEveryoneHearsWhoComes) {
+    const chat::RingOptions none{.mode = chat::RingOptions::Mode::None};
+    const auto call =
+        ringer_.ticketed(room_id(), user("alice"), kGroup, chat::CallKind::Group, none);
+    ASSERT_TRUE(call && *call);
+    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_EQ(ringer_.ringing(room_id(), **call, std::nullopt), false);
+    // Not counted against the room's rings.
+    EXPECT_FALSE(ringer_.ring_limited(room_id(), user("alice")));
+    EXPECT_EQ(join("dave"), *call);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Answered, "dave"));
+    // Nobody to decline, nothing to cancel; the caller ends it, as any group call.
+    EXPECT_FALSE(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, **call));
+    EXPECT_FALSE(ringer_.signal(room_id(), user("alice"), CallSignal::Cancel, **call));
+    EXPECT_EQ(ringer_.may_end(room_id(), user("alice"), **call), chat::MediaStepNeeded::Close);
+    // Its occupancy is asked after the hold, as an answered call's.
+    clock_.advance(chat::RingLimits{}.answered_hold);
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), **call, false);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
+}
+
+TEST_F(RingerTest, ADirectCallThatRingsNobodyIsAnsweredByTheOtherMemberComing) {
+    const chat::RingOptions none{.mode = chat::RingOptions::Mode::None};
+    const auto call =
+        ringer_.ticketed(room_id(), user("alice"), kPair, chat::CallKind::Direct, none);
+    ASSERT_TRUE(call && *call);
+    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_EQ(ringer_.ticketed(room_id(), user("bob"), std::nullopt).value_or(std::nullopt), *call);
+    EXPECT_EQ(plane_.take(), (std::vector{line(RingEvent::Answered, "alice", "bob"),
+                                          line(RingEvent::Answered, "bob", "bob")}));
+    // Once.
+    EXPECT_EQ(ringer_.ticketed(room_id(), user("bob"), std::nullopt).value_or(std::nullopt), *call);
+    EXPECT_TRUE(plane_.take().empty());
+    // A list naming nobody on the room's rings nobody too.
+    const chat::RingOptions stranger{.mode = chat::RingOptions::Mode::Only,
+                                     .only = {user("mallory")}};
+    EXPECT_EQ(
+        ringer_
+            .ticketed(room_id(kOtherRoom), user("alice"), kPair, chat::CallKind::Direct, stranger)
+            .value_or(std::nullopt)
+            .has_value(),
+        true);
+    EXPECT_TRUE(plane_.take().empty());
+}
+
+TEST_F(GroupRingerTest, AGroupsAdminModeratesItsCallAsItsCallerDoes) {
+    const CallId call = ring_group();
+    ASSERT_EQ(join("bob"), call);
+    ASSERT_EQ(join("carol"), call);
+    plane_.take();
+    EXPECT_FALSE(ringer_.may_end(room_id(), user("bob"), call));
+    EXPECT_EQ(ringer_.may_end(room_id(), user("bob"), call, /*admin=*/true),
+              chat::MediaStepNeeded::Close);
+    EXPECT_FALSE(ringer_.expel(room_id(), user("bob"), call, user("carol")));
+    // Not themselves.
+    EXPECT_FALSE(ringer_.expel(room_id(), user("bob"), call, user("bob"), /*admin=*/true));
+    EXPECT_EQ(ringer_.expel(room_id(), user("bob"), call, user("carol"), /*admin=*/true),
+              chat::MediaStepNeeded::Move);
+    EXPECT_TRUE(ringer_.expelled(room_id(), user("carol")));
+}
+
+TEST_F(RingerTest, ADeclineSaysWhyToEveryoneAndTheWatcher) {
+    RecordingWatcher watcher;
+    ringer_.watch(&watcher);
+    const CallId call = ring();
+    plane_.take();
+    watcher.take();
+    EXPECT_EQ(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call,
+                             chat::CallReason::Busy, "In a meeting, call you at 6"),
+              user("alice"));
+    ASSERT_EQ(plane_.sent.size(), 2U);
+    for (const chat::CallNotice& n : plane_.sent) {
+        EXPECT_EQ(n.event, RingEvent::Declined);
+        EXPECT_EQ(n.reason, chat::CallReason::Busy);
+        EXPECT_EQ(n.text, "In a meeting, call you at 6");
+    }
+    ASSERT_EQ(watcher.events.size(), 1U);
+    EXPECT_EQ(watcher.events[0].reason, chat::CallReason::Busy);
+    EXPECT_EQ(watcher.events[0].text, "In a meeting, call you at 6");
+}
+
+TEST(CallNoticeCodec, ADeclinedNoticeCarriesWhyAndAQuickReply) {
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    chat::CallNotice sent{.event = RingEvent::Declined,
+                          .to = user("alice"),
+                          .room = room_id(),
+                          .call = CallId::generate(clock, random),
+                          .from = user("alice"),
+                          .by = user("bob"),
+                          .expires_at = core::WallTime{core::Millis{5}},
+                          .subject = std::nullopt,
+                          .reason = chat::CallReason::NotAllowed,
+                          .text = "Can't talk \"now\""};
+    const auto back = chat::decode_notice(chat::encode_notice(sent));
+    ASSERT_TRUE(back);
+    EXPECT_EQ(back->reason, chat::CallReason::NotAllowed);
+    EXPECT_EQ(back->text, sent.text);
+    // A text alone, or a reason alone.
+    sent.reason.reset();
+    EXPECT_EQ(chat::decode_notice(chat::encode_notice(sent))->text, sent.text);
+    EXPECT_FALSE(chat::decode_notice(chat::encode_notice(sent))->reason);
+    sent.reason = chat::CallReason::Declined;
+    sent.text.clear();
+    EXPECT_EQ(chat::decode_notice(chat::encode_notice(sent))->reason, chat::CallReason::Declined);
+    // A cancel's reason is no decline's, and a text past the bound is cut when sent.
+    auto bytes = chat::encode_notice(sent);
+    bytes[bytes.size() - 3] = std::byte{1};
+    EXPECT_FALSE(chat::decode_notice(bytes));
+    sent.text = std::string(chat::kMaxDeclineText + 10, 'x');
+    EXPECT_EQ(chat::decode_notice(chat::encode_notice(sent))->text.size(), chat::kMaxDeclineText);
+    EXPECT_EQ(chat::decline_reason("busy"), chat::CallReason::Busy);
+    EXPECT_FALSE(chat::decline_reason("caller_left"));
+    EXPECT_FALSE(chat::decline_reason("nope"));
+}
+
 } // namespace

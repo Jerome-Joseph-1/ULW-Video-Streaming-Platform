@@ -20,7 +20,7 @@ namespace {
 // that cannot be reached. 2: an ask says what it asks for, and a ticket names its call. 3: a
 // ticket carries the relays its client reaches the media server through (ADR-0109), so a node
 // that would drop them refuses the answer instead.
-constexpr std::uint8_t kLayout = 3;
+constexpr std::uint8_t kLayout = 4;
 // What an ask asks for: a ticket, or one of CallSignal's values, or a ticket answering a call
 // it names (after Expel's value, so that a node without it reads it as a layout it does not
 // know and answers Unavailable, which the client retries).
@@ -265,6 +265,10 @@ std::vector<std::byte> encode_request(const CallRequest& request) {
     if (request.answering) {
         put_uuid(out, *request.answering);
     }
+    // How it rings (layout 4, ADR-0115).
+    put_u8(out, static_cast<std::uint8_t>(request.ring.mode));
+    put_users(out, request.ring.only);
+    layout::put_u16(out, request.ring.max_people);
     return out;
 }
 
@@ -276,6 +280,11 @@ std::vector<std::byte> encode_request(const CallSignalRequest& request) {
     put_uuid(out, request.call);
     if (request.signal == CallSignal::Expel) {
         put_short(out, request.target.value_or(request.user).view());
+    }
+    // Why a decline was given (layout 4, ADR-0115).
+    if (request.signal == CallSignal::Decline) {
+        put_u8(out, request.reason ? static_cast<std::uint8_t>(*request.reason) : 0);
+        put_long(out, std::string_view(request.text).substr(0, kMaxDeclineText));
     }
     return out;
 }
@@ -355,10 +364,19 @@ std::optional<CallAsk> decode_request(std::span<const std::byte> bytes) {
                 return std::nullopt;
             }
         }
-        if (!in.empty()) {
+        const auto mode = in.u8();
+        auto only = read_users(in);
+        const auto max_people = in.u16();
+        if (!mode || *mode > static_cast<std::uint8_t>(RingOptions::Mode::None) || !only ||
+            !max_people || !in.empty()) {
             return std::nullopt;
         }
-        return CallRequest{.user = *user, .device = *device, .answering = answering};
+        return CallRequest{.user = *user,
+                           .device = *device,
+                           .answering = answering,
+                           .ring = {.mode = static_cast<RingOptions::Mode>(*mode),
+                                    .only = std::move(*only),
+                                    .max_people = *max_people}};
     }
     const auto call = in.uuid<CallId>();
     if (!call) {
@@ -372,10 +390,29 @@ std::optional<CallAsk> decode_request(std::span<const std::byte> bytes) {
             return std::nullopt;
         }
     }
+    std::optional<CallReason> reason;
+    std::string text;
+    if (signal == CallSignal::Decline) {
+        const auto r = in.u8();
+        const auto said = in.long_text();
+        if (!r || (*r != 0 && !decline_reason(reason_name(static_cast<CallReason>(*r)))) || !said ||
+            said->size() > kMaxDeclineText) {
+            return std::nullopt;
+        }
+        if (*r != 0) {
+            reason = static_cast<CallReason>(*r);
+        }
+        text = std::string(*said);
+    }
     if (!in.empty()) {
         return std::nullopt;
     }
-    return CallSignalRequest{.user = *user, .signal = signal, .call = *call, .target = target};
+    return CallSignalRequest{.user = *user,
+                             .signal = signal,
+                             .call = *call,
+                             .target = target,
+                             .reason = reason,
+                             .text = std::move(text)};
 }
 
 std::vector<std::byte> encode_answer(const CallAnswer& answer) {
@@ -479,6 +516,10 @@ CallHandler::CallHandler(core::ports::IMessageStore& messages, core::ports::ISfu
       ringer_(plane, clock, random, limits.ring), next_sweep_(clock.now()) {
     limits_.group_participants =
         std::clamp(limits_.group_participants, kMinGroupParticipants, kMaxGroupParticipants);
+    limits_.group_people =
+        limits_.group_people == 0
+            ? limits_.group_participants
+            : std::clamp(limits_.group_people, kMinGroupPeople, kMaxGroupParticipants);
     ringer_.on_group_ended([this](const core::RoomId& room) noexcept { group_ended(room); });
 }
 
@@ -600,10 +641,11 @@ void CallHandler::signalled(
     }
     const bool group = access->kind == core::ports::RoomKind::GroupChat;
     if (request.signal == CallSignal::Expel || (group && request.signal == CallSignal::End)) {
-        moderate(room, request, answer);
+        moderate(room, request, answer, access->role == core::ports::MemberRole::Admin);
         return;
     }
-    const auto caller = ringer_.signal(room, request.user, request.signal, request.call);
+    const auto caller = ringer_.signal(room, request.user, request.signal, request.call,
+                                       request.reason, request.text);
     if (!caller) {
         ++counters_.no_call;
         finish(answer, {.outcome = CallOutcome::NoCall, .ticket = std::nullopt});
@@ -616,16 +658,16 @@ void CallHandler::signalled(
 }
 
 void CallHandler::moderate(const core::RoomId& room, const CallSignalRequest& request,
-                           rt::OwnerAnswer& answer) noexcept {
+                           rt::OwnerAnswer& answer, bool admin) noexcept {
     if (request.signal == CallSignal::End || !request.target) {
-        moderated(room, request, answer);
+        moderated(room, request, answer, admin);
         return;
     }
     // Only a member of the chat is put out: anyone else has no call to be in.
     try {
         messages_.access(
             room, *request.target,
-            [this, room, request, answer = std::move(answer)](
+            [this, room, request, admin, answer = std::move(answer)](
                 core::ports::MessageResult<core::ports::RoomAccess> target) mutable noexcept {
                 if (!target) {
                     ++counters_.store_unavailable;
@@ -637,7 +679,7 @@ void CallHandler::moderate(const core::RoomId& room, const CallSignalRequest& re
                     finish(answer, {.outcome = CallOutcome::NoCall, .ticket = std::nullopt});
                     return;
                 }
-                moderated(room, request, answer);
+                moderated(room, request, answer, admin);
             });
     } catch (const std::bad_alloc&) {
         if (answer) {
@@ -647,11 +689,11 @@ void CallHandler::moderate(const core::RoomId& room, const CallSignalRequest& re
 }
 
 void CallHandler::moderated(const core::RoomId& room, const CallSignalRequest& request,
-                            rt::OwnerAnswer& answer) noexcept {
+                            rt::OwnerAnswer& answer, bool admin) noexcept {
     const bool end = request.signal == CallSignal::End;
-    const auto step = end ? ringer_.may_end(room, request.user, request.call)
+    const auto step = end ? ringer_.may_end(room, request.user, request.call, admin)
                       : request.target
-                          ? ringer_.expel(room, request.user, request.call, *request.target)
+                          ? ringer_.expel(room, request.user, request.call, *request.target, admin)
                           : std::nullopt;
     if (!step) {
         ++counters_.no_call;
@@ -1459,6 +1501,23 @@ void CallHandler::counted(
         const auto others = std::ranges::count_if(*listed, [&](const auto& p) {
             return p.user != waiter.request.user || p.device != waiter.request.device;
         });
+        // People: each user once, the asker aside, who is in it already (another device of
+        // theirs) or is the one more it would take (ADR-0115).
+        std::vector<core::UserId> people;
+        for (const core::ports::MediaParticipant& p : *listed) {
+            if (p.user != waiter.request.user &&
+                std::ranges::find(people, p.user) == people.end()) {
+                people.push_back(p.user);
+            }
+        }
+        const bool in_already = std::ranges::any_of(
+            *listed, [&](const auto& p) { return p.user == waiter.request.user; });
+        if (!in_already && people.size() >= people_cap(room, waiter)) {
+            ++counters_.full;
+            --in_flight_;
+            finish(waiter.answer, {.outcome = CallOutcome::Full, .ticket = std::nullopt});
+            return;
+        }
         if (static_cast<std::size_t>(others) >= cap(entry.kind)) {
             ++counters_.full;
             --in_flight_;
@@ -1526,7 +1585,8 @@ void CallHandler::joined(const core::RoomId& room, std::uint64_t generation) noe
 void CallHandler::ticketed(const core::RoomId& room, const Waiter& waiter, rt::OwnerAnswer& answer,
                            core::ports::MediaTicket ticket) noexcept {
     // Rung once the ticket is in hand: a caller the SFU turned away rings nobody.
-    const auto call = ringer_.ticketed(room, waiter.request.user, waiter.members, waiter.kind);
+    const auto call = ringer_.ticketed(room, waiter.request.user, waiter.members, waiter.kind,
+                                       waiter.request.ring);
     if (!call) {
         switch (call.error().why) {
         case RingRefusal::Why::Busy:
@@ -1705,6 +1765,17 @@ void CallHandler::check_occupancy() noexcept {
             ringer_.occupied(room, call, std::nullopt);
         }
     }
+}
+
+std::size_t CallHandler::people_cap(const core::RoomId& room, const Waiter& waiter) const noexcept {
+    std::size_t most = limits_.group_people;
+    // The call's own, or the one this ticket would start.
+    const std::uint16_t own =
+        ringer_.idle(room) ? waiter.request.ring.max_people : ringer_.max_people(room);
+    if (own != 0) {
+        most = std::min<std::size_t>(most, std::max<std::uint16_t>(own, kMinGroupPeople));
+    }
+    return most;
 }
 
 void CallHandler::current(const core::RoomId& room, rt::OwnerAnswer answer) noexcept {

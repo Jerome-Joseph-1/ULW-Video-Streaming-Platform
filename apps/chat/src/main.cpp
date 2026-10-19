@@ -258,6 +258,9 @@ chat::Limits limits_of(const chat::Config& config) {
     if (const std::optional<std::uint16_t> group = config.group_participants) {
         chat_limits.calls.group_participants = *group;
     }
+    if (const std::optional<std::uint16_t> people = config.group_people) {
+        chat_limits.calls.group_people = *people;
+    }
     chat_limits.service.self_service = config.self_service;
     const chat::ClientLimits& per_client = config.client_limits;
     chat_limits.max_connections_per_ip =

@@ -204,8 +204,12 @@ void MemoryMessageStore::access(const core::RoomId& room, const core::UserId& us
     if (const auto recorded = kinds_.find(room); recorded != kinds_.end()) {
         answer.kind = recorded->second;
     }
-    const auto listed = members_.find(room);
-    answer.member = listed != members_.end() && listed->second.contains(user);
+    if (const auto listed = members_.find(room); listed != members_.end()) {
+        if (const auto it = listed->second.find(user); it != listed->second.end()) {
+            answer.member = true;
+            answer.role = it->second;
+        }
+    }
     defer([done = std::move(done), answer]() mutable noexcept { done(answer); });
 }
 

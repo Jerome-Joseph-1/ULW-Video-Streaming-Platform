@@ -14,6 +14,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -33,6 +34,10 @@ inline constexpr std::uint16_t kCallParticipants = 2;
 // A group chat's call: CallLimits::group_participants devices, within these bounds (ADR-0095).
 inline constexpr std::uint16_t kMinGroupParticipants = 3;
 inline constexpr std::uint16_t kMaxGroupParticipants = 16;
+// A group call's cap on people (CallLimits::group_people, RingOptions::max_people) is at least
+// this: the caller and one other.
+inline constexpr std::uint16_t kMinGroupPeople = kMinCallPeople;
+static_assert(kMaxCallPeople == kMaxGroupParticipants);
 // The media generation a room starts at (migrations/0014). It moves on only to put someone out
 // of the call or to end a group call, by the owner's fenced write (ADR-0050, ADR-0095).
 inline constexpr core::ports::MediaGeneration kCallGeneration{1};
@@ -84,6 +89,8 @@ struct CallRequest {
     // over (cancelled, declined, missed or ended) and the room with no call, or ringing from the
     // asker, is refused NoCall instead of starting a ring of its own the other way.
     std::optional<CallId> answering = std::nullopt;
+    // How a call this ticket starts rings, and how many people it takes (ADR-0115).
+    RingOptions ring = {};
 };
 
 // Decline, cancel, end, leave the room's call `call`, or put `target` out of it.
@@ -93,6 +100,9 @@ struct CallSignalRequest {
     CallId call;
     // Expel only.
     std::optional<core::UserId> target = std::nullopt;
+    // Decline only: why, and a quick reply of at most kMaxDeclineText bytes (ADR-0115).
+    std::optional<CallReason> reason = std::nullopt;
+    std::string text = {};
 };
 
 // Whether the room's call `call` still rings (ADR-0111): for `user` when named, who may be one
@@ -163,6 +173,10 @@ struct CallLimits {
     // capacity derivation). kMinGroupParticipants to kMaxGroupParticipants;
     // ULW_CALL_GROUP_PARTICIPANTS overrides it.
     std::uint16_t group_participants = 8;
+    // People in a group chat's call, each counted once whatever their devices (ADR-0115): a
+    // ticket for someone new past it is refused Full. kMinGroupPeople to kMaxGroupParticipants;
+    // 0 is group_participants. ULW_CALL_GROUP_PEOPLE overrides it.
+    std::uint16_t group_people = 0;
     // Old media rooms waiting to be closed after a move, node-wide: an expulsion past it is
     // answered busy. A close the SFU could not answer is tried again every second, for
     // close_retry_for.
@@ -338,10 +352,11 @@ private:
     [[nodiscard]] bool callable(const core::ports::MessageResult<core::ports::RoomAccess>& access,
                                 rt::OwnerAnswer& answer) noexcept;
     // The group call's caller ending it for everyone, or putting someone out.
+    // `admin`: the asker is one of the group's admins, who moderate its call as its caller does.
     void moderate(const core::RoomId& room, const CallSignalRequest& request,
-                  rt::OwnerAnswer& answer) noexcept;
+                  rt::OwnerAnswer& answer, bool admin) noexcept;
     void moderated(const core::RoomId& room, const CallSignalRequest& request,
-                   rt::OwnerAnswer& answer) noexcept;
+                   rt::OwnerAnswer& answer, bool admin) noexcept;
     // Moves the media generation on to put `move.subject` out when a device of theirs may be in
     // it (a ticket of theirs lately, or the SFU lists one or cannot say); otherwise an expulsion
     // is kept with the generation as it stands, and a removal needs nothing.
@@ -385,6 +400,9 @@ private:
     void check_occupancy() noexcept;
     // Answers a current-call ask from the ringer, with who the SFU lists when it can say.
     void current(const core::RoomId& room, rt::OwnerAnswer answer) noexcept;
+    // People a group call takes, the asker aside: the operator's cap, or the call's own.
+    [[nodiscard]] std::size_t people_cap(const core::RoomId& room,
+                                         const Waiter& waiter) const noexcept;
     [[nodiscard]] std::uint16_t cap(CallKind kind) const noexcept {
         return kind == CallKind::Group ? limits_.group_participants : kCallParticipants;
     }

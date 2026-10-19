@@ -325,6 +325,96 @@ TEST(Envelope, ACallMayNameTheRingingCallItAnswers) {
               std::unexpected(EnvelopeError::Malformed));
 }
 
+// ADR-0115: how a call rings, how many people it takes, and the client's id for the request.
+TEST(Envelope, ACallMayNameWhoItRingsHowManyPeopleItTakesAndItsRequestId) {
+    const std::string head = R"({"type":"call","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd",)"
+                             R"("device":"01a0eb86-6cca-7dce-84cc-3bb47615f9aa")";
+    const auto parsed = [&](std::string_view more) {
+        return chat::parse_command(head + std::string(more) + "}");
+    };
+    const auto plain = parsed("");
+    ASSERT_TRUE(plain);
+    EXPECT_EQ(std::get<chat::Call>(*plain).ring, chat::RingOptions{});
+    EXPECT_FALSE(std::get<chat::Call>(*plain).rid);
+    const auto quiet = parsed(R"(,"ring":false,"max_people":3,"rid":"r-1")");
+    ASSERT_TRUE(quiet);
+    const auto& q = std::get<chat::Call>(*quiet);
+    EXPECT_EQ(q.ring.mode, chat::RingOptions::Mode::None);
+    EXPECT_EQ(q.ring.max_people, 3U);
+    EXPECT_EQ(q.rid->view(), "r-1");
+    const auto some = parsed(R"(,"ring":["bob","carol"])");
+    ASSERT_TRUE(some);
+    EXPECT_EQ(std::get<chat::Call>(*some).ring.mode, chat::RingOptions::Mode::Only);
+    EXPECT_EQ(std::get<chat::Call>(*some).ring.only.size(), 2U);
+    EXPECT_EQ(std::get<chat::Call>(*parsed(R"(,"ring":true)")).ring.mode,
+              chat::RingOptions::Mode::All);
+    for (const std::string_view bad :
+         {R"(,"ring":"bob")", R"(,"ring":[1])", R"(,"max_people":1)", R"(,"max_people":17)",
+          R"(,"max_people":"3")", R"(,"rid":5)"}) {
+        EXPECT_EQ(parsed(bad), std::unexpected(EnvelopeError::Malformed)) << bad;
+    }
+    EXPECT_EQ(parsed(R"(,"ring":["b o b"])"), std::unexpected(EnvelopeError::BadUser));
+    EXPECT_EQ(parsed(R"(,"rid":"a b")"), std::unexpected(EnvelopeError::BadId));
+}
+
+TEST(Envelope, ADeclineMaySayWhyAndAddAQuickReply) {
+    const std::string head =
+        R"({"type":"call_decline","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd",)"
+        R"("call":"01a0eb86-6cca-7dce-84cc-3bb47615f9cc")";
+    const auto c = chat::parse_command(head + R"(,"reason":"busy","text":"In a \"meeting\""})");
+    ASSERT_TRUE(c) << chat::reason(c.error());
+    const auto& move = std::get<chat::CallMove>(*c);
+    EXPECT_EQ(move.reason, chat::CallReason::Busy);
+    EXPECT_EQ(move.text, R"(In a "meeting")");
+    EXPECT_EQ(chat::parse_command(head + R"(,"reason":"caller_left"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    EXPECT_EQ(chat::parse_command(head + R"(,"text":")" +
+                                  std::string(chat::kMaxDeclineText + 1, 'x') + R"("})"),
+              std::unexpected(EnvelopeError::Malformed));
+    // Only a decline says why.
+    EXPECT_EQ(chat::parse_command(
+                  R"({"type":"call_cancel","room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd",)"
+                  R"("call":"01a0eb86-6cca-7dce-84cc-3bb47615f9cc","reason":"busy"})"),
+              std::unexpected(EnvelopeError::Malformed));
+    // And the event everyone hears carries it.
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    std::string out;
+    chat::write_call_event(out, {.event = chat::RingEvent::Declined,
+                                 .to = *core::UserId::parse("alice"),
+                                 .room = room(),
+                                 .call = chat::CallId::generate(clock, random),
+                                 .from = *core::UserId::parse("alice"),
+                                 .by = *core::UserId::parse("bob"),
+                                 .expires_at = {},
+                                 .subject = std::nullopt,
+                                 .reason = move.reason,
+                                 .text = move.text});
+    const auto json = core::json::parse(out);
+    ASSERT_TRUE(json) << out;
+    EXPECT_EQ(json->find("reason")->as_string(), "busy");
+    EXPECT_EQ(json->find("text")->as_string(), R"(In a "meeting")");
+}
+
+TEST(Envelope, AnAnswerEchoesTheCallAndTheRequestIdItWasAbout) {
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    const auto call = chat::CallId::generate(clock, random);
+    std::string out;
+    chat::write_call_error(out, "no_call", room(), std::nullopt);
+    chat::append_echo(out, call, rt::MessageKey::parse("r-9"));
+    const auto json = core::json::parse(out);
+    ASSERT_TRUE(json) << out;
+    EXPECT_EQ(json->find("reason")->as_string(), "no_call");
+    EXPECT_EQ(json->find("call")->as_string(), call.to_string());
+    EXPECT_EQ(json->find("rid")->as_string(), "r-9");
+    std::string plain;
+    chat::write_call_error(plain, "busy", room(), std::nullopt);
+    const std::string before = plain;
+    chat::append_echo(plain, std::nullopt, std::nullopt);
+    EXPECT_EQ(plain, before);
+}
+
 TEST(Envelope, ADeclineCancelOrEndNamesItsRoomAndCall) {
     const std::string room_field = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
     const std::string call_field = R"("call":"01a0eb86-6cca-7dce-84cc-3bb47615f9cc")";

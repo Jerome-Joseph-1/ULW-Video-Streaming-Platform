@@ -175,6 +175,10 @@ struct Call {
     core::DeviceId device;
     // "answer": the ringing call this ticket answers (calls.md, Ringing).
     std::optional<CallId> answering = std::nullopt;
+    // "ring" (false, or the members to ring) and "max_people" (ADR-0115).
+    RingOptions ring = {};
+    // "rid": the client's id for this request, echoed in its answer (ADR-0115).
+    std::optional<rt::MessageKey> rid = std::nullopt;
 };
 
 // call_decline, call_cancel, call_end, call_leave or call_expel.
@@ -184,11 +188,16 @@ struct CallMove {
     CallId call;
     // call_expel only: who is put out.
     std::optional<core::UserId> target = std::nullopt;
+    // call_decline only: "reason" and "text" (ADR-0115).
+    std::optional<CallReason> reason = std::nullopt;
+    std::string text = {};
+    std::optional<rt::MessageKey> rid = std::nullopt;
 };
 
 // call_status: the room's call, whatever its id, and who is in it (ADR-0114).
 struct CallStatusQuery {
     core::RoomId room;
+    std::optional<rt::MessageKey> rid = std::nullopt;
 };
 
 // A page of rooms or of members (core::ports::kMaxListPage at most).
@@ -327,6 +336,10 @@ void write_ticket(std::string& out, const core::RoomId& room,
 // What a ring's notice tells each socket of its member, and what a member's own decline,
 // cancel or end is answered with.
 void write_call_event(std::string& out, const CallNotice& notice);
+// Adds `call` and `rid` to the frame just written, when given (ADR-0115): what a call command's
+// answer echoes of it. A frame that names its call already is given no `call`.
+void append_echo(std::string& out, const std::optional<CallId>& call,
+                 const std::optional<rt::MessageKey>& rid);
 // A ticket answering a call that is over: no_call, naming the call it answered.
 void write_call_over(std::string& out, const core::RoomId& room, const CallId& call);
 // The room's call as its owner knows it, or that it has none (ADR-0114): the socket's and the

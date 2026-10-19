@@ -872,6 +872,22 @@ TEST_F(ServiceApiTest, ACallsStatusSaysWhetherItStillRingsForWhomeverItNames) {
 
 // ADR-0114: the backend does on a member's behalf what the member's socket can, as for a decline:
 // a page that is going away reaches the backend (sendBeacon) when it cannot reach chat.
+TEST_F(ServiceApiTest, ADeclineMaySayWhyAndAddAQuickReply) {
+    rooms_.reply(chat::CallOutcome::Done);
+    const Answer a =
+        ask("decline_call", call_body(R"(,"user":"bob","reason":"not_allowed","text":"Later")"));
+    EXPECT_EQ(a.status, 200) << a.body;
+    EXPECT_EQ(a.field("reason"), "not_allowed");
+    EXPECT_EQ(a.field("text"), "Later");
+    const auto* asked = std::get_if<chat::CallSignalRequest>(&*rooms_.asked);
+    ASSERT_NE(asked, nullptr);
+    EXPECT_EQ(asked->reason, chat::CallReason::NotAllowed);
+    EXPECT_EQ(asked->text, "Later");
+    EXPECT_EQ(ask("decline_call", call_body(R"(,"user":"bob","reason":"caller_left")")).status,
+              400);
+    EXPECT_EQ(ask("cancel_call", call_body(R"(,"user":"bob","reason":"busy")")).status, 400);
+}
+
 TEST_F(ServiceApiTest, ACancelAnEndAndALeaveAreTheMembersOwnAskedOfTheRoomsOwner) {
     const std::vector<std::tuple<std::string_view, chat::CallSignal, std::string_view>> cases{
         {"cancel_call", chat::CallSignal::Cancel, "call_cancelled"},

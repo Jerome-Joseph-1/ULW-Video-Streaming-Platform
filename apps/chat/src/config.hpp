@@ -107,6 +107,9 @@ struct Config {
     // ULW_CALL_GROUP_PARTICIPANTS: devices in a group chat's call, 3 to 16 (ADR-0095). Unset:
     // CallLimits::group_participants.
     std::optional<std::uint16_t> group_participants;
+    // ULW_CALL_GROUP_PEOPLE: people in a group chat's call, each once whatever their devices, 2 to
+    // 16 (ADR-0115). Unset: the device cap.
+    std::optional<std::uint16_t> group_people;
     ClientLimits client_limits;
     // Unset when LIVEKIT_API_KEY is: calls are not configured, and a call is answered
     // calls_disabled. With the key, the other three LIVEKIT_ variables are required.

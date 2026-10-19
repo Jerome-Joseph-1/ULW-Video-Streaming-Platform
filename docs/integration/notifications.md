@@ -105,7 +105,7 @@ From the room's owner, once each, in order after the call's `call_ringing`:
 | `type` | `by` | When |
 |---|---|---|
 | `call_answered` | who answered | A callee's ticket answered it (a group call: each member who comes) |
-| `call_declined` | who declined | A callee declined, from a socket or through `decline_call` (a group call: each one) |
+| `call_declined` | who declined | A callee declined, from a socket or through `decline_call` (a group call: each one); with `reason` and `text` when they gave them (ADR-0115) |
 | `call_cancelled` | the caller, or `null` | The caller gave up before anyone answered. `null` with `"reason":"caller_left"`: the caller was no longer in the call when it rang (ADR-0113) |
 | `call_missed` | `null` | Nobody answered by `expires_at`; `users` names who missed it. A group call that goes on without someone: `users` is those still rung when it rang out |
 | `call_ended` | who ended it, or `null` | The call was over after it was answered, or after a group call's ring ran out with only its caller in it (a member ended it, the last one left, or nobody was in it) |
@@ -148,7 +148,7 @@ event. Never the body: fetch what to show through your own backend, or show "New
 
 | Operation | Body | Answer (`200`) |
 |---|---|---|
-| `decline_call` | `room`, `call`, `user` | `{"type":"call_declined","room":..,"call":..,"by":<user>}`. As the user's own `call_decline`: checked against the room's member list on its owner, and only a callee it still rings may. Every socket of the call hears `call_declined`, and the hook gets it too. `409` `no_call` when the call no longer rings for them (answered, over, or never theirs), `409` `not_member` when the user is not on the list |
+| `decline_call` | `room`, `call`, `user`, optional `reason` and `text` | `{"type":"call_declined","room":..,"call":..,"by":<user>}`. As the user's own `call_decline`: checked against the room's member list on its owner, and only a callee it still rings may. Every socket of the call hears `call_declined`, and the hook gets it too. `409` `no_call` when the call no longer rings for them (answered, over, or never theirs), `409` `not_member` when the user is not on the list |
 | `cancel_call`, `end_call`, `leave_call` | `room`, `call`, `user` | As `decline_call`, for the user's own `call_cancel`, `call_end` or `call_leave`: what a page that is going away reaches your backend to say (ADR-0114). Answered with the event everyone hears (`call_cancelled`, `call_ended`, `call_left`) |
 | `call_status` | `room`, `call`, optional `user` | `{"type":"call_status","room":..,"call":..,"status":"ringing"\|"answered"\|"over"}`. `ringing`: it still rings (for `user`, when named: a group call may be on while it still rings for some); `answered`: it is on, and no longer rings (for them); `over`: the room has no such call now, or `user` is not in it |
 
