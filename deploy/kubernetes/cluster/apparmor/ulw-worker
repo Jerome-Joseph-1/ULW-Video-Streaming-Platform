@@ -1,0 +1,57 @@
+# The worker's AppArmor profile (RUNBOOK.md step 2, "AppArmor"): containerd's default profile
+# for a container, plus what ulw_sandbox does (infra/ffmpeg/src/sandbox_main.cpp) and nothing
+# else. The sandbox makes a user namespace and mount, network and pid namespaces of its own,
+# marks every mount private, mounts its own /proc, binds the job's scratch directory over
+# itself and makes the rest read-only. The default profile denies every mount, so on a node
+# that applies it the worker cannot start ("make mounts private: Permission denied").
+#
+# Load on every node that runs the worker, and again after this file changes:
+#   sudo install -D -m 0644 cluster/apparmor/ulw-worker /etc/apparmor.d/ulw-worker
+#   sudo apparmor_parser -r -W /etc/apparmor.d/ulw-worker
+# then add components/worker-apparmor to the overlay.
+
+abi <abi/3.0>,
+
+#include <tunables/global>
+
+profile ulw-worker flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+
+  network,
+  capability,
+  file,
+  umount,
+  # The sandbox's user namespace. Without this rule a kernel with
+  # apparmor_restrict_unprivileged_userns=1 lets the namespace be made but not used.
+  userns,
+
+  # The sandbox's mounts, each as it makes it, in its own mount namespace.
+  mount options=(rw, rprivate) -> /,
+  mount fstype=proc options=(rw, nosuid, nodev, noexec) proc -> /proc/,
+  mount options=(rw, rbind) /var/cache/ulw-worker/** -> /var/cache/ulw-worker/**,
+  # mount_setattr (read-only, then writable again) is a remount to AppArmor.
+  mount options=(ro, remount, bind) -> /**,
+  mount options=(ro, remount, rbind) -> /**,
+  mount options=(rw, remount, bind) -> /var/cache/ulw-worker/**,
+
+  # Its processes, the worker's children and their sandboxes, signal one another.
+  signal (send, receive) peer=ulw-worker,
+  signal (receive) peer=unconfined,
+  ptrace (trace, read, tracedby, readby) peer=ulw-worker,
+
+  # As containerd's default profile.
+  deny @{PROC}/* w,
+  deny @{PROC}/{[^1-9],[^1-9][^0-9],[^1-9s][^0-9y][^0-9s],[^1-9][^0-9][^0-9][^0-9/]*}/** w,
+  deny @{PROC}/sys/[^k]** w,
+  deny @{PROC}/sys/kernel/{?,??,[^s][^h][^m]**} w,
+  deny @{PROC}/sysrq-trigger rwklx,
+  deny @{PROC}/kcore rwklx,
+  deny /sys/[^f]*/** wklx,
+  deny /sys/f[^s]*/** wklx,
+  deny /sys/fs/[^c]*/** wklx,
+  deny /sys/fs/c[^g]*/** wklx,
+  deny /sys/fs/cg[^r]*/** wklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  deny /sys/kernel/security/** rwklx,
+}

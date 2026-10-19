@@ -1,0 +1,28 @@
+# The worker under its own AppArmor profile (RUNBOOK.md step 2, "AppArmor"), for nodes that
+# enforce AppArmor (cat /sys/module/apparmor/parameters/enabled prints Y). Their default
+# profile denies the mounts the worker's sandbox makes, and the worker then exits with
+# "ulw_sandbox: make mounts private: Permission denied". Load cluster/apparmor/ulw-worker on
+# every node that runs the worker first: a pod naming a profile its node has not loaded does
+# not start. An overlay lists this after components/operator-config:
+#   components:
+#     - ../../components/operator-config
+#     - ../../components/worker-apparmor
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+patches:
+  - target:
+      kind: Deployment
+      name: video-worker
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: video-worker
+        namespace: ulw
+      spec:
+        template:
+          spec:
+            securityContext:
+              appArmorProfile:
+                type: Localhost
+                localhostProfile: ulw-worker
