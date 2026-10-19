@@ -31,6 +31,31 @@ render "$root/deploy/stunner" >"$manifests/stunner.yaml"
 for overlay in staging production; do
     render "$kube/overlays/$overlay" >"$manifests/$overlay.yaml"
 done
+# Every HTTPRoute as rendered answers the overlay's PUBLIC_HOSTNAME and attaches to its
+# GATEWAY_NAME in GATEWAY_NAMESPACE: a replacement whose select matches nothing changes nothing
+# and says nothing, and the base's example values would stay.
+for overlay in staging production; do
+    python3 - "$kube/overlays/$overlay/config.env" "$manifests/$overlay.yaml" <<'EOF'
+import sys
+
+import yaml
+
+env_path, manifest_path = sys.argv[1], sys.argv[2]
+with open(env_path, encoding="utf-8") as f:
+    env = dict(line.strip().split("=", 1) for line in f
+               if "=" in line and not line.lstrip().startswith("#"))
+want = {"hostnames": [env["PUBLIC_HOSTNAME"]],
+        "parentRefs": [{"name": env["GATEWAY_NAME"], "namespace": env["GATEWAY_NAMESPACE"]}]}
+with open(manifest_path, encoding="utf-8") as f:
+    routes = [doc for doc in yaml.safe_load_all(f) if doc and doc.get("kind") == "HTTPRoute"]
+bad = [r["metadata"]["name"] for r in routes
+       if r["spec"].get("hostnames") != want["hostnames"]
+       or [{k: p.get(k) for k in ("name", "namespace")} for p in r["spec"]["parentRefs"]]
+       != want["parentRefs"]]
+if not routes or bad:
+    sys.exit(f"validate-manifests: {manifest_path}: HTTPRoute {bad or 'none'} not as {env_path}")
+EOF
+done
 # Each example overlay with components/external-turn listed after operator-config, as RUNBOOK.md
 # (step 7, "External TURN") has an operator list it: a copy of the overlay whose paths point back
 # at the tree.
