@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -535,27 +536,36 @@ void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> re
             signal(room, *s, std::move(answer));
             return;
         }
+        const auto* ticket = std::get_if<CallRequest>(&*asked);
+        if (ticket == nullptr) {
+            --in_flight_;
+            counted = false;
+            answer(std::unexpected(rt::RouteError::Unavailable));
+            return;
+        }
         // A ticket refused is one warn line on the owner, with why (#192).
-        const CallRequest& ticket = std::get<CallRequest>(*asked);
-        answer = [inner = std::move(answer), room, user = ticket.user, device = ticket.device](
+        answer = [inner = std::move(answer), room, user = ticket->user, device = ticket->device](
                      std::expected<std::vector<std::byte>, rt::RouteError> r) mutable noexcept {
-            if (r) {
-                if (const auto a = decode_answer(*r); a && a->outcome != CallOutcome::Ticket) {
-                    log_event(R"("level":"warn","msg":"call ticket refused","room":"{}",)"
-                              R"("user":"{}","device":"{}","reason":"{}")",
-                              room.to_string(), user.view(), device.to_string(),
-                              refusal_name(a->outcome));
+            try {
+                if (r) {
+                    if (const auto a = decode_answer(*r); a && a->outcome != CallOutcome::Ticket) {
+                        log_event(R"("level":"warn","msg":"call ticket refused","room":"{}",)"
+                                  R"("user":"{}","device":"{}","reason":"{}")",
+                                  room.to_string(), user.view(), device.to_string(),
+                                  refusal_name(a->outcome));
+                    }
                 }
+            } catch (const std::bad_alloc&) {
+                // The line is lost, not the answer.
+                static_cast<void>(std::fputs("chat_server: log line dropped\n", stderr));
             }
             inner(std::move(r));
         };
         // The member list, read on the owner at the moment of asking: a client's join may be
         // older than a removal still on its way to its node (ADR-0073).
         messages_.access(
-            room, std::get<CallRequest>(*asked).user,
-            [this, room,
-             waiter =
-                 Waiter{.request = std::get<CallRequest>(*asked), .answer = std::move(answer)}](
+            room, ticket->user,
+            [this, room, waiter = Waiter{.request = *ticket, .answer = std::move(answer)}](
                 core::ports::MessageResult<core::ports::RoomAccess> access) mutable noexcept {
                 checked(room, std::move(waiter), access);
             });
