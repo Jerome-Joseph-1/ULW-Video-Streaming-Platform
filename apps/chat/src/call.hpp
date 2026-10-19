@@ -376,6 +376,8 @@ private:
     }
     void listed(const core::RoomId& room, Waiter waiter,
                 core::ports::MessageResult<std::vector<core::UserId>> members) noexcept;
+    // Reads the room's member list for a ticket that may start the room's call, then admits it.
+    void restart(const core::RoomId& room, Waiter waiter) noexcept;
     void signal(const core::RoomId& room, const CallSignalRequest& request, rt::OwnerAnswer answer);
     void signalled(const core::RoomId& room, const CallSignalRequest& request,
                    rt::OwnerAnswer& answer,

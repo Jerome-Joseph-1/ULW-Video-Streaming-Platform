@@ -106,9 +106,9 @@ From the room's owner, once each, in order after the call's `call_ringing`:
 |---|---|---|
 | `call_answered` | who answered | A callee's ticket answered it (a group call: each member who comes) |
 | `call_declined` | who declined | A callee declined, from a socket or through `decline_call` (a group call: each one) |
-| `call_cancelled` | the caller | The caller gave up before anyone answered |
+| `call_cancelled` | the caller, or `null` | The caller gave up before anyone answered. `null` with `"reason":"caller_left"`: the caller was no longer in the call when it rang (ADR-0113) |
 | `call_missed` | `null` | Nobody answered by `expires_at`; `users` names who missed it. A group call that goes on without someone: `users` is those still rung when it rang out |
-| `call_ended` | who ended it, or `null` | The call was over after it was answered (a member ended it, the last one left, or nobody was in it) |
+| `call_ended` | who ended it, or `null` | The call was over after it was answered, or after a group call's ring ran out with only its caller in it (a member ended it, the last one left, or nobody was in it) |
 
 Each has `room`, `call`, `kind` and `caller` as above. Withdraw the notification of the call on
 any of them (for a group call, `call_answered` and `call_declined` withdraw only `by`'s). A

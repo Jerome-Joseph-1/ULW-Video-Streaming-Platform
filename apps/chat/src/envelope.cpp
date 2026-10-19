@@ -908,6 +908,9 @@ void write_call_event(std::string& out, const CallNotice& notice) {
         out += R"(,"expelled":)";
         core::json::append_string(out, notice.subject->view());
     }
+    if (notice.reason == CallReason::CallerLeft) {
+        out += R"(,"reason":"caller_left")";
+    }
     out += '}';
 }
 

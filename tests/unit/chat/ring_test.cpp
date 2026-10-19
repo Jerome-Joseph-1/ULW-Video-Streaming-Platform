@@ -226,14 +226,34 @@ TEST_F(RingerTest, EitherMemberEndsAnAnsweredCallWhichIsOtherwiseHeldWhileTicket
     EXPECT_TRUE(ringer_.idle(room_id()));
 }
 
-TEST_F(RingerTest, AnAnsweredCallNobodyAsksAboutIsForgottenQuietlyAfterItsHold) {
-    ring();
+// An answered call lasts while anyone is in it, however long since its last ticket, and ends
+// once the SFU lists nobody (ADR-0113).
+TEST_F(RingerTest, AnAnsweredCallNobodyAsksAboutLastsWhileAnyoneIsInIt) {
+    const CallId call = ring();
     ASSERT_TRUE(ringer_.ticketed(room_id(), user("bob"), std::nullopt));
     plane_.take();
-    clock_.advance(chat::RingLimits{}.answered_hold);
+    const chat::RingLimits limits;
+    clock_.advance(limits.answered_hold - core::Millis{1});
     ringer_.tick();
+    EXPECT_TRUE(ringer_.take_checks().empty());
+    clock_.advance(core::Millis{1});
+    ringer_.tick();
+    auto checks = ringer_.take_checks();
+    ASSERT_EQ(checks.size(), 1U);
+    EXPECT_EQ(checks[0].second, call);
+    // Asked once at a time.
+    ringer_.tick();
+    EXPECT_TRUE(ringer_.take_checks().empty());
+    ringer_.occupied(room_id(), call, true);
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    clock_.advance(limits.occupancy_check);
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), call, false);
     EXPECT_TRUE(ringer_.idle(room_id()));
-    EXPECT_TRUE(plane_.take().empty());
+    EXPECT_EQ(plane_.take(),
+              (std::vector{line(RingEvent::Ended, "alice"), line(RingEvent::Ended, "bob")}));
+    EXPECT_EQ(ringer_.counters().emptied, 1U);
     // The next ticket rings again.
     ASSERT_TRUE(ringer_.ticketed(room_id(), user("alice"), kPair).value_or(std::nullopt));
     EXPECT_EQ(plane_.take().size(), 2U);
@@ -567,16 +587,42 @@ TEST_F(GroupRingerTest, OnlyThoseStillRungHearItAgainAndMissItWhileTheCallGoesOn
     EXPECT_EQ(plane_.take(), all(RingEvent::Answered, "dave"));
 }
 
-TEST_F(GroupRingerTest, NobodyAnsweringRingsOutForEveryone) {
+// The ring is over for everyone; the call is not, while its caller is in it (ADR-0113).
+TEST_F(GroupRingerTest, NobodyAnsweringRingsOutForEveryoneAndTheCallStaysOnWhileItsCallerIsIn) {
     const CallId call = ring_group();
     plane_.take();
     clock_.advance(chat::RingLimits{}.ring_timeout);
     ringer_.tick();
     // The re-announcement due at the same time is not sent: the call rang out.
     EXPECT_EQ(plane_.take(), all(RingEvent::Missed));
+    EXPECT_FALSE(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call));
+    // On, and ringing nobody; the SFU says at once whether the caller is still in it.
+    EXPECT_EQ(ringer_.ringing(room_id(), call, std::nullopt), false);
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), call, true);
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    // Who comes later joins it, and everyone hears so.
+    EXPECT_EQ(join("bob"), call);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Answered, "bob"));
+    clock_.advance(chat::RingLimits{}.answered_hold);
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), call, false);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
+    EXPECT_TRUE(ringer_.idle(room_id()));
+}
+
+TEST_F(GroupRingerTest, ACallNobodyAnsweredEndsOnceItsCallerIsGone) {
+    const CallId call = ring_group();
+    plane_.take();
+    clock_.advance(chat::RingLimits{}.ring_timeout);
+    ringer_.tick();
+    plane_.take();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), call, false);
+    EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
     EXPECT_TRUE(ringer_.idle(room_id()));
     EXPECT_EQ(join("bob"), std::nullopt);
-    EXPECT_FALSE(ringer_.signal(room_id(), user("bob"), CallSignal::Decline, call));
 }
 
 TEST_F(GroupRingerTest, ADeclineIsOneMembersAndEveryoneDecliningIsAMissedCall) {
@@ -617,6 +663,14 @@ TEST_F(GroupRingerTest, AMembersLeavingIsHeardAndTheLastOneOutEndsTheCall) {
     ASSERT_EQ(checks.size(), 1U);
     EXPECT_EQ(checks[0].second, call);
     EXPECT_FALSE(ringer_.idle(room_id()));
+    // Nobody listed right after a ticket may be someone still connecting: it says nothing yet.
+    ringer_.occupied(room_id(), call, false);
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    clock_.advance(chat::RingLimits{}.occupancy_check);
+    ringer_.tick();
+    // Carol and dave are still rung meanwhile.
+    plane_.take();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
     ringer_.occupied(room_id(), call, false);
     EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
     EXPECT_TRUE(ringer_.idle(room_id()));
@@ -895,6 +949,40 @@ TEST(CallNoticeCodec, AMovedNoticeCarriesWhoWasPutOut) {
     EXPECT_FALSE(left_back->subject);
 }
 
+TEST(CallNoticeCodec, ACancelledNoticeCarriesWhyWhenNobodyCancelledIt) {
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    const chat::CallNotice sent{.event = RingEvent::Cancelled,
+                                .to = user("bob"),
+                                .room = room_id(),
+                                .call = CallId::generate(clock, random),
+                                .from = user("alice"),
+                                .by = std::nullopt,
+                                .expires_at = core::WallTime{core::Millis{5}},
+                                .subject = std::nullopt,
+                                .reason = chat::CallReason::CallerLeft};
+    const auto bytes = chat::encode_notice(sent);
+    const auto back = chat::decode_notice(bytes);
+    ASSERT_TRUE(back);
+    EXPECT_EQ(back->reason, chat::CallReason::CallerLeft);
+    // One without a reason is laid out as before it was added, and reads with none.
+    chat::CallNotice plain = sent;
+    plain.reason.reset();
+    const auto plain_bytes = chat::encode_notice(plain);
+    EXPECT_EQ(plain_bytes.size() + 1, bytes.size());
+    EXPECT_FALSE(chat::decode_notice(plain_bytes)->reason);
+    auto unknown = bytes;
+    unknown.back() = std::byte{2};
+    EXPECT_FALSE(chat::decode_notice(unknown));
+    // Only a cancel carries one.
+    chat::CallNotice ended = sent;
+    ended.event = RingEvent::Ended;
+    auto ended_bytes = chat::encode_notice(ended);
+    EXPECT_EQ(ended_bytes.size(), plain_bytes.size());
+    ended_bytes.push_back(std::byte{1});
+    EXPECT_FALSE(chat::decode_notice(ended_bytes));
+}
+
 TEST(CallNoticeCodec, ANoticeComesBackAsItWasSentAndAnythingElseIsRefused) {
     const ulw::test::FakeClock clock;
     ulw::test::FakeRandom random;
@@ -958,6 +1046,74 @@ public:
     std::vector<std::string> lines;
     std::vector<chat::CallEvent> events;
 };
+
+// ADR-0113: the caller is looked for in the media room from caller_grace into the ring, every
+// caller_check; nobody twice in a row ends the ring, which everyone and the watcher hear why.
+TEST_F(RingerTest, ARingNobodyWaitsOnEndsAsCallerLeft) {
+    RecordingWatcher watcher;
+    ringer_.watch(&watcher);
+    const CallId call = ring();
+    watcher.take();
+    plane_.take();
+    const chat::RingLimits limits;
+    EXPECT_FALSE(ringer_.caller_expected(room_id(), user("bob")));
+    clock_.advance(limits.caller_grace - core::Millis{1});
+    ringer_.tick();
+    EXPECT_TRUE(ringer_.take_checks().empty());
+    clock_.advance(core::Millis{1});
+    EXPECT_TRUE(ringer_.caller_expected(room_id(), user("bob")));
+    // The caller's own ticket asked again is no answer.
+    EXPECT_FALSE(ringer_.caller_expected(room_id(), user("alice")));
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), call, false);
+    // Once is not enough, and someone there starts the count again.
+    clock_.advance(limits.caller_check);
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), call, true);
+    clock_.advance(limits.caller_check);
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), call, false);
+    // The SFU not answering counts for neither.
+    clock_.advance(limits.caller_check);
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    ringer_.occupied(room_id(), call, std::nullopt);
+    EXPECT_FALSE(ringer_.idle(room_id()));
+    clock_.advance(limits.caller_check);
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    // The re-announcements due meanwhile.
+    plane_.take();
+    ringer_.occupied(room_id(), call, false);
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_EQ(plane_.take(), (std::vector{line(RingEvent::Cancelled, "alice"),
+                                          line(RingEvent::Cancelled, "bob")}));
+    ASSERT_EQ(watcher.events.size(), 1U);
+    EXPECT_EQ(watcher.events[0].event, RingEvent::Cancelled);
+    EXPECT_EQ(watcher.events[0].reason, chat::CallReason::CallerLeft);
+    EXPECT_EQ(ringer_.counters().caller_left, 1U);
+    EXPECT_EQ(ringer_.counters().cancelled, 1U);
+    // A check the room's call no longer needs is not answered into anything.
+    ringer_.occupied(room_id(), call, false);
+}
+
+TEST_F(RingerTest, TheRingTimeoutPassingWhileTheCallerIsLookedForIsAMissedCall) {
+    const CallId call = ring();
+    plane_.take();
+    clock_.advance(chat::RingLimits{}.caller_grace);
+    ringer_.tick();
+    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    clock_.advance(chat::RingLimits{}.ring_timeout);
+    ringer_.tick();
+    EXPECT_TRUE(ringer_.idle(room_id()));
+    EXPECT_EQ(plane_.take(),
+              (std::vector{line(RingEvent::Missed, "alice"), line(RingEvent::Missed, "bob")}));
+    ringer_.occupied(room_id(), call, false);
+    EXPECT_TRUE(plane_.take().empty());
+}
 
 TEST_F(RingerTest, TheWatcherHearsTheFirstRingWithWhomItRangAndHowItEndsOnceEach) {
     RecordingWatcher watcher;

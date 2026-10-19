@@ -438,6 +438,17 @@ TEST(Envelope, GroupCallEventsAreTheDocumentedShapes) {
                                  .by = std::nullopt,
                                  .expires_at = {}});
     EXPECT_EQ(out, R"({"type":"call_ended",)" + head + "}");
+    out.clear();
+    chat::write_call_event(out, {.event = chat::RingEvent::Cancelled,
+                                 .to = bob,
+                                 .room = room(),
+                                 .call = call,
+                                 .from = alice,
+                                 .by = std::nullopt,
+                                 .expires_at = {},
+                                 .subject = std::nullopt,
+                                 .reason = chat::CallReason::CallerLeft});
+    EXPECT_EQ(out, R"({"type":"call_cancelled",)" + head + R"(,"reason":"caller_left"})");
 }
 
 TEST(Envelope, CallEventsAreTheDocumentedShapes) {

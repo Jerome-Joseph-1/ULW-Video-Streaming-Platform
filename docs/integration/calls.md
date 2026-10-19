@@ -85,7 +85,8 @@ passes to the SDK ([step 4](#the-flow)).
 
    ```js
    import { Room, RoomEvent } from 'livekit-client';
-   const room = new Room();
+   // The page says goodbye itself (step 5): the SDK must not disconnect before it can.
+   const room = new Room({ disconnectOnPageLeave: false });
    room.on(RoomEvent.TrackSubscribed, (track) => attach(track));        // the other member
    room.on(RoomEvent.ParticipantDisconnected, () => showCallEnded());
    room.on(RoomEvent.Disconnected, () => offerToRejoin());
@@ -103,13 +104,18 @@ passes to the SDK ([step 4](#the-flow)).
 
    The ticket is used once. After the connect LiveKit keeps the connection's credential fresh
    itself, and the SDK reconnects with it after a network change; do not store the ticket.
-5. To leave, `room.disconnect()` and send `call_end` ([Ringing](#ringing)). The other member
-   learns of the hang-up from LiveKit (`ParticipantDisconnected`, within about 20 s when a device
-   vanishes without leaving), whatever chat says. `call_end` takes effect only while chat still
-   holds the answered call, which is 2 minutes past the last ticket asked in it: then the other
-   member's other devices hear `call_ended`, and the next call rings at once. After that the call
-   is already forgotten and `call_end` is answered `no_call`, which here means it is already
-   done: nothing to show, nothing to retry.
+5. To leave, send `call_end` ([Ringing](#ringing)), or `call_cancel` while it still rings, then
+   `room.disconnect()`. The other member learns of the hang-up from LiveKit
+   (`ParticipantDisconnected`, within about 20 s when a device vanishes without leaving), whatever
+   chat says, and the other member's other devices hear `call_ended`. A `call_end` answered
+   `no_call` means the call is already over: nothing to show, nothing to retry.
+
+   When the page goes away (closed, reloaded, navigated off, or frozen on a phone), send the
+   `call_cancel` or `call_end` from `pagehide` before disconnecting; a socket that was down when
+   the user pressed Cancel should send it again once it reconnects. Even when nothing gets out,
+   chat notices: a ring whose caller is no longer in the call's LiveKit room ends within about
+   20 s (`call_cancelled` with `reason: "caller_left"`), and a call nobody is in any more ends at
+   chat's next look at it ([Ringing](#ringing)).
 6. To come back (the SDK gave up reconnecting, the app restarted, or `room.connect` failed after
    `expires_at`), ask chat for a new ticket (step 2). A connect refused with "room does not
    exist" means the call's room stood empty long enough for LiveKit to drop it: ask again, and
@@ -133,9 +139,9 @@ Server to client, unasked:
 | `call_ringing` | `room`, `call`, `from`, `expires_at` | `from` is calling. On the caller's own devices (`from` is you), the call you or your other device started is ringing. It rings until `expires_at` (Unix seconds); stop ringing then even if nothing else arrives |
 | `call_answered` | `room`, `call`, `from`, `by` | `by` asked for a ticket and is joining. On `by`'s other devices: stop ringing |
 | `call_declined` | `room`, `call`, `from`, `by` | `by` turned the call down |
-| `call_cancelled` | `room`, `call`, `from`, `by` | The caller gave up before anyone answered |
+| `call_cancelled` | `room`, `call`, `from`, `by`, or `reason` | The caller gave up before anyone answered. With no `by` and `reason: "caller_left"`: the caller's device left the call's LiveKit room while it rang, so nobody would be there to answer |
 | `call_missed` | `room`, `call`, `from` | Nobody answered within the ring timeout (45 s) |
-| `call_ended` | `room`, `call`, `from`, `by` | `by` ended the answered call |
+| `call_ended` | `room`, `call`, `from`, `by` | `by` ended the answered call. With no `by`: nobody was left in its LiveKit room |
 
 ```json
 {"type":"call_ringing","room":"0192f0c4-8a1e-7c3a-9d2b-5f6e7a8b9c0d","call":"01a0f3c2-55d1-7e2a-9b3c-4d5e6f708192","from":"user-42","expires_at":1790000045}
@@ -148,23 +154,33 @@ Client to server, on a socket that joined the room (`not_joined` otherwise):
 |---|---|---|---|
 | `call_decline` | `room`, `call` | The callee, while it rings | Turn it down: everyone hears `call_declined` |
 | `call_cancel` | `room`, `call` | The caller, while it rings | Give up: everyone hears `call_cancelled` |
-| `call_end` | `room`, `call` | Either member, once answered, within 2 minutes of the call's last ticket | End it: everyone hears `call_ended`. Later the call is already forgotten, and this is `no_call` |
+| `call_end` | `room`, `call` | Either member, once answered | End it: everyone hears `call_ended` |
 
 Each is answered on the socket that sent it with the event everyone hears, or an
 [error](#errors): `no_call` when the room has no such call in a state you may move it from
-(already ended or forgotten, answered for a decline or a cancel, still ringing for an end, or
-someone else's to cancel). For `call_end` it means the call is already over as far as chat
-knows: chat forgets an answered call 2 minutes after its last ticket, while LiveKit may still
-carry it. Treat it as done. Each is checked against the member list on the room's owner, like a ticket, and
-counted with joins.
+(already ended, answered for a decline or a cancel, still ringing for an end, or someone else's
+to cancel). For `call_end` it means the call is already over: treat it as done. Each is checked
+against the member list on the room's owner, like a ticket, and counted with joins.
+
+**How long a call lasts.** Chat looks at the call's LiveKit room itself (ADR-0113):
+
+- While a direct call rings, from 10 s after its first ticket and every 5 s, it looks for anyone
+  in the room (only the caller can be: nobody else has a ticket). Nobody twice in a row ends the
+  ring: everyone hears `call_cancelled` with `reason: "caller_left"`. A callee's ticket asked 10 s
+  or more into the ring is issued only once the caller is found there; otherwise it is refused
+  `no_call` and everyone hears the same `call_cancelled`, so nobody answers into an empty call.
+- An answered call lasts while anyone is in its LiveKit room, however long. Two minutes after
+  its last ticket, and every 30 s after that, chat asks LiveKit; when nobody is connected (or
+  LiveKit has not answered three times in a row), everyone hears `call_ended` with no `by`.
 
 **Client states.** The caller: *calling* from the ticket (connect to LiveKit at once and wait
 there), *in call* on `call_answered`, back to idle on `call_declined`, `call_missed` or
-`call_ended`, or after its own `call_cancel`. The callee: *ringing* on `call_ringing` (show the
-caller, ring until `expires_at`); to answer, `join` the room if this socket has not, ask for a
-ticket (`call`, with `answer` naming the ring) and connect: that is `call_answered` for everyone; to decline, `join` and
-`call_decline`. Every other device of the callee goes idle on `call_answered`, `call_declined`,
-`call_cancelled` or `call_missed`.
+`call_ended`, or after its own `call_cancel` (a `call_cancelled` with `reason: "caller_left"` on
+the caller's own devices means its connection to LiveKit was lost while it rang). The callee:
+*ringing* on `call_ringing` (show the caller, ring until `expires_at`); to answer, `join` the room
+if this socket has not, ask for a ticket (`call`, with `answer` naming the ring) and connect: that
+is `call_answered` for everyone; to decline, `join` and `call_decline`. Every other device of the
+callee goes idle on `call_answered`, `call_declined`, `call_cancelled` or `call_missed`.
 
 What the ring does not cover:
 
@@ -186,10 +202,12 @@ What the ring does not cover:
   socket reconnects with a fresh token (chat closes it when its token expires): a ring that
   is not announced again within 15 s has most likely ended, and an answer naming it
   (`answer`) is told so.
-- **Rejoining.** Asking for a ticket again within 2 minutes of the last one in an answered call
-  joins it without ringing anyone. Later, it rings the other member: a client already connected
-  to the room's LiveKit call that hears `call_ringing` for that room from the other member
-  answers it by asking for a ticket (and keeps its connection), so both stay in the call.
+- **Rejoining.** Asking for a ticket again while anyone is still in the answered call joins it
+  without ringing anyone. A ticket asked for a call nobody is in any more (everyone closed the
+  app without a word) ends that call, and everyone hears `call_ended`, then starts the room's next
+  call, which rings as a first ticket does: the ticket names the new `call`. Within 10 s of
+  someone else's ticket in the call, it joins it as it stands, since that device may still be
+  connecting.
 - **A change of the room's owner** (a deploy, a node failure) forgets a ringing call without a
   word: devices stop at `expires_at`, and a decline or cancel then is `no_call`. A callee who
   answers by asking for a ticket rings the caller as a new call, which the caller's client,
@@ -211,9 +229,11 @@ what differs is how many are in it, how it rings, and how it ends.
   and everyone hears `call_answered` with `by` (stop ringing on `by`'s devices). A member who
   declines (`call_decline`) is out of the ring, and everyone hears `call_declined`; the call goes
   on. At `expires_at` the members still rung each hear `call_missed`, and the call goes on for
-  the others. Only when nobody but the caller ever joined, because everyone declined or the ring
-  ran out, does everyone hear `call_missed`: the call is over. The caller may `call_cancel` before
-  anyone joins.
+  the others. When nobody but the caller joined by then, everyone hears `call_missed`: the ring is
+  over, but the call is not while its caller is in it. Anyone may still join it, as a member it
+  did not ring may, and everyone hears `call_answered`; once nobody is in it, everyone hears
+  `call_ended` (ADR-0113). When everyone rung declined, everyone hears `call_missed` and the call
+  is over. The caller may `call_cancel` before anyone joins.
 - **Leaving.** `call_leave` (`room`, `call`) takes you out of the call; everyone hears
   `call_left` with `by`. Disconnect from LiveKit too. When the last one the owner admitted
   leaves, the owner asks LiveKit whether anyone is still connected (someone admitted before an
@@ -294,7 +314,7 @@ Each is an `error` with the `room` of the call.
 | `call_full` | The group call holds as many devices as it takes | Tell the user; retry when someone has left |
 | `unavailable` | LiveKit, the member list or the room's owner could not be reached; `retry_after_ms` says when to ask again | Wait that long, then ask again |
 | `busy` | The call allowance (counted with joins: a burst of 64, then one a second per user) or the room's owner is at its limit (asks in flight, 4096 calls ringing or answered, 64 members in one group call, or moves waiting) | Back off and retry |
-| `no_call` | A `call_decline`, `call_cancel`, `call_end`, `call_leave` or `call_expel` for a call the room does not have in that state ([Ringing](#ringing), [Group calls](#group-calls)): for a direct chat's `call_end`, usually an answered call chat already forgot (2 minutes after its last ticket); in a group call, a `call_end` or `call_expel` from anyone but the caller. Or a ticket with `answer` for a call that is over, with `call` naming it | Treat the call as done; do not retry. The other member learns of a hang-up from LiveKit |
+| `no_call` | A `call_decline`, `call_cancel`, `call_end`, `call_leave` or `call_expel` for a call the room does not have in that state ([Ringing](#ringing), [Group calls](#group-calls)): for a direct chat's `call_end`, a call that is already over; in a group call, a `call_end` or `call_expel` from anyone but the caller. Or a ticket with `answer` for a call that is over, with `call` naming it | Treat the call as done; do not retry. The other member learns of a hang-up from LiveKit |
 | `ring_limited` | The ticket would ring the other member, and this direct chat may not ring yet: it rang 5 times in the last minute, or the other member declined your call less than 30 s ago. `retry_after_ms` says when it may | Do not ring again before then; tell the user. Nothing was rung and no ticket issued |
 | `call_failed` | LiveKit refused the request as made: a fault on the service's side | Retry much later; report it |
 | `calls_disabled` | Calls are not configured on this deployment | Do not retry |

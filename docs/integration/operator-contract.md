@@ -403,7 +403,10 @@ one the client is on. A call's ring (ADR-0091), also on the room's owner:
 to move), `call_refusals_total{reason="ring_limited"}` (tickets refused because their direct chat
 rang 5 times in a minute, or its caller was just declined), `calls_ringing_or_answered`, `call_rings_total{outcome="started"}`, `{outcome="answered"}`,
 `{outcome="declined"}`, `{outcome="cancelled"}`, `{outcome="missed"}`, `{outcome="ended"}`,
-`{outcome="orphaned"}` (forgotten without a word because the node no longer owns the room) and
+`{outcome="orphaned"}` (forgotten without a word because the node no longer owns the room),
+`{outcome="caller_left"}` (rings ended because their caller was not in the call's LiveKit room;
+counted in `{outcome="cancelled"}` too), `{outcome="stale"}` (calls nobody was in any more,
+ended by a member's next ticket, which rang a new one; ADR-0113) and
 `{outcome="busy"}` (tickets refused past 4096 calls), `{outcome="graced"}` (rings held past
 their timeout for a callee's ticket being issued), and `call_notices_sent_total`; on the
 members' nodes, `call_events_pushed_total` (events written to sockets),
