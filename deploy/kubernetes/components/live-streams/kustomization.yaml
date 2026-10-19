@@ -15,6 +15,33 @@ resources:
   # LiveKit's webhooks (docs/adr/0093): the listener's Service and who may reach it.
   - hooks.yaml
 patches:
+  # LiveKit's room and participant events to the gateway's webhook listener (hooks.yaml), signed
+  # with the key it shares (docs/adr/0093), in this namespace, which only LiveKit may reach and
+  # no route exposes.
+  - target:
+      kind: Deployment
+      name: livekit
+    patch: |-
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: livekit
+        namespace: ulw
+      spec:
+        template:
+          spec:
+            containers:
+              - name: livekit
+                # The key first, as in base/livekit: a patch's entries go first, and a $(VAR)
+                # expands only what an earlier entry defines.
+                env:
+                  - name: LIVEKIT_API_KEY
+                    valueFrom:
+                      secretKeyRef:
+                        name: sfu-secrets
+                        key: LIVEKIT_API_KEY
+                  - name: LIVEKIT_WEBHOOK
+                    value: "{api_key: $(LIVEKIT_API_KEY), urls: [http://video-gateway-hooks:8081/livekit/webhook]}"
   # Live streams on (docs/adr/0092, RUNBOOK.md step 9): LiveKit's server API in the cluster, the
   # public host its tickets name (the /rtc and /whip routes of base/livekit/httproute.yaml), the
   # key pair LiveKit and egress use, and packagers as Jobs from the template in the gateway's
@@ -171,6 +198,12 @@ replacements:
         fieldPaths:
           - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_API_KEY].valueFrom.secretKeyRef.name
           - spec.template.spec.containers.[name=gateway].env.[name=LIVEKIT_API_SECRET].valueFrom.secretKeyRef.name
+      # The key LiveKit signs its webhooks with, which the patch above names again.
+      - select:
+          kind: Deployment
+          name: livekit
+        fieldPaths:
+          - spec.template.spec.containers.[name=livekit].env.[name=LIVEKIT_API_KEY].valueFrom.secretKeyRef.name
   # The packagers' namespace: where Jobs go, and the relay's address of each.
   - source:
       kind: ConfigMap
