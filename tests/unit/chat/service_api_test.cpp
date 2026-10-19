@@ -80,6 +80,10 @@ public:
                   core::ports::MessageCallback<std::uint64_t> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
     }
+    void last_loud_seq(const core::RoomId& /*room*/,
+                       core::ports::MessageCallback<std::uint64_t> done) override {
+        done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
     void add_member(const core::RoomId& /*room*/, const core::UserId& /*user*/,
                     core::ports::MessageCallback<void> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
@@ -124,7 +128,7 @@ public:
         held = nullptr;
     }
     void send(const core::RoomId& /*room*/, rt::IMember& /*from*/, const core::UserId& /*sender*/,
-              const rt::MessageKey& /*key*/, std::vector<std::byte> /*body*/,
+              const rt::MessageKey& /*key*/, std::vector<std::byte> /*body*/, bool /*quiet*/,
               rt::SendCallback done) override {
         done(std::unexpected(rt::RouteError::Unavailable));
     }

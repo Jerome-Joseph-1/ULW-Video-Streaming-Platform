@@ -57,8 +57,9 @@ public:
     virtual ~IRooms() = default;
     virtual void join(const core::RoomId& room, rt::IMember& member, rt::JoinCallback done) = 0;
     virtual void leave(const core::RoomId& room, rt::IMember& member) noexcept = 0;
+    // `quiet`: the message notifies nobody (ADR-0128).
     virtual void send(const core::RoomId& room, rt::IMember& from, const core::UserId& sender,
-                      const rt::MessageKey& key, std::vector<std::byte> body,
+                      const rt::MessageKey& key, std::vector<std::byte> body, bool quiet,
                       rt::SendCallback done) = 0;
     // What the room's owner answers itself (rt::RoomRouter::ask_owner): a call's ticket.
     virtual void ask_owner(const core::RoomId& room, rt::IMember& from,
@@ -347,7 +348,7 @@ private:
                 std::expected<std::uint64_t, rt::RouteError> result) noexcept;
     void delivered(Room& room, const rt::Message& message) noexcept;
     void sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key, std::size_t bytes,
-              std::expected<std::uint64_t, rt::RouteError> result) noexcept;
+              bool quiet, std::expected<std::uint64_t, rt::RouteError> result) noexcept;
     void
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;

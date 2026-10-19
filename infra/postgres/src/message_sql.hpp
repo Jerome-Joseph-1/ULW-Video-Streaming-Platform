@@ -16,8 +16,8 @@ namespace infra::postgres::message_sql {
 // order and one row ahead of what it emits, so the limit stops the scan early.
 // $1 room, $2 cursor (exclusive), $3 row limit, $4 byte bound.
 inline constexpr std::string_view kHistoryBeforeText = R"sql(
-SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body
-  FROM (SELECT seq, sender, msg_key, sent_at, body,
+SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet
+  FROM (SELECT seq, sender, msg_key, sent_at, body, quiet,
                sum(octet_length(body)) OVER (ORDER BY seq DESC) AS running
           FROM chat_messages
          WHERE room_id = $1 AND seq < $2
@@ -30,8 +30,8 @@ SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, bo
 inline constexpr Sql kHistoryBefore = kHistoryBeforeText.data();
 
 inline constexpr std::string_view kHistoryAfterText = R"sql(
-SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body
-  FROM (SELECT seq, sender, msg_key, sent_at, body,
+SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet
+  FROM (SELECT seq, sender, msg_key, sent_at, body, quiet,
                sum(octet_length(body)) OVER (ORDER BY seq) AS running
           FROM chat_messages
          WHERE room_id = $1 AND seq > $2
@@ -43,6 +43,11 @@ SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, bo
 inline constexpr Sql kHistoryAfter = kHistoryAfterText.data();
 
 // The counter the owner's fenced write advances, not max(seq): one source for both.
+// The newest message that is not quiet (ADR-0128), walking the primary key down from the top.
+inline constexpr Sql kLastLoudSeq = R"sql(
+SELECT coalesce((SELECT seq FROM chat_messages WHERE room_id = $1 AND NOT quiet
+                  ORDER BY seq DESC LIMIT 1), 0))sql";
+
 inline constexpr Sql kLastSeq =
     "SELECT coalesce((SELECT last_seq FROM room_state WHERE room_id = $1), 0)";
 

@@ -633,7 +633,7 @@ TEST_P(ChatSessionTest, IdentityHeadersNeitherAuthenticateNorRenameTheSender) {
     ASSERT_TRUE(bob);
     ASSERT_TRUE(bob->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(bob->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
     ASSERT_TRUE(bob->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
                                R"(","id":"m1","body":"eA"})"));
     EXPECT_EQ(without_at(bob->next_text(seconds(10))),
@@ -646,7 +646,7 @@ TEST_P(ChatSessionTest, AMemberHearsItsOwnMessageAndItsSequenceNumber) {
     ASSERT_TRUE(alice);
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
     // base64url of `hi "there"`.
     ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
                                  R"(","id":"m5","body":"aGkgInRoZXJlIg"})"));
@@ -667,10 +667,10 @@ TEST_P(ChatSessionTest, AMessageAfterALargerOneIsSentExactlyToEveryMember) {
     const std::string join = R"({"type":"join","room":")" + std::string(kRoom) + R"("})";
     ASSERT_TRUE(alice->send_text(join));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
     ASSERT_TRUE(bob->send_text(join));
     EXPECT_EQ(bob->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
     const std::string large =
         infra::auth::encode_base64url(std::string(std::size_t{24} * 1024, 'L'));
     const std::string small = "cw";
@@ -706,7 +706,7 @@ TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {
     EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"error","reason":"bad_room"})");
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
 }
 
 TEST_P(ChatSessionTest, AReadFullOfControlFramesIsClosedAsAFlood) {
@@ -809,7 +809,7 @@ TEST_P(ChatSessionTest, ATokenThatExpiresAtTheEndOfTimeKeepsItsSocketOpen) {
     node_->advance(std::chrono::hours(2));
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
 }
 
 // The same without UBSan: the deadline of a token at the end of time is the end of the
@@ -1295,7 +1295,7 @@ void expect_first_frames_answered(WsClient& ws) {
     EXPECT_EQ(pong->first, codec::ws::Opcode::Pong);
     EXPECT_EQ(pong->second, "early");
     EXPECT_EQ(ws.next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
 }
 
 TEST_P(ChatSessionTest, TheHttpParserIsFreedOnceTheRequestIsAnswered) {
@@ -1322,7 +1322,7 @@ TEST_P(ChatSessionTest, TheHttpParserIsFreedOnceTheRequestIsAnswered) {
     EXPECT_TRUE(ulw::test::eventually([&] { return node_->http_parsers == 1; }));
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
     EXPECT_EQ(node_->http_parsers, 1U);
 }
 
@@ -1361,7 +1361,7 @@ TEST_P(ChatSessionTest, FramesSentAfterAnUpgradeThatWaitedOnKeysAreRead) {
     ASSERT_TRUE(alice);
     ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
     EXPECT_EQ(alice->next_text(seconds(10)),
-              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0})");
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
 }
 
 TEST_P(ChatSessionTest, AnUpgradeThatFailedWhileWaitingOnKeysIsNotAcceptedWhenTheyArrive) {

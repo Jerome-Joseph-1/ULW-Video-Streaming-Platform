@@ -61,7 +61,7 @@ void MemoryMessageStore::on_timeout() noexcept {
 void MemoryMessageStore::append(const core::RoomId& room, std::uint64_t seq,
                                 const core::UserId& sender, std::string key,
                                 std::vector<std::byte> body, core::WallTime sent_at,
-                                MessageCallback<std::uint64_t> done) {
+                                MessageCallback<std::uint64_t> done, bool quiet) {
     MessageResult<std::uint64_t> result = seq;
     Room& r = rooms_[room];
     std::pair<std::string, std::string> sender_key{sender.view(), key};
@@ -84,7 +84,8 @@ void MemoryMessageStore::append(const core::RoomId& room, std::uint64_t seq,
                                .sender = sender,
                                .key = std::move(key),
                                .sent_at = std::chrono::floor<std::chrono::microseconds>(sent_at),
-                               .body = std::move(body)});
+                               .body = std::move(body),
+                               .quiet = quiet});
     }
     defer([done = std::move(done), result]() mutable noexcept { done(result); });
 }
@@ -126,6 +127,20 @@ void MemoryMessageStore::last_seq(const core::RoomId& room, MessageCallback<std:
         seq = it->second.last;
         if (!it->second.messages.empty()) {
             seq = std::max(seq, it->second.messages.rbegin()->first);
+        }
+    }
+    defer([done = std::move(done), seq]() mutable noexcept { done(seq); });
+}
+
+void MemoryMessageStore::last_loud_seq(const core::RoomId& room,
+                                       MessageCallback<std::uint64_t> done) {
+    std::uint64_t seq = 0;
+    if (const auto it = rooms_.find(room); it != rooms_.end()) {
+        for (const auto& [at, message] : std::views::reverse(it->second.messages)) {
+            if (!message.quiet) {
+                seq = at;
+                break;
+            }
         }
     }
     defer([done = std::move(done), seq]() mutable noexcept { done(seq); });

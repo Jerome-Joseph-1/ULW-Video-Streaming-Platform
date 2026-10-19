@@ -234,14 +234,21 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto room = in.room();
         const auto sender = in.sender();
         const auto key = in.key();
+        const auto flags = in.u8();
         const auto body = in.rest();
         // A frame may be a little longer than the largest body, for the other fields; a body
         // past kMaxBody is one no client could have sent, and nothing downstream takes it.
-        if (!request || !room || !sender || !key || body.size() > kMaxBody) {
+        if (!request || !room || !sender || !key || !flags || (*flags & ~kQuiet) != 0 ||
+            body.size() > kMaxBody) {
             return std::nullopt;
         }
-        return Send{
-            .request = *request, .room = *room, .sender = *sender, .key = *key, .body = body};
+        Send send{.request = *request,
+                  .room = *room,
+                  .sender = *sender,
+                  .key = *key,
+                  .body = body,
+                  .quiet = (*flags & kQuiet) != 0};
+        return send;
     }
     case Type::Reply: {
         const auto request = in.u64();
@@ -258,20 +265,23 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto sender = in.sender();
         const auto key = in.key();
         const auto micros = in.u64();
+        const auto flags = in.u8();
         const auto body = in.rest();
         // A time past what a signed count of microseconds holds is no clock's.
         if (!room || !seq || !sender || !key || !micros ||
             *micros > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
-            body.size() > kMaxBody) {
+            !flags || (*flags & ~kQuiet) != 0 || body.size() > kMaxBody) {
             return std::nullopt;
         }
-        return Deliver{.room = *room,
-                       .seq = *seq,
-                       .sender = *sender,
-                       .key = *key,
-                       .sent_at = core::WallTime{std::chrono::microseconds{
-                           static_cast<std::int64_t>(*micros)}},
-                       .body = body};
+        Deliver deliver{.room = *room,
+                        .seq = *seq,
+                        .sender = *sender,
+                        .key = *key,
+                        .sent_at = core::WallTime{std::chrono::microseconds{
+                            static_cast<std::int64_t>(*micros)}},
+                        .body = body,
+                        .quiet = (*flags & kQuiet) != 0};
+        return deliver;
     }
     case Type::Ask:
         return ask_of(in);
@@ -341,13 +351,14 @@ void encode_unsubscribe(std::vector<std::byte>& out, const core::RoomId& room) {
 }
 
 void encode_send(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,
-                 const core::UserId& sender, const MessageKey& key,
+                 const core::UserId& sender, const MessageKey& key, bool quiet,
                  std::span<const std::byte> body) {
     const std::size_t at = begin(out, Type::Send);
     put_u64(out, request);
     put_room(out, room);
     put_short(out, sender.view());
     put_short(out, key.view());
+    put_u8(out, quiet ? kQuiet : 0);
     out.insert(out.end(), body.begin(), body.end());
     end(out, at);
 }
@@ -363,7 +374,7 @@ void encode_reply(std::vector<std::byte>& out, std::uint64_t request, Status sta
 
 void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::uint64_t seq,
                     const core::UserId& sender, const MessageKey& key, core::WallTime sent_at,
-                    std::span<const std::byte> body) {
+                    bool quiet, std::span<const std::byte> body) {
     const auto micros =
         std::chrono::duration_cast<std::chrono::microseconds>(sent_at.time_since_epoch()).count();
     const std::size_t at = begin(out, Type::Deliver);
@@ -372,6 +383,7 @@ void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::
     put_short(out, sender.view());
     put_short(out, key.view());
     put_u64(out, static_cast<std::uint64_t>(std::max<std::int64_t>(micros, 0)));
+    put_u8(out, quiet ? kQuiet : 0);
     out.insert(out.end(), body.begin(), body.end());
     end(out, at);
 }

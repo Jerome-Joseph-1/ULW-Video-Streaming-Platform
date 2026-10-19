@@ -177,6 +177,17 @@ TEST(Envelope, WhatIsNotACommandIsRefusedWithAReason) {
               "01a0eb86-6cca-7dce-84cc-3bb47615f001");
     EXPECT_EQ(chat::parse_command(R"({"type":"ice_servers",)" + room + "}"),
               std::unexpected(EnvelopeError::Malformed));
+    // A send may be quiet (ADR-0128).
+    const auto quiet = chat::parse_command(R"({"type":"send",)" + room +
+                                           R"(,"id":"r1","body":"eA","quiet":true})");
+    ASSERT_TRUE(quiet);
+    EXPECT_TRUE(std::get<chat::Send>(*quiet).quiet);
+    EXPECT_FALSE(std::get<chat::Send>(*chat::parse_command(R"({"type":"send",)" + room +
+                                                           R"(,"id":"r1","body":"eA"})"))
+                     .quiet);
+    EXPECT_EQ(
+        chat::parse_command(R"({"type":"send",)" + room + R"(,"id":"r1","body":"eA","quiet":1})"),
+        std::unexpected(EnvelopeError::Malformed));
     // ping takes a rid, and nothing else (ADR-0122).
     EXPECT_FALSE(std::get<chat::Ping>(*chat::parse_command(R"({"type":"ping"})")).rid);
     EXPECT_EQ(std::get<chat::Ping>(*chat::parse_command(R"({"type":"ping","rid":"a1"})")).rid,
@@ -285,6 +296,8 @@ TEST(Envelope, AMessagesWireSizeBoundsWhatWriteMessageMakes) {
                                   .key = *rt::MessageKey::parse(longest_id),
                                   // The longest time a system_clock holds: 14 characters.
                                   .sent_at = core::WallTime::min(),
+                                  // And quiet, which says so (ADR-0128).
+                                  .quiet = true,
                                   .body = std::as_bytes(std::span{body})});
         // The frame header of a text message under 64 KiB is 4 bytes.
         EXPECT_LE(out.size() + 4, chat::message_wire_size(size)) << size;

@@ -1186,7 +1186,7 @@ TEST_P(RoomRouterTest, APeerThatSkipsTheHandshakeIsCutOffBeforeAnythingHappens) 
     wire::encode_subscribe(frames, 1, room_);
     const auto body = std::as_bytes(std::span{std::string_view{"forged"}});
     wire::encode_send(frames, 2, room_, *core::UserId::parse("alice"), *rt::MessageKey::parse("k"),
-                      body);
+                      false, body);
     peer.send(frames);
     EXPECT_TRUE(peer.hung_up());
     // No room was made for it, and nothing was sequenced.
@@ -1199,13 +1199,13 @@ TEST_P(RoomRouterTest, AHelloOfAnotherVersionIsRefusedAsSuch) {
     RawPeer peer(*reactor_, a.port);
     std::vector<std::byte> hello;
     wire::encode_hello(hello, *core::NodeId::parse("chat-x"), wire::Nonce{});
-    // After the length (4 bytes) and the type (1), the version: 5 was the last before
-    // messages carried their time (ADR-0112).
-    hello.at(5) = std::byte{5};
+    // After the length (4 bytes) and the type (1), the version: 6 was the last before
+    // messages carried their flags (ADR-0128).
+    hello.at(5) = std::byte{6};
     peer.send(hello);
     EXPECT_TRUE(peer.hung_up());
     EXPECT_EQ(a.events.refused,
-              std::vector<std::string>{"version mismatch: peer speaks 5, this node 6"});
+              std::vector<std::string>{"version mismatch: peer speaks 6, this node 7"});
 }
 
 TEST_P(RoomRouterTest, AHelloIsNotEnoughWithoutTheProofThatFollowsIt) {

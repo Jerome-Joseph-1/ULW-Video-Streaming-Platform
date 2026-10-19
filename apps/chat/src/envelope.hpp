@@ -146,6 +146,8 @@ struct Send {
     core::RoomId room;
     rt::MessageKey id;
     std::vector<std::byte> body;
+    // Notify nobody of it, and leave it out of loud_seq: a reaction, an edit (ADR-0128).
+    bool quiet = false;
 };
 
 // A history page is sent to the client as message frames, so it counts against the same output
@@ -339,7 +341,9 @@ enum class EnvelopeError : std::uint8_t {
 [[nodiscard]] std::expected<Command, EnvelopeError> parse_command(std::string_view text);
 
 // Each appends one message to `out`.
-void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head);
+// `loud`: the newest message that is not quiet (ADR-0128), when known.
+void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head,
+                  std::optional<std::uint64_t> loud = std::nullopt);
 void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                 std::uint64_t seq);
 void write_message(std::string& out, const rt::Message& message);

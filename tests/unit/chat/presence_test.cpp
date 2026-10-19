@@ -42,7 +42,7 @@ public:
         std::erase_if(sends_, [&](const Sending& s) { return s.from == &member; });
     }
     void send(const core::RoomId& room, rt::IMember& from, const core::UserId& sender,
-              const rt::MessageKey& key, std::vector<std::byte> body,
+              const rt::MessageKey& key, std::vector<std::byte> body, bool /*quiet*/,
               rt::SendCallback done) override {
         sends_.push_back({.room = room,
                           .from = &from,

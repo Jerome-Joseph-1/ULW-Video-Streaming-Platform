@@ -22,8 +22,11 @@ namespace rt::wire {
 // 2: Send and Deliver carry the client's message key. 3: a Reply may say Conflict. 4: Ask and
 // Answer carry what a room's owner answers for its members (a call's ticket, ADR-0050). 5: Notify
 // and Notice carry what any node hands a room's members, unsequenced (a call's ring, ADR-0091).
-// 6: Deliver carries the time the owner sequenced the message at (ADR-0112).
-inline constexpr std::uint8_t kVersion = 6;
+// 6: Deliver carries the time the owner sequenced the message at (ADR-0112). 7: Send and Deliver
+// carry a flags byte, bit 0 a quiet message (ADR-0128).
+inline constexpr std::uint8_t kVersion = 7;
+// A message's flags: bit 0, quiet. A frame with any other bit set is refused.
+inline constexpr std::uint8_t kQuiet = 1;
 // The largest message a client may send (codec::ws::Decoder's 64 KiB, ADR-0029), plus room for
 // the other fields, which take at most 239 bytes (a Send: type, request, room, sender, key).
 inline constexpr std::size_t kMaxBody = std::size_t{64} * 1024;
@@ -109,6 +112,7 @@ struct Send {
     core::UserId sender;
     MessageKey key;
     std::span<const std::byte> body;
+    bool quiet = false;
 };
 struct Reply {
     std::uint64_t request = 0;
@@ -123,6 +127,7 @@ struct Deliver {
     MessageKey key;
     core::WallTime sent_at;
     std::span<const std::byte> body;
+    bool quiet = false;
 };
 
 // The body is a view, as Send's; at most kMaxBody either way.
@@ -158,14 +163,14 @@ void encode_subscribe(std::vector<std::byte>& out, std::uint64_t request, const 
 void encode_unsubscribe(std::vector<std::byte>& out, const core::RoomId& room);
 // A body above kMaxBody is the caller's bug; the client decoder never produces one.
 void encode_send(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,
-                 const core::UserId& sender, const MessageKey& key,
+                 const core::UserId& sender, const MessageKey& key, bool quiet,
                  std::span<const std::byte> body);
 void encode_reply(std::vector<std::byte>& out, std::uint64_t request, Status status,
                   std::uint64_t seq);
 // `sent_at` before the epoch is the caller's bug; it goes as the epoch.
 void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::uint64_t seq,
                     const core::UserId& sender, const MessageKey& key, core::WallTime sent_at,
-                    std::span<const std::byte> body);
+                    bool quiet, std::span<const std::byte> body);
 // Bodies above kMaxBody are the caller's bug, as for encode_send.
 void encode_ask(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,
                 std::span<const std::byte> body);

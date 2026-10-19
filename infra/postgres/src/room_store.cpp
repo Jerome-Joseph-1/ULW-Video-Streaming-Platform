@@ -129,7 +129,8 @@ RETURNING room_assignments.room_id)sql";
 // unique index, whole, seq included; run again, it finds the stored row. A lossy room (a
 // stream's live chat) keeps its newest 1000: storing seq N deletes seq N - 1000, one more
 // primary key write, so a live room's rows stay about 2 MiB however long the stream (ADR-0070).
-// sent_at is the owner's time for the message, in microseconds since the epoch (ADR-0112).
+// sent_at is the owner's time for the message, in microseconds since the epoch (ADR-0112); $7
+// whether it is quiet (ADR-0128).
 constexpr Sql kAppendMessage = R"sql(
 WITH prior AS (
     SELECT seq, body = $5 AS same
@@ -140,8 +141,8 @@ next AS (
      WHERE room_id = $1 AND owner_generation = $2
     RETURNING last_seq, delivery),
 stored AS (
-    INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at)
-    SELECT $1, last_seq, $3, $4, $5, timestamptz 'epoch' + $6 * interval '1 microsecond'
+    INSERT INTO chat_messages (room_id, seq, sender, msg_key, body, sent_at, quiet)
+    SELECT $1, last_seq, $3, $4, $5, timestamptz 'epoch' + $6 * interval '1 microsecond', $7
       FROM next
      WHERE NOT EXISTS (SELECT 1 FROM prior)
     RETURNING seq),
@@ -520,7 +521,8 @@ public:
           sent_at_(std::chrono::duration_cast<std::chrono::microseconds>(
                        message.sent_at.time_since_epoch())
                        .count()),
-          body_(message.body.begin(), message.body.end()), done_(std::move(done)) {}
+          quiet_(message.quiet), body_(message.body.begin(), message.body.end()),
+          done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
         if (rt::is_ephemeral_room(room_)) {
@@ -535,7 +537,8 @@ public:
                                        .add_text(sender_.view())
                                        .add_text(key_)
                                        .add_bytea(body_)
-                                       .add_int(sent_at_)};
+                                       .add_int(sent_at_)
+                                       .add_bool(quiet_)};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -563,6 +566,7 @@ private:
     core::UserId sender_;
     std::string key_;
     std::int64_t sent_at_;
+    bool quiet_ = false;
     std::vector<std::byte> body_;
     bool reran_ = false;
     StoreCallback<std::optional<std::uint64_t>> done_;

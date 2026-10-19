@@ -31,6 +31,8 @@ struct Message {
     core::UserId sender;
     MessageKey key;
     core::WallTime sent_at;
+    // The sender asked that it notify nobody (ADR-0128); stored and delivered as any other.
+    bool quiet = false;
     std::span<const std::byte> body;
 };
 
@@ -213,8 +215,10 @@ public:
     // Answers with the message's sequence number once its owner has sequenced it. A message
     // whose sender and key were sequenced lately, as seen here or by the owner, is not
     // sequenced again: the answer is the seq it got the first time.
+    // `quiet` travels with the message to its store and to every member (ADR-0128).
     void send(const core::RoomId& room, IMember& from, const core::UserId& sender,
-              const MessageKey& key, std::vector<std::byte> body, SendCallback done);
+              const MessageKey& key, std::vector<std::byte> body, SendCallback done,
+              bool quiet = false);
 
     // Asks the room's owner, which answers through its IOwnerService, for a member that has
     // joined the room here: NotJoined otherwise, as for send. Unavailable when the owner cannot

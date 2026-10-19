@@ -73,7 +73,8 @@ private:
         const auto key = r.get(row, 2);
         const auto micros = r.get(row, 3).and_then(parse_int64);
         auto body = r.get(row, 4).and_then(parse_bytea);
-        if (!seq || !sender || !key || !micros || !body) {
+        const auto quiet = r.get(row, 5).and_then(parse_bool);
+        if (!seq || !sender || !key || !micros || !body || !quiet) {
             return std::unexpected(MessageStoreError::Corrupt);
         }
         page.push_back(StoredMessage{
@@ -82,6 +83,7 @@ private:
             .key = std::string{*key},
             .sent_at = core::WallTime{std::chrono::microseconds{*micros}},
             .body = std::move(*body),
+            .quiet = *quiet,
         });
     }
     return page;
@@ -1198,6 +1200,12 @@ void PgMessageStore::history_after(const core::RoomId& room, std::uint64_t after
                                 .add_int(as_int(std::min(limit, kMaxHistoryRows)))
                                 .add_int(as_int(kMaxHistoryBytes))},
         &decode_page, std::move(done)));
+}
+
+void PgMessageStore::last_loud_seq(const core::RoomId& room, MessageCallback<std::uint64_t> done) {
+    impl_->pool().submit(std::make_unique<Single<std::uint64_t>>(
+        Statement{.sql = message_sql::kLastLoudSeq, .params = Params{}.add_uuid(room.uuid())},
+        &decode_last_seq, std::move(done)));
 }
 
 void PgMessageStore::last_seq(const core::RoomId& room, MessageCallback<std::uint64_t> done) {

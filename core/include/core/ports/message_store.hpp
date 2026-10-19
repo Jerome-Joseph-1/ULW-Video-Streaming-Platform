@@ -266,6 +266,8 @@ struct StoredMessage {
     // Microsecond precision: what the store keeps.
     WallTime sent_at;
     std::vector<std::byte> body;
+    // Its sender asked that it notify nobody (ADR-0128).
+    bool quiet = false;
 
     friend bool operator==(const StoredMessage&, const StoredMessage&) = default;
 };
@@ -311,6 +313,9 @@ public:
     // The room's sequence counter, the one source of the last seq its owner took; 0 for a room
     // with none. A seq taken with its message is also the newest stored one.
     virtual void last_seq(const RoomId& room, MessageCallback<std::uint64_t> done) = 0;
+    // The newest stored message that is not quiet (ADR-0128): what an unread count reads; 0 when
+    // there is none.
+    virtual void last_loud_seq(const RoomId& room, MessageCallback<std::uint64_t> done) = 0;
 
     // Both idempotent. Adding a member to a room with no kind recorded records it as a group
     // chat, so that the room is closed before it lists anyone and record_live, which waits for

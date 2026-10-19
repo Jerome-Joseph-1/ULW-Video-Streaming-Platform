@@ -56,6 +56,7 @@ public:
         rt::MessageKey key;
         std::vector<std::byte> body;
         rt::SendCallback done;
+        bool quiet = false;
     };
 
     void join(const core::RoomId& room, rt::IMember& member, rt::JoinCallback done) override {
@@ -65,13 +66,14 @@ public:
         left.push_back(room);
     }
     void send(const core::RoomId& room, rt::IMember& /*from*/, const core::UserId& sender,
-              const rt::MessageKey& key, std::vector<std::byte> body,
+              const rt::MessageKey& key, std::vector<std::byte> body, bool quiet,
               rt::SendCallback done) override {
         sends.push_back({.room = room,
                          .sender = sender,
                          .key = key,
                          .body = std::move(body),
-                         .done = std::move(done)});
+                         .done = std::move(done),
+                         .quiet = quiet});
     }
 
     void ask_owner(const core::RoomId& room, rt::IMember& from, std::span<const std::byte> request,
@@ -133,6 +135,11 @@ public:
                   core::ports::MessageCallback<std::uint64_t> done) override {
         done(std::uint64_t{0});
     }
+    void last_loud_seq(const core::RoomId& /*room*/,
+                       core::ports::MessageCallback<std::uint64_t> done) override {
+        done(loud_seq);
+    }
+    std::uint64_t loud_seq = 0;
     void add_member(const core::RoomId& /*room*/, const core::UserId& /*user*/,
                     core::ports::MessageCallback<void> done) override {
         done({});
@@ -911,6 +918,57 @@ TEST_F(ChatServiceTest, ASendIsAnsweredWithItsIdAndTheSeqTheOwnerGaveIt) {
     const Seen c = seen(alice.take().at(0));
     EXPECT_EQ(c.reason, "conflict");
     EXPECT_EQ(c.id, "first");
+}
+
+// ADR-0128: a quiet message is sequenced as any other, tells the hook nothing, says so when
+// delivered, and leaves loud_seq where it was.
+TEST_F(ChatServiceTest, AQuietMessageNotifiesNobodyAndLeavesTheLoudSeq) {
+    struct Watcher final : chat::IMessageWatcher {
+        void message(const core::RoomId& /*room*/, const core::UserId& /*sender*/,
+                     std::uint64_t seq) noexcept override {
+            seqs.push_back(seq);
+        }
+        std::vector<std::uint64_t> seqs;
+    } watcher;
+    service_->watch_messages(&watcher);
+    messages_.loud_seq = 4;
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    auto& member = rooms_.admit(6);
+    EXPECT_EQ(alice.take().at(0), std::string(R"({"type":"joined","room":")") + std::string(kRoom) +
+                                      R"(","seq":6,"loud_seq":4})");
+    service_->send(a, {.room = room_id(), .id = key("r1"), .body = bytes("+1"), .quiet = true});
+    ASSERT_EQ(rooms_.sends.size(), 1U);
+    EXPECT_TRUE(rooms_.sends[0].quiet);
+    rooms_.sends[0].done(7);
+    send(a, "m1");
+    EXPECT_FALSE(rooms_.sends[1].quiet);
+    rooms_.sends[1].done(8);
+    EXPECT_EQ(watcher.seqs, std::vector<std::uint64_t>{8});
+    alice.take();
+    // Delivered: the quiet one says so, and only the loud one moves loud_seq.
+    const auto quiet_body = std::as_bytes(std::span{std::string_view{"+1"}});
+    member.deliver({.room = room_id(),
+                    .seq = 7,
+                    .sender = *core::UserId::parse("alice"),
+                    .key = key("r1"),
+                    .sent_at = {},
+                    .quiet = true,
+                    .body = quiet_body});
+    EXPECT_NE(alice.take().at(0).find(R"("quiet":true)"), std::string::npos);
+    FakeClient bob;
+    const auto b = attach(bob, "bob");
+    join(b);
+    EXPECT_EQ(bob.take().at(0), std::string(R"({"type":"joined","room":")") + std::string(kRoom) +
+                                    R"(","seq":7,"loud_seq":4})");
+    deliver(member, 8);
+    FakeClient carol;
+    const auto c = attach(carol, "carol");
+    join(c);
+    EXPECT_EQ(carol.take().at(0), std::string(R"({"type":"joined","room":")") + std::string(kRoom) +
+                                      R"(","seq":8,"loud_seq":8})");
+    service_->watch_messages(nullptr);
 }
 
 TEST_F(ChatServiceTest, ARateLimitedSendIsRefusedWithWhenToRetryAndNeverReachesTheRoom) {
