@@ -33,6 +33,19 @@ Upgrade refusals (the connection is closed after the response, and the body is e
 | `404` | Any path other than `/rt`, `/healthz`, `/readyz`, `/metrics`, or any method other than `GET` |
 | `503` | The key set cannot be fetched; retry |
 
+A browser hides an upgrade's status: every refusal reads as close code `1006`, the same as a
+network failure. A client that asks, `/rt?refusals=close`, is refused on the socket instead: the
+upgrade is accepted and closed at once with a code it can read (ADR-0116):
+
+| Close | Reason | Instead of | Do |
+|---|---|---|---|
+| `4001` | `unauthorized` | `401` | Get a fresh token and reconnect, as for an expired one |
+| `4003` | `forbidden` | `403` | The page's origin is not allowed: do not retry |
+| `4029` | `retry_after_ms=<n>` | `429` | Reconnect after that long |
+| `4503` | `unavailable` | `503` | Retry with backoff |
+
+A malformed upgrade (`400`, `426`, `404`) is an HTTP status either way.
+
 A browser cannot set `Authorization` on a WebSocket, so a browser client uses the cookie from a
 listed origin. Native apps send the bearer header.
 

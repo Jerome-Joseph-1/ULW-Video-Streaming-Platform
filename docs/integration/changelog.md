@@ -23,6 +23,7 @@ Additive (versioning rule 1), with calls that last as long as someone is in them
 | Only a group call's caller could end it or put someone out | The group's admins can too |
 | A decline said nothing more | `call_decline` and `decline_call` may give `reason` (`declined`, `busy`, `not_allowed`) and `text`, which `call_declined` carries on the sockets and the hook |
 | An error answering a call command did not say which call | It names the `call`, and every call command may carry `rid`, echoed in its answer |
+| A refused upgrade read as `1006` in a browser, like a network failure | `/rt?refusals=close` is refused on the socket, with close `4001`, `4003`, `4029` or `4503` ([Chat](chat.md#connecting)) |
 
 What to do:
 

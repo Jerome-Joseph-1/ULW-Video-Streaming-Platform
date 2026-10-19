@@ -518,6 +518,55 @@ TEST_P(ChatSessionTest, AnUpgradeNeedsAValidToken) {
     EXPECT_TRUE(open_as("alice"));
 }
 
+// ADR-0116: a browser cannot read an upgrade's HTTP status, so a client may ask to be refused on
+// the socket instead, with a close code it can read.
+TEST_P(ChatSessionTest, AnUpgradeAskedToBeRefusedOnTheSocketIsClosedWithACodeThatSaysWhy) {
+    const auto closed_with = [&](std::string_view headers) -> std::pair<unsigned, std::string> {
+        std::string line;
+        auto c = WsClient::connect(node_->port(),
+                                   "/rt?device=01a0eb86-6cca-7dce-84cc-3bb47615f001"
+                                   "&refusals=close",
+                                   headers, &line);
+        if (!c) {
+            ADD_FAILURE() << "not upgraded: " << line;
+            return {0, ""};
+        }
+        while (const auto frame = c->next_frame(seconds(10))) {
+            if (frame->first == codec::ws::Opcode::Close && frame->second.size() >= 2) {
+                const unsigned code = (static_cast<unsigned char>(frame->second[0]) << 8U) |
+                                      static_cast<unsigned char>(frame->second[1]);
+                return {code, frame->second.substr(2)};
+            }
+        }
+        ADD_FAILURE() << "no close";
+        return {0, ""};
+    };
+    EXPECT_EQ(closed_with(""), std::pair(4001U, std::string("unauthorized")));
+    EXPECT_EQ(closed_with("Authorization: Bearer forged\r\n"),
+              std::pair(4001U, std::string("unauthorized")));
+    EXPECT_EQ(closed_with("Authorization: Bearer down.alice\r\n"),
+              std::pair(4503U, std::string("unavailable")));
+    EXPECT_EQ(closed_with("Cookie: auth_token=user.alice\r\nOrigin: https://evil.test\r\n"),
+              std::pair(4003U, std::string("forbidden")));
+    // Without it, an HTTP status, as before; and a broken handshake is one either way.
+    EXPECT_EQ(refusal(""), "HTTP/1.1 401 Unauthorized");
+    std::string line;
+    EXPECT_FALSE(WsClient::connect(node_->port(), "/rt?refusals=close&device=phone",
+                                   "Authorization: Bearer user.alice\r\n", &line));
+    EXPECT_EQ(line, "HTTP/1.1 400 Bad Request");
+    // A good token is let in.
+    EXPECT_TRUE(WsClient::connect(node_->port(), "/rt?refusals=close",
+                                  "Authorization: Bearer user.alice\r\n", nullptr));
+}
+
+TEST(SessionQuery, RefusalsOnTheSocketAreAskedByTheirParameterAlone) {
+    EXPECT_TRUE(chat::refusals_on_socket("/rt?refusals=close"));
+    EXPECT_TRUE(chat::refusals_on_socket("/rt?device=x&refusals=close"));
+    EXPECT_FALSE(chat::refusals_on_socket("/rt"));
+    EXPECT_FALSE(chat::refusals_on_socket("/rt?refusals=http"));
+    EXPECT_FALSE(chat::refusals_on_socket("/rt?xrefusals=close"));
+}
+
 // ADR-0111: a socket names its device in the upgrade, or none; anything else is refused.
 TEST_P(ChatSessionTest, AnUpgradeMayNameItsDeviceAndOneThatIsNotAUuidIsRefused) {
     const std::string bearer = "Authorization: Bearer user.alice\r\n";

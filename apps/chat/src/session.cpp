@@ -125,6 +125,7 @@ void Session::route(const http::RequestHead& head) noexcept {
     if (!*upgrade_) {
         return;
     }
+    socket_refusals_ = refusals_on_socket(head.target);
     const auto device = device_of(head.target);
     if (!device) {
         refusal_ = http::Status::BadRequest;
@@ -195,6 +196,22 @@ device_of(std::string_view target) noexcept {
         device = *id;
     }
     return device;
+}
+
+bool refusals_on_socket(std::string_view target) noexcept {
+    const std::size_t q = target.find('?');
+    if (q == std::string_view::npos) {
+        return false;
+    }
+    std::string_view query = target.substr(q + 1);
+    while (!query.empty()) {
+        const std::size_t amp = query.find('&');
+        if (query.substr(0, amp) == "refusals=close") {
+            return true;
+        }
+        query = amp == std::string_view::npos ? std::string_view{} : query.substr(amp + 1);
+    }
+    return false;
 }
 
 core::MonoTime token_deadline(core::MonoTime now, core::WallTime wall_now,
@@ -353,6 +370,14 @@ void Session::answer_request() {
         refuse_for_now();
         return;
     }
+    if (refusal_ == http::Status::Unauthorized && socket_refusals_) {
+        refuse_on_socket(kRefusedUnauthorized, "unauthorized");
+        return;
+    }
+    if (refusal_ == http::Status::Forbidden && socket_refusals_) {
+        refuse_on_socket(kRefusedForbidden, "forbidden");
+        return;
+    }
     if (refusal_) {
         respond(http::fixed_response(*refusal_, http::Connection::Close));
         return;
@@ -372,18 +397,57 @@ void Session::answer_request() {
         accept_upgrade(**upgrade_);
         return;
     case Auth::KeysDown:
+        if (socket_refusals_) {
+            refuse_on_socket(kRefusedUnavailable, "unavailable");
+            return;
+        }
         respond(http::fixed_response(http::Status::ServiceUnavailable, http::Connection::Close));
         return;
     case Auth::Refused:
     case Auth::Pending:
     case Auth::Waiting:
+        if (socket_refusals_) {
+            refuse_on_socket(kRefusedUnauthorized, "unauthorized");
+            return;
+        }
         respond(http::fixed_response(http::Status::Unauthorized, http::Connection::Close));
         return;
     }
 }
 
+void Session::refuse_on_socket(codec::ws::CloseCode code, std::string_view reason) {
+    // Only ever after a handshake that was accepted.
+    if (!upgrade_ || !*upgrade_) {
+        respond(http::fixed_response(http::Status::BadRequest, http::Connection::Close));
+        return;
+    }
+    net::IReactor& reactor = server_.deps().reactor;
+    reactor.send(conn_, bytes_of((**upgrade_).bytes()));
+    std::vector<std::byte>& out = server_.frame_buffer();
+    out.clear();
+    const auto said = bytes_of(reason);
+    if (codec::ws::encode({.opcode = codec::ws::Opcode::Close,
+                           .fin = true,
+                           .payload = {said.begin(), said.end()},
+                           .close_code = code},
+                          out)) {
+        reactor.send(conn_, out);
+    }
+    ++server_.counters().refused_on_socket;
+    reactor.shutdown_write(conn_);
+    phase_ = Phase::Closing;
+    arm(server_.limits().handshake_timeout);
+}
+
 // 429 with Retry-After: a per-client limit (ADR-0076), for the client to come back later.
 void Session::refuse_for_now() {
+    if (socket_refusals_ && upgrade_ && *upgrade_) {
+        refuse_on_socket(
+            kRefusedTooMany,
+            std::format("retry_after_ms={}",
+                        std::chrono::duration_cast<core::Millis>(retry_after_).count()));
+        return;
+    }
     std::array<char, 256> head{};
     const auto written = http::write_response_head({.status = http::Status::TooManyRequests,
                                                     .content_length = 0,
