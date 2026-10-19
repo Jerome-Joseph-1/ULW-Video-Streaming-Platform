@@ -714,6 +714,16 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     if (name == "members") {
         return members_of(*message);
     }
+    if (name == "call_status") {
+        if (!only(*message, {"type", "room"})) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        auto room = room_of(*message);
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        return CallStatusQuery{.room = *room};
+    }
     if (name == "call_decline") {
         return call_move_of(*message, CallSignal::Decline);
     }
@@ -920,6 +930,62 @@ void write_call_over(std::string& out, const core::RoomId& room, const CallId& c
     out += R"(,"call":")";
     out += call.to_string();
     out += R"("})";
+}
+
+namespace {
+
+void append_user_list(std::string& out, std::string_view name,
+                      const std::vector<core::UserId>& users) {
+    out += R"(,")";
+    out += name;
+    out += R"(":[)";
+    for (std::size_t i = 0; i < users.size(); ++i) {
+        if (i > 0) {
+            out += ',';
+        }
+        core::json::append_string(out, users[i].view());
+    }
+    out += ']';
+}
+
+std::int64_t unix_seconds(core::WallTime t) noexcept {
+    return std::chrono::duration_cast<core::Seconds>(t.time_since_epoch()).count();
+}
+
+} // namespace
+
+void write_call_status(std::string& out, const core::RoomId& room,
+                       const std::optional<CallSnapshot>& snapshot) {
+    out += R"({"type":"call_status",)";
+    append_room(out, room);
+    if (!snapshot) {
+        out += R"(,"call":null,"status":"none"})";
+        return;
+    }
+    const CallSnapshot& s = *snapshot;
+    out += R"(,"call":")";
+    out += s.call.to_string();
+    out += R"(","status":")";
+    out += s.answered ? "answered" : "ringing";
+    out += R"(","kind":")";
+    out += s.kind == CallKind::Group ? "group" : "direct";
+    out += R"(","caller":)";
+    core::json::append_string(out, s.caller.view());
+    append_user_list(out, "ringing", s.ringing);
+    append_user_list(out, "joined", s.joined);
+    if (s.connected) {
+        append_user_list(out, "connected", *s.connected);
+    } else {
+        out += R"(,"connected":null)";
+    }
+    std::format_to(std::back_inserter(out), R"(,"started_at":{})", unix_seconds(s.started_at));
+    if (s.answered_at) {
+        std::format_to(std::back_inserter(out), R"(,"answered_at":{})",
+                       unix_seconds(*s.answered_at));
+    } else {
+        out += R"(,"answered_at":null)";
+    }
+    std::format_to(std::back_inserter(out), R"(,"expires_at":{}}})", unix_seconds(s.expires_at));
 }
 
 void write_call_error(std::string& out, std::string_view reason, const core::RoomId& room,

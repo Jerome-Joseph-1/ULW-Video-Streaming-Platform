@@ -117,7 +117,8 @@ group call's members leaving and being put out are not events.
 **A ring that ends with no event.** When the room's owner changes while a call rings (a deploy,
 a node failure), the call is forgotten without a word ([calls.md](calls.md#ringing)), and no
 event follows its `call_ringing`. Expire every call notification at its `expires_at`, and ask
-`call_status` before showing one that arrives late.
+`call_status` before showing one that arrives late. With `room` alone, `call_status` answers the
+room's call whatever its id, and who is in it ([calls.md](calls.md#after-a-reload)).
 
 ### `message`
 
@@ -148,6 +149,7 @@ event. Never the body: fetch what to show through your own backend, or show "New
 | Operation | Body | Answer (`200`) |
 |---|---|---|
 | `decline_call` | `room`, `call`, `user` | `{"type":"call_declined","room":..,"call":..,"by":<user>}`. As the user's own `call_decline`: checked against the room's member list on its owner, and only a callee it still rings may. Every socket of the call hears `call_declined`, and the hook gets it too. `409` `no_call` when the call no longer rings for them (answered, over, or never theirs), `409` `not_member` when the user is not on the list |
+| `cancel_call`, `end_call`, `leave_call` | `room`, `call`, `user` | As `decline_call`, for the user's own `call_cancel`, `call_end` or `call_leave`: what a page that is going away reaches your backend to say (ADR-0114). Answered with the event everyone hears (`call_cancelled`, `call_ended`, `call_left`) |
 | `call_status` | `room`, `call`, optional `user` | `{"type":"call_status","room":..,"call":..,"status":"ringing"\|"answered"\|"over"}`. `ringing`: it still rings (for `user`, when named: a group call may be on while it still rings for some); `answered`: it is on, and no longer rings (for them); `over`: the room has no such call now, or `user` is not in it |
 
 Both are asked of the room's owner from whichever node takes the request, as a socket's command

@@ -27,6 +27,10 @@ constexpr std::uint8_t kAnswer = 6;
 // A status ask: no user first, as every other kind has, but a flag and then perhaps one. A node
 // of an earlier release reads it as malformed and answers Unavailable.
 constexpr std::uint8_t kStatus = 7;
+// A current-call ask (ADR-0114): the kind alone.
+constexpr std::uint8_t kCurrent = 8;
+// The most users a snapshot's lists carry, each: a group call's callees and members in it.
+constexpr std::size_t kMaxSnapshotUsers = 128;
 
 // A direct chat lists two members; a few more are read, for a list that grew. A group call
 // rings at most kMaxGroupCallees others, the caller aside.
@@ -108,6 +112,112 @@ std::optional<std::vector<core::ports::IceServer>> read_ice_servers(layout::Read
     return servers;
 }
 
+void put_users(std::vector<std::byte>& out, const std::vector<core::UserId>& users) {
+    const std::size_t n = std::min(users.size(), kMaxSnapshotUsers);
+    layout::put_u16(out, static_cast<std::uint16_t>(n));
+    for (std::size_t i = 0; i < n; ++i) {
+        layout::put_short(out, users[i].view());
+    }
+}
+
+std::optional<std::vector<core::UserId>> read_users(layout::Reader& in) {
+    const auto n = in.u16();
+    if (!n || *n > kMaxSnapshotUsers) {
+        return std::nullopt;
+    }
+    std::vector<core::UserId> users;
+    users.reserve(*n);
+    for (std::uint16_t i = 0; i < *n; ++i) {
+        auto user = in.user();
+        if (!user) {
+            return std::nullopt;
+        }
+        users.push_back(*user);
+    }
+    return users;
+}
+
+void put_time(std::vector<std::byte>& out, core::WallTime t) {
+    layout::put_u64(
+        out, static_cast<std::uint64_t>(std::max<core::Millis::rep>(
+                 0, std::chrono::duration_cast<core::Millis>(t.time_since_epoch()).count())));
+}
+
+std::optional<core::WallTime> read_time(layout::Reader& in) {
+    const auto ms = in.u64();
+    if (!ms ||
+        *ms > static_cast<std::uint64_t>(std::numeric_limits<core::Millis::rep>::max() / 1'000)) {
+        return std::nullopt;
+    }
+    return core::WallTime{core::Millis{static_cast<core::Millis::rep>(*ms)}};
+}
+
+void put_snapshot(std::vector<std::byte>& out, const CallSnapshot& s) {
+    layout::put_uuid(out, s.call);
+    layout::put_u8(out, s.kind == CallKind::Group ? 1 : 0);
+    layout::put_short(out, s.caller.view());
+    layout::put_u8(out, s.answered ? 1 : 0);
+    put_users(out, s.ringing);
+    put_users(out, s.joined);
+    layout::put_u8(out, s.connected ? 1 : 0);
+    if (s.connected) {
+        put_users(out, *s.connected);
+    }
+    put_time(out, s.started_at);
+    layout::put_u8(out, s.answered_at ? 1 : 0);
+    if (s.answered_at) {
+        put_time(out, *s.answered_at);
+    }
+    put_time(out, s.expires_at);
+}
+
+std::optional<CallSnapshot> read_snapshot(layout::Reader& in) {
+    const auto call = in.uuid<CallId>();
+    const auto kind = in.u8();
+    auto caller = in.user();
+    const auto answered = in.u8();
+    auto ringing = read_users(in);
+    auto joined = read_users(in);
+    const auto has_connected = in.u8();
+    if (!call || !kind || *kind > 1 || !caller || !answered || *answered > 1 || !ringing ||
+        !joined || !has_connected || *has_connected > 1) {
+        return std::nullopt;
+    }
+    std::optional<std::vector<core::UserId>> connected;
+    if (*has_connected == 1) {
+        connected = read_users(in);
+        if (!connected) {
+            return std::nullopt;
+        }
+    }
+    const auto started_at = read_time(in);
+    const auto has_answered_at = in.u8();
+    if (!started_at || !has_answered_at || *has_answered_at > 1) {
+        return std::nullopt;
+    }
+    std::optional<core::WallTime> answered_at;
+    if (*has_answered_at == 1) {
+        answered_at = read_time(in);
+        if (!answered_at) {
+            return std::nullopt;
+        }
+    }
+    const auto expires_at = read_time(in);
+    if (!expires_at) {
+        return std::nullopt;
+    }
+    return CallSnapshot{.call = *call,
+                        .kind = *kind == 1 ? CallKind::Group : CallKind::Direct,
+                        .caller = *caller,
+                        .answered = *answered == 1,
+                        .ringing = std::move(*ringing),
+                        .joined = std::move(*joined),
+                        .connected = std::move(connected),
+                        .started_at = *started_at,
+                        .answered_at = answered_at,
+                        .expires_at = *expires_at};
+}
+
 } // namespace
 
 using layout::put_long;
@@ -176,6 +286,13 @@ std::vector<std::byte> encode_request(const CallStatusRequest& request) {
     return out;
 }
 
+std::vector<std::byte> encode_request(const CallCurrentRequest& /*request*/) {
+    std::vector<std::byte> out;
+    put_u8(out, kLayout);
+    put_u8(out, kCurrent);
+    return out;
+}
+
 std::optional<CallAsk> decode_request(std::span<const std::byte> bytes) {
     layout::Reader in{bytes};
     if (in.u8() != kLayout) {
@@ -184,6 +301,12 @@ std::optional<CallAsk> decode_request(std::span<const std::byte> bytes) {
     const auto what = in.u8();
     if (what == kStatus) {
         return decode_status(in);
+    }
+    if (what == kCurrent) {
+        if (!in.empty()) {
+            return std::nullopt;
+        }
+        return CallCurrentRequest{};
     }
     auto user = in.user();
     if (!what || !user ||
@@ -252,6 +375,13 @@ std::vector<std::byte> encode_answer(const CallAnswer& answer) {
         put_u64(out,
                 static_cast<std::uint64_t>(answer.retry_after.value_or(core::Millis{0}).count()));
     }
+    if (answer.outcome == CallOutcome::Current) {
+        if (!answer.snapshot) {
+            // Unreadable on purpose, as a ticket's relays that do not fit.
+            return {};
+        }
+        put_snapshot(out, *answer.snapshot);
+    }
     return out;
 }
 
@@ -261,7 +391,7 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
         return std::nullopt;
     }
     const auto outcome = in.u8();
-    if (!outcome || *outcome > static_cast<std::uint8_t>(CallOutcome::Answered)) {
+    if (!outcome || *outcome > static_cast<std::uint8_t>(CallOutcome::Current)) {
         return std::nullopt;
     }
     CallAnswer answer{.outcome = static_cast<CallOutcome>(*outcome), .ticket = std::nullopt};
@@ -299,6 +429,12 @@ std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes) {
             return std::nullopt;
         }
         answer.retry_after = core::Millis{static_cast<core::Millis::rep>(*ms)};
+    }
+    if (answer.outcome == CallOutcome::Current) {
+        answer.snapshot = read_snapshot(in);
+        if (!answer.snapshot) {
+            return std::nullopt;
+        }
     }
     if (!in.empty()) {
         return std::nullopt;
@@ -358,6 +494,10 @@ void CallHandler::on_ask(const core::RoomId& room, std::span<const std::byte> re
                 outcome = *ringing ? CallOutcome::Ringing : CallOutcome::Answered;
             }
             finish(answer, {.outcome = outcome, .ticket = std::nullopt});
+            return;
+        }
+        if (std::holds_alternative<CallCurrentRequest>(*asked)) {
+            current(room, std::move(answer));
             return;
         }
         ++in_flight_;
@@ -1510,6 +1650,59 @@ void CallHandler::check_occupancy() noexcept {
                 });
         } catch (const std::bad_alloc&) {
             ringer_.occupied(room, call, std::nullopt);
+        }
+    }
+}
+
+void CallHandler::current(const core::RoomId& room, rt::OwnerAnswer answer) noexcept {
+    try {
+        auto snapshot = ringer_.snapshot(room);
+        if (!snapshot) {
+            finish(answer, {.outcome = CallOutcome::NoCall, .ticket = std::nullopt});
+            return;
+        }
+        const auto it = rooms_.find(room);
+        if (it == rooms_.end() || !it->second.media || it->second.busy) {
+            // Nothing to ask the SFU with, or its generation is moving: who is in it is unknown.
+            finish(answer, {.outcome = CallOutcome::Current,
+                            .ticket = std::nullopt,
+                            .snapshot = std::move(snapshot)});
+            return;
+        }
+        // Counted until the SFU answers.
+        ++in_flight_;
+        try {
+            it->second.media->participants(
+                [this, snapshot = std::move(*snapshot), answer = std::move(answer)](
+                    std::expected<std::vector<core::ports::MediaParticipant>,
+                                  core::ports::MediaError>
+                        listed) mutable noexcept {
+                    --in_flight_;
+                    try {
+                        if (listed) {
+                            std::vector<core::UserId> users;
+                            for (const core::ports::MediaParticipant& p : *listed) {
+                                if (std::ranges::find(users, p.user) == users.end()) {
+                                    users.push_back(p.user);
+                                }
+                            }
+                            snapshot.connected = std::move(users);
+                        }
+                        finish(answer, {.outcome = CallOutcome::Current,
+                                        .ticket = std::nullopt,
+                                        .snapshot = std::move(snapshot)});
+                    } catch (const std::bad_alloc&) {
+                        answer(std::unexpected(rt::RouteError::Unavailable));
+                    }
+                });
+        } catch (const std::bad_alloc&) {
+            // Whatever was moved into the callback answers nothing; the asker times out.
+            --in_flight_;
+            throw;
+        }
+    } catch (const std::bad_alloc&) {
+        if (answer) {
+            answer(std::unexpected(rt::RouteError::Unavailable));
         }
     }
 }

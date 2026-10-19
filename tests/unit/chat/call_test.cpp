@@ -2021,4 +2021,89 @@ TEST_F(GroupCallHandlerTest, AGroupCallNobodyIsInAnyMoreIsEndedByTheNextTicketWh
     EXPECT_EQ(heard(chat::RingEvent::Ringing), 4U);
 }
 
+// ADR-0114: the room's call whatever its id, and who the SFU lists in it.
+TEST_F(PresenceCallHandlerTest, TheRoomsCurrentCallIsAnsweredWithWhoIsInIt) {
+    const auto current = [&] {
+        handler_->on_ask(room_id(), chat::encode_request(chat::CallCurrentRequest{}),
+                         [this](std::expected<std::vector<std::byte>, rt::RouteError> r) noexcept {
+                             ASSERT_TRUE(r);
+                             answers_.push_back(*chat::decode_answer(*r));
+                         });
+    };
+    current();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::NoCall);
+    const auto started = clock_.wall_now();
+    const chat::CallId call = ring();
+    current();
+    ASSERT_EQ(answers_.back().outcome, CallOutcome::Current);
+    ASSERT_TRUE(answers_.back().snapshot);
+    chat::CallSnapshot s = *answers_.back().snapshot;
+    EXPECT_EQ(s.call, call);
+    EXPECT_EQ(s.kind, chat::CallKind::Direct);
+    EXPECT_EQ(s.caller, *core::UserId::parse("alice"));
+    EXPECT_FALSE(s.answered);
+    EXPECT_EQ(s.ringing, std::vector{*core::UserId::parse("bob")});
+    EXPECT_EQ(s.joined, std::vector{*core::UserId::parse("alice")});
+    EXPECT_EQ(s.connected, std::vector{*core::UserId::parse("alice")});
+    EXPECT_EQ(s.started_at, started);
+    EXPECT_FALSE(s.answered_at);
+    EXPECT_EQ(s.expires_at, started + chat::RingLimits{}.ring_timeout);
+    clock_.advance(core::Millis{3'000});
+    ask("bob", kOtherDevice, kRoom, call);
+    sfu_.issue();
+    current();
+    s = *answers_.back().snapshot;
+    EXPECT_TRUE(s.answered);
+    EXPECT_TRUE(s.ringing.empty());
+    EXPECT_EQ(s.answered_at, started + core::Millis{3'000});
+    EXPECT_EQ(s.connected->size(), 2U);
+    // The SFU cannot say: who is connected is unknown, and the rest is still told.
+    sfu_.listing_error = MediaError::Unavailable;
+    current();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Current);
+    EXPECT_FALSE(answers_.back().snapshot->connected);
+}
+
+TEST(CallCodec, ACurrentCallAskAndItsSnapshotComeBackAsTheyWereSent) {
+    const auto asked = chat::decode_request(chat::encode_request(chat::CallCurrentRequest{}));
+    ASSERT_TRUE(asked);
+    EXPECT_TRUE(std::holds_alternative<chat::CallCurrentRequest>(*asked));
+    auto trailing = chat::encode_request(chat::CallCurrentRequest{});
+    trailing.push_back(std::byte{0});
+    EXPECT_FALSE(chat::decode_request(trailing));
+
+    const ulw::test::FakeClock clock;
+    ulw::test::FakeRandom random;
+    chat::CallSnapshot s{
+        .call = chat::CallId::generate(clock, random),
+        .kind = chat::CallKind::Group,
+        .caller = *core::UserId::parse("auth0|alice"),
+        .answered = true,
+        .ringing = {*core::UserId::parse("carol")},
+        .joined = {*core::UserId::parse("auth0|alice"), *core::UserId::parse("bob")},
+        .connected = std::vector{*core::UserId::parse("bob")},
+        .started_at = core::WallTime{core::Millis{1'790'000'000'123}},
+        .answered_at = core::WallTime{core::Millis{1'790'000'004'000}},
+        .expires_at = core::WallTime{core::Millis{1'790'000'045'123}}};
+    const auto bytes = chat::encode_answer(
+        {.outcome = CallOutcome::Current, .ticket = std::nullopt, .snapshot = s});
+    const auto back = chat::decode_answer(bytes);
+    ASSERT_TRUE(back);
+    EXPECT_EQ(back->snapshot, s);
+    for (std::size_t cut = 0; cut < bytes.size(); ++cut) {
+        EXPECT_FALSE(chat::decode_answer(std::span(bytes).first(cut))) << cut;
+    }
+    s.connected.reset();
+    s.answered_at.reset();
+    s.kind = chat::CallKind::Direct;
+    EXPECT_EQ(chat::decode_answer(
+                  chat::encode_answer(
+                      {.outcome = CallOutcome::Current, .ticket = std::nullopt, .snapshot = s}))
+                  ->snapshot,
+              s);
+    // A Current with nothing to carry is not written readable.
+    EXPECT_FALSE(chat::decode_answer(
+        chat::encode_answer({.outcome = CallOutcome::Current, .ticket = std::nullopt})));
+}
+
 } // namespace

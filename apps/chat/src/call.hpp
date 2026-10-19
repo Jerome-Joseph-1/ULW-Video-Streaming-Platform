@@ -71,6 +71,9 @@ enum class CallOutcome : std::uint8_t {
     // one was), or it is on and no longer rings (for them). A call that is over is NoCall.
     Ringing = 12,
     Answered = 13,
+    // A current-call ask only (CallCurrentRequest): the room's call, in CallAnswer::snapshot. A
+    // room with no call is NoCall.
+    Current = 14,
 };
 
 // A ticket for this device.
@@ -100,7 +103,13 @@ struct CallStatusRequest {
     std::optional<core::UserId> user = std::nullopt;
 };
 
-using CallAsk = std::variant<CallRequest, CallSignalRequest, CallStatusRequest>;
+// The room's call, whatever its id, and who is in it (ADR-0114): asked by the service API and by a
+// member's socket after a reload or a reconnect. Read only; no member list is read.
+struct CallCurrentRequest {
+    friend bool operator==(const CallCurrentRequest&, const CallCurrentRequest&) = default;
+};
+
+using CallAsk = std::variant<CallRequest, CallSignalRequest, CallStatusRequest, CallCurrentRequest>;
 
 struct CallAnswer {
     CallOutcome outcome = CallOutcome::Unavailable;
@@ -113,6 +122,8 @@ struct CallAnswer {
     std::optional<core::UserId> caller = std::nullopt;
     // With RingLimited: when to ask again.
     std::optional<core::Millis> retry_after = std::nullopt;
+    // With Current: the room's call.
+    std::optional<CallSnapshot> snapshot = std::nullopt;
 };
 
 // The asks travel between nodes as opaque bytes (rt::RoomRouter::ask_owner); these are their
@@ -120,6 +131,7 @@ struct CallAnswer {
 [[nodiscard]] std::vector<std::byte> encode_request(const CallRequest& request);
 [[nodiscard]] std::vector<std::byte> encode_request(const CallSignalRequest& request);
 [[nodiscard]] std::vector<std::byte> encode_request(const CallStatusRequest& request);
+[[nodiscard]] std::vector<std::byte> encode_request(const CallCurrentRequest& request);
 [[nodiscard]] std::optional<CallAsk> decode_request(std::span<const std::byte> bytes);
 [[nodiscard]] std::vector<std::byte> encode_answer(const CallAnswer& answer);
 [[nodiscard]] std::optional<CallAnswer> decode_answer(std::span<const std::byte> bytes);
@@ -371,6 +383,8 @@ private:
                      listed) noexcept;
     void issue(const core::RoomId& room, Entry& entry, Waiter waiter) noexcept;
     void check_occupancy() noexcept;
+    // Answers a current-call ask from the ringer, with who the SFU lists when it can say.
+    void current(const core::RoomId& room, rt::OwnerAnswer answer) noexcept;
     [[nodiscard]] std::uint16_t cap(CallKind kind) const noexcept {
         return kind == CallKind::Group ? limits_.group_participants : kCallParticipants;
     }

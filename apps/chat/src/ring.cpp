@@ -254,6 +254,29 @@ bool Ringer::settled(const core::RoomId& room) const noexcept {
            clock_.now() >= it->second.last_ticket + limits_.caller_grace;
 }
 
+std::optional<CallSnapshot> Ringer::snapshot(const core::RoomId& room) const {
+    const auto it = calls_.find(room);
+    if (it == calls_.end()) {
+        return std::nullopt;
+    }
+    const Call& call = it->second;
+    std::vector<core::UserId> ringing;
+    if (call.kind == CallKind::Group) {
+        ringing = call.ringing;
+    } else if (!call.answered) {
+        ringing = call.callees;
+    }
+    return CallSnapshot{.call = call.id,
+                        .kind = call.kind,
+                        .caller = call.caller,
+                        .answered = call.answered,
+                        .ringing = std::move(ringing),
+                        .joined = joined(room),
+                        .started_at = call.started_at,
+                        .answered_at = call.answered_at,
+                        .expires_at = call.expires_at};
+}
+
 std::optional<core::UserId> Ringer::caller_of(const core::RoomId& room) const noexcept {
     const auto it = calls_.find(room);
     if (it == calls_.end()) {
@@ -365,6 +388,7 @@ Ringer::ticketed(const core::RoomId& room, const core::UserId& user,
                 std::ranges::find(call.callees, user) != call.callees.end()) {
                 // The callee picked up: on every device of either, the ringing stops.
                 call.answered = true;
+                call.answered_at = clock_.wall_now();
                 ++counters_.answered;
                 announce(room, call, RingEvent::Answered, user);
             }
@@ -417,6 +441,9 @@ void Ringer::joined_group(const core::RoomId& room, Call& call, const core::User
         call.answered = true;
         ++counters_.answered;
     }
+    if (user != call.caller && !call.answered_at) {
+        call.answered_at = clock_.wall_now();
+    }
     // Joining is answering, for whoever was not in the call: everyone hears who came, and the
     // member's other devices stop ringing.
     if (was_ringing || (!was_in && call.answered)) {
@@ -447,6 +474,7 @@ void Ringer::start(const core::RoomId& room, const core::UserId& caller,
                                              .joined = std::move(joined),
                                              .next_caller_check = now + limits_.caller_grace,
                                              .started = now,
+                                             .started_at = clock_.wall_now(),
                                              .last_ticket = now,
                                              .ring_deadline = now + limits_.ring_timeout,
                                              .expires_at = clock_.wall_now() + limits_.ring_timeout,

@@ -870,6 +870,72 @@ TEST_F(ServiceApiTest, ACallsStatusSaysWhetherItStillRingsForWhomeverItNames) {
     EXPECT_EQ(api_->counters().reads, 4U);
 }
 
+// ADR-0114: the backend does on a member's behalf what the member's socket can, as for a decline:
+// a page that is going away reaches the backend (sendBeacon) when it cannot reach chat.
+TEST_F(ServiceApiTest, ACancelAnEndAndALeaveAreTheMembersOwnAskedOfTheRoomsOwner) {
+    const std::vector<std::tuple<std::string_view, chat::CallSignal, std::string_view>> cases{
+        {"cancel_call", chat::CallSignal::Cancel, "call_cancelled"},
+        {"end_call", chat::CallSignal::End, "call_ended"},
+        {"leave_call", chat::CallSignal::Leave, "call_left"},
+    };
+    for (const auto& [op, signal, type] : cases) {
+        rooms_.reply(chat::CallOutcome::Done);
+        const Answer a = ask(op, call_body());
+        EXPECT_EQ(a.status, 200) << op << " " << a.body;
+        EXPECT_EQ(a.field("type"), type);
+        EXPECT_EQ(a.field("call"), kCall);
+        EXPECT_EQ(a.field("by"), "bob");
+        ASSERT_TRUE(rooms_.asked);
+        const auto* asked = std::get_if<chat::CallSignalRequest>(&*rooms_.asked);
+        ASSERT_NE(asked, nullptr) << op;
+        EXPECT_EQ(asked->signal, signal);
+        EXPECT_EQ(asked->user, user("bob"));
+        // Not the call's state for it, as the member's socket would be told.
+        rooms_.reply(chat::CallOutcome::NoCall);
+        EXPECT_EQ(ask(op, call_body()).field("reason"), "no_call");
+        EXPECT_EQ(ask(op, call_body("")).field("reason"), "malformed") << op << " names its user";
+    }
+    EXPECT_EQ(rooms_.joins, rooms_.leaves);
+    EXPECT_EQ(api_->counters().changes, 3U);
+}
+
+TEST_F(ServiceApiTest, ACallsStatusWithoutItsIdIsTheRoomsCallAndWhoIsInIt) {
+    const chat::CallSnapshot snapshot{
+        .call = *chat::CallId::parse(kCall),
+        .kind = chat::CallKind::Group,
+        .caller = user("alice"),
+        .answered = true,
+        .ringing = {user("carol")},
+        .joined = {user("alice"), user("bob")},
+        .connected = std::vector{user("alice")},
+        .started_at = core::WallTime{std::chrono::seconds{1'790'000'000}},
+        .answered_at = core::WallTime{std::chrono::seconds{1'790'000'007}},
+        .expires_at = core::WallTime{std::chrono::seconds{1'790'000'045}}};
+    rooms_.answer = chat::encode_answer(
+        {.outcome = chat::CallOutcome::Current, .ticket = std::nullopt, .snapshot = snapshot});
+    const std::string room_only = R"({"room":")" + std::string(kCallRoom) + R"("})";
+    const Answer a = ask("call_status", room_only);
+    EXPECT_EQ(a.status, 200) << a.body;
+    EXPECT_EQ(a.body, std::format(R"({{"type":"call_status","room":"{}","call":"{}",)"
+                                  R"("status":"answered","kind":"group","caller":"alice",)"
+                                  R"("ringing":["carol"],"joined":["alice","bob"],)"
+                                  R"("connected":["alice"],"started_at":1790000000,)"
+                                  R"("answered_at":1790000007,"expires_at":1790000045}})",
+                                  kCallRoom, kCall));
+    ASSERT_TRUE(rooms_.asked);
+    EXPECT_TRUE(std::holds_alternative<chat::CallCurrentRequest>(*rooms_.asked));
+    rooms_.reply(chat::CallOutcome::NoCall);
+    const Answer none = ask("call_status", room_only);
+    EXPECT_EQ(none.status, 200);
+    EXPECT_EQ(none.field("status"), "none");
+    EXPECT_EQ(none.body.find(R"("call":null)") != std::string::npos, true);
+    // A user names whom a ring rings, which only an id asks about.
+    EXPECT_EQ(ask("call_status", R"({"room":")" + std::string(kCallRoom) + R"(","user":"bob"})")
+                  .field("reason"),
+              "malformed");
+    EXPECT_EQ(api_->counters().reads, 2U);
+}
+
 TEST_F(ServiceApiTest, ACallAskThatIsNotOneOfTheApisIsRefusedBeforeAnythingIsAsked) {
     const std::string live = chat::live_chat_room("stream-1").value().to_string();
     const std::vector<std::pair<std::string, std::string_view>> cases{
@@ -883,7 +949,8 @@ TEST_F(ServiceApiTest, ACallAskThatIsNotOneOfTheApisIsRefusedBeforeAnythingIsAsk
         {call_body(R"(,"user":"bob","extra":1)"), "malformed"},
     };
     for (const auto& [body, reason] : cases) {
-        for (const std::string_view op : {"decline_call", "call_status"}) {
+        for (const std::string_view op :
+             {"decline_call", "cancel_call", "end_call", "leave_call", "call_status"}) {
             const Answer a = ask(op, body);
             EXPECT_EQ(a.status, 400) << op << " " << body;
             EXPECT_EQ(a.field("reason"), reason) << op << " " << body;

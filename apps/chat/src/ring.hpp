@@ -98,6 +98,28 @@ public:
     [[nodiscard]] virtual bool owns(const core::RoomId& room) const noexcept = 0;
 };
 
+// A room's call as its owner knows it, for a status read (ADR-0114).
+struct CallSnapshot {
+    CallId call;
+    CallKind kind = CallKind::Direct;
+    core::UserId caller;
+    // false: it still rings, nobody but the caller in it yet.
+    bool answered = false;
+    // Callees the call still rings.
+    std::vector<core::UserId> ringing;
+    // Who holds a ticket in it and has not left, the caller first.
+    std::vector<core::UserId> joined;
+    // Who the SFU lists in its media room, each once; nullopt when it could not say.
+    std::optional<std::vector<core::UserId>> connected = std::nullopt;
+    core::WallTime started_at;
+    // When someone other than the caller first came.
+    std::optional<core::WallTime> answered_at = std::nullopt;
+    // When it stops ringing anyone still rung.
+    core::WallTime expires_at;
+
+    friend bool operator==(const CallSnapshot&, const CallSnapshot&) = default;
+};
+
 // What a ring's watcher hears (ADR-0111): each call's first Ringing and how its ring ends, once
 // per event, not per member; not its re-announcements, nor a group call's Left and Moved.
 struct CallEvent {
@@ -331,6 +353,9 @@ public:
     [[nodiscard]] bool settled(const core::RoomId& room) const noexcept;
     // The caller of the room's call.
     [[nodiscard]] std::optional<core::UserId> caller_of(const core::RoomId& room) const noexcept;
+    // The room's call, if it has one, as this owner knows it; `connected` is left for the caller
+    // to fill from the SFU.
+    [[nodiscard]] std::optional<CallSnapshot> snapshot(const core::RoomId& room) const;
     // The SFU lists nobody in the room's call `call`, which is on: it ends (call_ended, by
     // nobody), and the room has no call.
     void abandoned(const core::RoomId& room, const CallId& call) noexcept;
@@ -395,6 +420,8 @@ private:
         core::MonoTime next_caller_check;
         std::uint32_t caller_absent = 0;
         core::MonoTime started;
+        core::WallTime started_at;
+        std::optional<core::WallTime> answered_at = std::nullopt;
         // The latest ticket of the call: its device may be connecting still, which the SFU does
         // not list yet, so nobody listed within caller_grace of it ends nothing.
         core::MonoTime last_ticket;

@@ -76,10 +76,14 @@ public:
 
     void ask_owner(const core::RoomId& room, rt::IMember& from, std::span<const std::byte> request,
                    rt::OwnerAnswer done) override {
-        asks.push_back({.room = room,
-                        .member = &from,
-                        .request = {request.begin(), request.end()},
-                        .done = std::move(done)});
+        // What a join asks of the room's call (ADR-0114) is kept apart from what clients ask.
+        const auto decoded = chat::decode_request(request);
+        auto& to =
+            decoded && std::holds_alternative<chat::CallCurrentRequest>(*decoded) ? statuses : asks;
+        to.push_back({.room = room,
+                      .member = &from,
+                      .request = {request.begin(), request.end()},
+                      .done = std::move(done)});
     }
 
     struct Asking {
@@ -100,6 +104,7 @@ public:
     std::vector<Joining> joins;
     std::vector<Sending> sends;
     std::vector<Asking> asks;
+    std::vector<Asking> statuses;
     std::vector<core::RoomId> left;
 };
 
@@ -1577,6 +1582,109 @@ constexpr std::string_view kDevice = "01a0eb86-6cca-7dce-84cc-3bb47615f9aa";
 std::vector<std::byte> answer(chat::CallOutcome outcome,
                               std::optional<core::ports::MediaTicket> ticket = std::nullopt) {
     return chat::encode_answer({.outcome = outcome, .ticket = std::move(ticket)});
+}
+
+// ADR-0114: a socket that joins a room hears at once of the room's ring that is ringing it, and
+// may ask for the room's call whatever its id.
+class CallStatusTest : public ChatServiceTest {
+protected:
+    chat::CallSnapshot snapshot(bool answered, std::vector<std::string_view> ringing) {
+        chat::CallSnapshot s{.call = call_,
+                             .kind = chat::CallKind::Direct,
+                             .caller = *core::UserId::parse("bob"),
+                             .answered = answered,
+                             .ringing = {},
+                             .joined = {*core::UserId::parse("bob")},
+                             .connected = std::vector{*core::UserId::parse("bob")},
+                             .started_at = core::WallTime{std::chrono::seconds{1'790'000'000}},
+                             .answered_at = std::nullopt,
+                             .expires_at = core::WallTime{std::chrono::seconds{1'790'000'045}}};
+        for (std::string_view u : ringing) {
+            s.ringing.push_back(*core::UserId::parse(u));
+        }
+        return s;
+    }
+    static std::vector<std::byte> current(const chat::CallSnapshot& s) {
+        return chat::encode_answer(
+            {.outcome = chat::CallOutcome::Current, .ticket = std::nullopt, .snapshot = s});
+    }
+
+    ulw::test::FakeClock clock_two_;
+    ulw::test::FakeRandom random_two_;
+    const chat::CallId call_ = chat::CallId::generate(clock_two_, random_two_);
+};
+
+TEST_F(CallStatusTest, AJoinTellsTheSocketOfARingThatIsRingingItAtOnce) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    const rt::IMember& member = rooms_.admit();
+    alice.take();
+    ASSERT_EQ(rooms_.statuses.size(), 1U);
+    EXPECT_EQ(rooms_.statuses[0].room, room_id());
+    EXPECT_EQ(rooms_.statuses[0].member, &member);
+    // Not charged to the client: the join was.
+    EXPECT_TRUE(rooms_.asks.empty());
+    rooms_.statuses[0].done(current(snapshot(false, {"alice"})));
+    const auto got = alice.take();
+    ASSERT_EQ(got.size(), 1U);
+    const auto json = core::json::parse(got[0]);
+    ASSERT_TRUE(json);
+    EXPECT_EQ(json->find("type")->as_string(), "call_ringing");
+    EXPECT_EQ(json->find("call")->as_string(), call_.to_string());
+    EXPECT_EQ(json->find("from")->as_string(), "bob");
+    EXPECT_EQ(json->find("expires_at")->as_i64(), 1'790'000'045);
+}
+
+TEST_F(CallStatusTest, AJoinSaysNothingOfACallThatDoesNotRingTheSocketsUser) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    for (const auto& answered :
+         {current(snapshot(false, {"carol"})), current(snapshot(true, {})),
+          answer(chat::CallOutcome::NoCall), answer(chat::CallOutcome::Disabled)}) {
+        join(a);
+        if (!rooms_.joins.empty()) {
+            rooms_.admit();
+        }
+        alice.take();
+        ASSERT_EQ(rooms_.statuses.size(), 1U);
+        rooms_.statuses[0].done(answered);
+        rooms_.statuses.clear();
+        EXPECT_TRUE(alice.take().empty());
+    }
+    // Nor of one it answers unavailable.
+    join(a);
+    alice.take();
+    ASSERT_EQ(rooms_.statuses.size(), 1U);
+    rooms_.statuses[0].done(std::unexpected(RouteError::Unavailable));
+    EXPECT_TRUE(alice.take().empty());
+}
+
+TEST_F(CallStatusTest, ACallsStatusIsAskedOfTheOwnerForAJoinedRoomAndAnsweredWhateverItsId) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    service_->call_status(a, {.room = room_id()});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
+    join(a);
+    rooms_.admit();
+    alice.take();
+    rooms_.statuses.clear();
+    service_->call_status(a, {.room = room_id()});
+    ASSERT_EQ(rooms_.statuses.size(), 1U);
+    auto s = snapshot(true, {});
+    s.answered_at = core::WallTime{std::chrono::seconds{1'790'000'010}};
+    rooms_.statuses[0].done(current(s));
+    std::string expected;
+    chat::write_call_status(expected, room_id(), s);
+    EXPECT_EQ(alice.take(), std::vector{expected});
+    service_->call_status(a, {.room = room_id()});
+    rooms_.statuses[1].done(answer(chat::CallOutcome::NoCall));
+    EXPECT_EQ(alice.take(),
+              std::vector{R"({"type":"call_status","room":")" + room_id().to_string() +
+                          R"(","call":null,"status":"none"})"});
+    service_->call_status(a, {.room = room_id()});
+    rooms_.statuses[2].done(std::unexpected(RouteError::Unavailable));
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
 }
 
 TEST_F(ChatServiceTest, ACallIsAskedOfTheRoomsOwnerAndItsTicketHandedToTheClient) {

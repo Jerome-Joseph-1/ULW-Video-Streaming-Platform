@@ -371,6 +371,16 @@ void ChatService::subscribe(Room& room, ClientId id, const Join& join) {
     c->client->push(out);
     const std::uint64_t resumed_from = join.after ? replay(room, *c, *join.after) : room.head + 1;
     counters_.lossy_drops += owed(was_behind, std::min(room.head, resumed_from - 1));
+    // Whether the room's call rings this socket's user now: a socket that joins (a reload, a
+    // reconnect, a phone waking up) hears it at once (ADR-0114). A stream's live chat has no call.
+    if (!core::ports::is_stream_chat(room.id)) {
+        rooms_plane_.ask_owner(
+            room.id, room, encode_request(CallCurrentRequest{}),
+            [this, id, room = room.id](
+                std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
+                statused(id, room, false, std::move(result));
+            });
+    }
 }
 
 // The newest kept messages after `after` that fit the budget, sent oldest first. Anything older
@@ -542,6 +552,78 @@ void ChatService::call_move(ClientId id, const CallMove& move) {
         });
 }
 
+void ChatService::call_status(ClientId id, const CallStatusQuery& query) {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    Room* r = calling_room(*c, id, query.room);
+    if (r == nullptr) {
+        return;
+    }
+    rooms_plane_.ask_owner(
+        query.room, *r, encode_request(CallCurrentRequest{}),
+        [this, id,
+         room = query.room](std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
+            statused(id, room, true, std::move(result));
+        });
+}
+
+void ChatService::statused(ClientId id, const core::RoomId& room, bool asked,
+                           std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    try {
+        std::string out;
+        const auto answer = result ? decode_answer(*result) : std::optional<CallAnswer>{};
+        if (!asked) {
+            // A socket that joined hears at once of a ring that is ringing it, rather than at
+            // the next announcement (ADR-0114). Anything else it did not ask about.
+            if (!answer || answer->outcome != CallOutcome::Current || !answer->snapshot) {
+                return;
+            }
+            const CallSnapshot& s = *answer->snapshot;
+            const bool rings = std::ranges::find(s.ringing, c->user) != s.ringing.end() ||
+                               (!s.answered && s.caller == c->user);
+            if (!rings) {
+                return;
+            }
+            write_call_event(out, {.event = RingEvent::Ringing,
+                                   .to = c->user,
+                                   .room = room,
+                                   .call = s.call,
+                                   .from = s.caller,
+                                   .by = std::nullopt,
+                                   .expires_at = s.expires_at});
+            c->client->push(out);
+            return;
+        }
+        if (!result) {
+            const rt::RouteError error = result.error();
+            const bool retry =
+                error == rt::RouteError::Unavailable || error == rt::RouteError::Fenced;
+            write_call_error(out, retry ? "unavailable" : reason(error), room,
+                             retry ? std::optional(kCallRetry) : std::nullopt);
+        } else if (!answer) {
+            write_call_error(out, "unavailable", room, kCallRetry);
+        } else if (answer->outcome == CallOutcome::Current && answer->snapshot) {
+            write_call_status(out, room, answer->snapshot);
+        } else if (answer->outcome == CallOutcome::NoCall) {
+            write_call_status(out, room, std::nullopt);
+        } else if (answer->outcome == CallOutcome::Disabled) {
+            write_call_error(out, "calls_disabled", room, std::nullopt);
+        } else {
+            write_call_error(out, "unavailable", room, kCallRetry);
+        }
+        c->client->push(out);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        c->client->allocation_failed();
+    }
+}
+
 void ChatService::moved(ClientId id, const CallMove& move,
                         std::expected<std::vector<std::byte>, rt::RouteError> result) noexcept {
     Client* c = find(id);
@@ -619,6 +701,7 @@ void ChatService::moved(ClientId id, const CallMove& move,
         case CallOutcome::Full:
         case CallOutcome::Ringing:
         case CallOutcome::Answered:
+        case CallOutcome::Current:
             write_call_error(out, "unavailable", move.room, kCallRetry);
             break;
         }
@@ -690,6 +773,7 @@ void ChatService::called(ClientId id, const core::RoomId& room,
         // A status ask's answers, never a ticket's.
         case CallOutcome::Ringing:
         case CallOutcome::Answered:
+        case CallOutcome::Current:
             write_call_error(out, "unavailable", room, kCallRetry);
             break;
         // The call this ticket was answering is over: nothing to join, nothing to retry.

@@ -117,3 +117,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0111](0111-notification-events-for-members-not-connected.md) | Notification events for members who are not connected, as an opt-in hook | Accepted |
 | [0112](0112-a-message-carries-the-time-its-owner-sequenced-it.md) | A message carries the time its room's owner sequenced it | Accepted |
 | [0113](0113-a-call-lasts-while-someone-is-in-its-media-room.md) | A call lasts while someone is in its media room | Accepted |
+| [0114](0114-the-rooms-call-is-read-whatever-its-id.md) | The room's call is read whatever its id, and the backend may end it for a member | Accepted |
