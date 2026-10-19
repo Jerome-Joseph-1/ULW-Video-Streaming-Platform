@@ -5,7 +5,7 @@ on, newest first. An entry says what changed, who is affected and what to do.
 
 ## Unreleased
 
-<!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md, docs/adr/0115-a-call-says-whom-it-rings-and-who-moderates-it.md -->
+<!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md, docs/adr/0115-a-call-says-whom-it-rings-and-who-moderates-it.md, docs/adr/0119-one-visibility-for-many-videos.md -->
 
 Additive (versioning rule 1), with calls that last as long as someone is in them.
 
@@ -25,6 +25,7 @@ Additive (versioning rule 1), with calls that last as long as someone is in them
 | An error answering a call command did not say which call | It names the `call`, and every call command may carry `rid`, echoed in its answer |
 | A page centred on a message (jump to a quote) took two `history` requests | `history` with `around` ([Chat](chat.md#messages)) |
 | A connection freed a place among its 64 rooms only by reconnecting | `part` stops following a room and frees its place, leaving the member list as it is ([Chat](chat.md#messages)) |
+| The service API set one video's visibility per request | `PATCH /api/v1/service/videos` sets it on up to 50, and says which did not change and why ([Videos](videos-and-playback.md#service-api-visibility-takedown-and-listing)) |
 | A refused upgrade read as `1006` in a browser, like a network failure | `/rt?refusals=close` is refused on the socket, with close `4001`, `4003`, `4029` or `4503` ([Chat](chat.md#connecting)) |
 
 What to do:

@@ -8,6 +8,7 @@
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -16,6 +17,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace gateway {
 
@@ -218,6 +220,33 @@ std::optional<core::Visibility> visibility_from_body(std::string_view body) {
         return std::nullopt;
     }
     return *visibility;
+}
+
+std::optional<BulkVisibility> bulk_visibility_from_body(std::string_view body) {
+    const auto visibility = visibility_from_body(body);
+    const auto doc = core::json::parse(body);
+    if (!visibility || !doc) {
+        return std::nullopt;
+    }
+    const core::json::Value* field = doc->find("videos");
+    const std::vector<core::json::Value>* items = field != nullptr ? field->as_array() : nullptr;
+    if (items == nullptr || items->empty() || items->size() > kMaxBulkVideos) {
+        return std::nullopt;
+    }
+    BulkVisibility out{.videos = {}, .visibility = *visibility};
+    out.videos.reserve(items->size());
+    for (const core::json::Value& item : *items) {
+        const std::optional<std::string_view> text = item.as_string();
+        if (!text) {
+            return std::nullopt;
+        }
+        const auto id = core::VideoId::parse(*text);
+        if (!id || std::ranges::find(out.videos, *id) != out.videos.end()) {
+            return std::nullopt;
+        }
+        out.videos.push_back(*id);
+    }
+    return out;
 }
 
 std::string_view state_name(core::VideoState state) noexcept {

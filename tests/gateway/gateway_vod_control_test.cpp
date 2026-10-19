@@ -123,6 +123,13 @@ protected:
                                {{"Content-Type", "application/json"}});
     }
 
+    std::optional<HttpResponse> service_bulk(std::string_view body,
+                                             std::string_view token = kService) {
+        return client_.request("PATCH", "/api/v1/service/videos", token,
+                               std::as_bytes(std::span(body)),
+                               {{"Content-Type", "application/json"}});
+    }
+
     std::optional<HttpResponse> create_upload(std::string_view token) {
         const std::string body =
             R"({"filename":"a.mp4","size_bytes":10,"content_type":"video/mp4"})";
@@ -344,6 +351,78 @@ TEST_F(GatewayVodControl, TheServicesVisibilityIsCheckedAsTheOwnersIs) {
         EXPECT_EQ(r->body, R"({"error":"not_found"})");
     }
     EXPECT_EQ(client_.request("PATCH", service_path(), kService)->status, 400);
+}
+
+// ADR-0119: one visibility for many videos, each checked as the single PATCH checks it.
+TEST_F(GatewayVodControl, TheServiceSetsManyVideosVisibilityAtOnce) {
+    const std::string first = nth_video(1);
+    const std::string second = nth_video(2);
+    const std::string bobs = nth_video(3);
+    gw_.put_video(video(core::VideoState::Ready, {}, first));
+    gw_.put_video(video(core::VideoState::Processing, {}, second));
+    gw_.put_video(video(core::VideoState::Ready, {}, bobs, "bob"));
+    gw_.add_member(kRoom, "alice");
+    const std::string body =
+        std::format(R"({{"visibility":"room:{}","videos":["{}","{}","{}","{}"]}})", kRoom, first,
+                    kMissing, second, bobs);
+    const auto r = service_bulk(body);
+    ASSERT_TRUE(r);
+    ASSERT_EQ(r->status, 200) << r->body;
+    EXPECT_EQ(r->header("content-type"), "application/json");
+    // The videos changed, as the single PATCH answers each, in the order asked.
+    const std::size_t one = r->body.find(R"("id":")" + first);
+    const std::size_t two = r->body.find(R"("id":")" + second);
+    ASSERT_NE(one, std::string::npos) << r->body;
+    ASSERT_NE(two, std::string::npos) << r->body;
+    EXPECT_LT(one, two);
+    EXPECT_EQ(r->body.find(R"("id":")" + bobs + R"(","title")"), std::string::npos) << r->body;
+    // And those that were not, with why: no such video, and a room without bob.
+    const std::string failed = std::format(
+        R"("failed":[{{"id":"{}","error":"not_found"}},{{"id":"{}","error":"not_member"}}]}})",
+        kMissing, bobs);
+    EXPECT_NE(r->body.find(failed), std::string::npos) << r->body;
+    gw_.add_member(kRoom, "carol");
+    EXPECT_EQ(get(video_path({}, first), "user.carol")->status, 200);
+    EXPECT_EQ(get(video_path({}, second), "user.carol")->status, 200);
+    EXPECT_EQ(get(video_path({}, bobs), "user.carol")->status, 404);
+}
+
+TEST_F(GatewayVodControl, TheServicesBulkVisibilityIsCheckedFirst) {
+    publish(core::VideoState::Ready);
+    const std::string video = std::format(R"("{}")", kVideo);
+    for (const auto& [body, error] : std::initializer_list<std::pair<std::string, std::string>>{
+             {R"({"visibility":"public","videos":[)" + video + "]}", "bad_visibility"},
+             {"not json", "bad_visibility"},
+             {R"({"visibility":"unlisted"})", "bad_videos"},
+             {R"({"visibility":"unlisted","videos":[]})", "bad_videos"},
+             {R"({"visibility":"unlisted","videos":[)" + video + "," + video + "]}",
+              "bad_videos"}}) {
+        const auto r = service_bulk(body);
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 400) << body;
+        EXPECT_EQ(r->body, R"({"error":")" + error + "\"}") << body;
+    }
+    // Nobody else may use it, and nothing changed.
+    const std::string body = R"({"visibility":"unlisted","videos":[)" + video + "]}";
+    for (const std::string_view token : {kAlice, kBob}) {
+        const auto r = service_bulk(body, token);
+        ASSERT_TRUE(r);
+        EXPECT_EQ(r->status, 403) << token;
+        EXPECT_EQ(r->body, R"({"error":"forbidden"})");
+    }
+    EXPECT_EQ(get(video_path(), kBob)->status, 404);
+}
+
+TEST_F(GatewayVodControl, ACatalogOutageFailsEachVideoForARetry) {
+    publish(core::VideoState::Ready);
+    gw_.fail_catalog(core::ports::CatalogError::Unavailable);
+    const auto r =
+        service_bulk(std::format(R"({{"visibility":"unlisted","videos":["{}"]}})", kVideo));
+    ASSERT_TRUE(r);
+    EXPECT_EQ(r->status, 200);
+    EXPECT_EQ(
+        r->body,
+        std::format(R"({{"videos":[],"failed":[{{"id":"{}","error":"unavailable"}}]}})", kVideo));
 }
 
 TEST_F(GatewayVodControl, TheServiceTakesAVideoDown) {

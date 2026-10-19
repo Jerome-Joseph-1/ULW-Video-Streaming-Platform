@@ -7,6 +7,8 @@
 #include "video_access.hpp"
 
 #include <chrono>
+#include <cstddef>
+#include <format>
 #include <gtest/gtest.h>
 #include <optional>
 #include <string>
@@ -103,6 +105,40 @@ TEST(VisibilityFromBody, RefusesAnythingElse) {
           R"({"visibility":"private")"}) {
         EXPECT_FALSE(visibility_from_body(body)) << body;
     }
+}
+
+TEST(BulkVisibilityFromBody, TakesDistinctVideosAndOneVisibility) {
+    const std::string other = "01890a5d-ac96-774b-bcce-b302099a8058";
+    const auto bulk =
+        gateway::bulk_visibility_from_body(R"({"videos":[")" + std::string(kVideo) + R"(",")" +
+                                           other + R"("],"visibility":"unlisted"})");
+    ASSERT_TRUE(bulk);
+    EXPECT_EQ(bulk->visibility, core::Visibility::unlisted());
+    ASSERT_EQ(bulk->videos.size(), 2U);
+    EXPECT_EQ(bulk->videos[0], *core::VideoId::parse(kVideo));
+    EXPECT_EQ(bulk->videos[1], *core::VideoId::parse(other));
+}
+
+TEST(BulkVisibilityFromBody, RefusesAnEmptyLongRepeatedOrMalformedList) {
+    std::string many = R"({"visibility":"private","videos":[)";
+    for (std::size_t i = 0; i <= gateway::kMaxBulkVideos; ++i) {
+        many += std::format(R"({}"01890a5d-ac96-774b-bcce-b302099a{:04}")", i == 0 ? "" : ",", i);
+    }
+    many += "]}";
+    const std::string video = "\"" + std::string(kVideo) + "\"";
+    for (const std::string& body :
+         {std::string(R"({"visibility":"private"})"),
+          std::string(R"({"visibility":"private","videos":[]})"),
+          std::string(R"({"visibility":"private","videos":"x"})"),
+          std::string(R"({"visibility":"private","videos":[1]})"),
+          std::string(R"({"visibility":"private","videos":["not-a-uuid"]})"),
+          R"({"visibility":"private","videos":[)" + video + "," + video + "]}",
+          R"({"visibility":"public","videos":[)" + video + "]}", many}) {
+        EXPECT_FALSE(gateway::bulk_visibility_from_body(body)) << body;
+    }
+    // Exactly the most is fine.
+    const std::size_t last = many.rfind(',');
+    EXPECT_TRUE(gateway::bulk_visibility_from_body(many.substr(0, last) + "]}"));
 }
 
 TEST(VideoJson, TheOwnerSeesTheVisibilityAndWhyItFailed) {
