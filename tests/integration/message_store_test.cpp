@@ -202,8 +202,12 @@ public:
         roles.emplace_back(room, user, role);
     }
     void on_members_resync() noexcept override { ++resyncs; }
+    void on_user_disconnected(const core::UserId& user) noexcept override {
+        disconnected.push_back(user);
+    }
 
     std::vector<std::pair<core::RoomId, core::UserId>> removed;
+    std::vector<core::UserId> disconnected;
     std::vector<std::pair<core::RoomId, core::UserId>> added;
     std::vector<std::tuple<core::RoomId, core::UserId, core::ports::MemberRole>> roles;
     int resyncs = 0;
@@ -753,6 +757,32 @@ TEST_F(MessageStoreTest, AMemberListedInTheDatabaseIsHeardAsAnAddition) {
     ASSERT_EQ(heard.removed.size(), 1U);
     EXPECT_EQ(heard.removed[0], std::pair(room, alice_));
     store_->watch_members(nullptr);
+}
+
+// ADR-0132: a disconnect reaches every listening node on the members' channel; one whose user is
+// out of form is a change in doubt, and a store that cannot be reached says so.
+TEST_F(MessageStoreTest, ADisconnectIsHeardOnTheMembersChannel) {
+    Removals heard;
+    store_->watch_members(&heard);
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return heard.resyncs > 0; }))
+        << "the store never listened";
+    const int resyncs = heard.resyncs;
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->disconnect_user(alice_, std::move(done)); }));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return !heard.disconnected.empty(); }));
+    EXPECT_EQ(heard.disconnected, std::vector{alice_});
+    ASSERT_TRUE(conn_->exec("SELECT pg_notify('chat_members', '! has space')", Params{}));
+    ASSERT_TRUE(ulw::test::pump_until(*reactor_, [&] { return heard.resyncs > resyncs; }));
+    EXPECT_EQ(heard.disconnected.size(), 1U);
+    EXPECT_TRUE(heard.removed.empty());
+    store_->watch_members(nullptr);
+
+    auto down = PgMessageStore::create(
+        *reactor_, *offload_,
+        {.conninfo = "postgresql://ulw@127.0.0.1:1/ulw", .connect_timeout = core::Millis{2000}});
+    ASSERT_TRUE(down) << down.error();
+    EXPECT_EQ(ask<void>([&](auto done) { (*down)->disconnect_user(alice_, std::move(done)); }),
+              core::ports::MessageResult<void>{
+                  std::unexpected(core::ports::MessageStoreError::Unavailable)});
 }
 
 // A room named by a pair is only ever a direct chat, and one named by a creator a group chat: the

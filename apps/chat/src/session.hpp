@@ -96,6 +96,7 @@ public:
     bool push(std::string_view text) noexcept override;
     [[nodiscard]] std::size_t unsent_bytes() const noexcept override;
     void allocation_failed() noexcept override;
+    void disconnect() noexcept override;
 
     // Close 1001 to an open WebSocket; anything else is closed at once.
     void drain() noexcept;
@@ -186,6 +187,9 @@ private:
     // When the token the socket was opened with stops being accepted: its exp plus the clock
     // skew any check allows. The socket is closed then, with kTokenExpired (ADR-0073).
     std::optional<core::MonoTime> expires_;
+    // Cut off by disconnect_user (ADR-0132): closed as an expired token is, but not counted as
+    // one.
+    bool disconnected_ = false;
     // Set by the upgrade.
     std::optional<ClientId> client_;
     std::optional<PresenceClientId> presence_;

@@ -416,6 +416,8 @@ public:
     [[nodiscard]] std::vector<core::UserId> joined(const core::RoomId& room) const;
     // Every room with a call.
     [[nodiscard]] std::vector<core::RoomId> rooms() const;
+    // Whether `user` is in the room's call: its caller, rung by it, or with a ticket in it.
+    [[nodiscard]] bool involves(const core::RoomId& room, const core::UserId& user) const noexcept;
 
     // Calls whose occupancy is due to be checked (RingLimits::occupancy_check, caller_check),
     // taken by the call handler, which asks the SFU and answers occupied().

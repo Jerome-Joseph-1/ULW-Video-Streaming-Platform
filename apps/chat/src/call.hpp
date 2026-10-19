@@ -228,6 +228,8 @@ struct CallCounters {
     std::uint64_t occupancy_unavailable = 0;
     // Member lists checked again after the store lost its way to hear removals.
     std::uint64_t resync_checks = 0;
+    // Users put out of a call here because the service cut them off (ADR-0132).
+    std::uint64_t disconnects = 0;
 };
 
 // Answers call asks for the rooms this node owns. Everything runs on the reactor thread.
@@ -252,6 +254,9 @@ public:
     void on_member_removed(const core::RoomId& room, const core::UserId& user) noexcept override;
     // Removals may have gone unheard: the members in every call here are checked again.
     void on_members_resync() noexcept override;
+    // The service cut the user off (ADR-0132): out of every call here they are in, rung or
+    // ringing, as a removal puts them out, though their lists are as they were.
+    void on_user_disconnected(const core::UserId& user) noexcept override;
     // Someone listed, or a role changed (ADR-0096), puts nobody out of a call: a new member asks
     // for a ticket like any other, and who may expel is the call's caller, not the group's admin.
     void on_member_added(const core::RoomId& /*room*/,

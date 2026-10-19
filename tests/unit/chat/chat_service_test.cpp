@@ -224,6 +224,7 @@ public:
     }
     [[nodiscard]] std::size_t unsent_bytes() const noexcept override { return unsent; }
     void allocation_failed() noexcept override { ++failures; }
+    void disconnect() noexcept override { ++disconnects; }
 
     // What arrived since the last call.
     std::vector<std::string> take() { return std::exchange(got, {}); }
@@ -234,6 +235,7 @@ public:
     std::size_t growth = 0;
     bool closing = false;
     int failures = 0;
+    int disconnects = 0;
 };
 
 struct Seen {
@@ -474,6 +476,26 @@ TEST_F(ChatServiceTest, AUserRemovedFromTheMemberListLeavesTheRoomAndHearsNothin
     EXPECT_EQ(seen(bob.take().at(0)).reason, "not_joined");
     history(b);
     EXPECT_EQ(seen(bob.take().at(0)).reason, "not_joined");
+}
+
+// ADR-0132: every client of a user cut off is closed, joined or not; the others stay as they are.
+TEST_F(ChatServiceTest, AUserCutOffHasEveryClientClosedAndNobodyElse) {
+    FakeClient alice;
+    FakeClient bob;
+    FakeClient bob_phone;
+    const auto a = attach(alice);
+    const auto b = attach(bob, "bob");
+    static_cast<void>(attach(bob_phone, "bob"));
+    join(a);
+    join(b);
+    messages_.watcher->on_user_disconnected(*core::UserId::parse("bob"));
+    EXPECT_EQ(bob.disconnects, 1);
+    EXPECT_EQ(bob_phone.disconnects, 1);
+    EXPECT_EQ(alice.disconnects, 0);
+    EXPECT_EQ(service_->counters().disconnects, 2U);
+    // Nobody's list changed: nobody is told of a removal.
+    EXPECT_EQ(service_->counters().removals, 0U);
+    EXPECT_EQ(service_->counters().member_events, 0U);
 }
 
 // The member list may have been read before the removal committed: a join still waiting for it
@@ -2162,13 +2184,19 @@ TEST_F(ChatServiceTest, RemovalsAndResyncsAreToldToWhoeverElseListens) {
         void on_member_role(const core::RoomId& /*room*/, const core::UserId& /*user*/,
                             core::ports::MemberRole /*role*/) noexcept override {}
         void on_members_resync() noexcept override { ++resyncs; }
+        void on_user_disconnected(const core::UserId& /*user*/) noexcept override {
+            ++disconnected;
+        }
         std::vector<std::pair<core::RoomId, core::UserId>> removed;
         int added = 0;
         int resyncs = 0;
+        int disconnected = 0;
     } listener;
     service_->also_tell(&listener);
     messages_.watcher->on_member_removed(room_id(), *core::UserId::parse("bob"));
     messages_.watcher->on_members_resync();
+    messages_.watcher->on_user_disconnected(*core::UserId::parse("bob"));
+    EXPECT_EQ(listener.disconnected, 1);
     ASSERT_EQ(listener.removed.size(), 1U);
     EXPECT_EQ(listener.removed[0].second.view(), "bob");
     EXPECT_EQ(listener.resyncs, 1);

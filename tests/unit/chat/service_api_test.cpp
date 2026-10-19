@@ -56,6 +56,9 @@ public:
                                       who.view()));
     }
     void on_members_resync() noexcept override {}
+    void on_user_disconnected(const core::UserId& who) noexcept override {
+        changes.push_back(std::format("! {}", who.view()));
+    }
 
     std::vector<std::string> take() { return std::exchange(changes, {}); }
 
@@ -518,6 +521,27 @@ TEST_F(ServiceApiTest, TheServiceSetsAMembersRole) {
 }
 
 // ADR-0124: who is connected, and on which devices, from the hook's registry.
+// ADR-0132: the user's sockets and calls are cut off on every node, through the store's notice,
+// and nobody's list changes; asking again does the same again.
+TEST_F(ServiceApiTest, DisconnectUserTellsEveryNodeAndChangesNoList) {
+    for (int i = 0; i < 2; ++i) {
+        const Answer a = ask("disconnect_user", R"({"user":"alice"})");
+        EXPECT_EQ(a.status, 200) << a.body;
+        EXPECT_EQ(a.body, R"({"type":"disconnected","user":"alice"})");
+        ASSERT_TRUE(pump_until(*reactor_, [&] { return !heard_.changes.empty(); }));
+        EXPECT_EQ(heard_.take(), std::vector<std::string>{"! alice"});
+    }
+    for (const std::string_view body : {R"({})", R"({"user":"alice","x":1})", R"({"user":7})"}) {
+        const Answer bad = ask("disconnect_user", body);
+        EXPECT_EQ(bad.status, 400) << body;
+        EXPECT_EQ(bad.field("reason"), "malformed") << body;
+    }
+    const Answer bad_user = ask("disconnect_user", R"({"user":"has space"})");
+    EXPECT_EQ(bad_user.status, 400);
+    EXPECT_EQ(bad_user.field("reason"), "bad_user");
+    EXPECT_TRUE(heard_.take().empty());
+}
+
 TEST_F(ServiceApiTest, PresenceSaysWhoIsConnectedAndOnWhichDevices) {
     const Answer off = ask("presence", R"({"users":["alice"]})");
     EXPECT_EQ(off.status, 409);
@@ -745,14 +769,15 @@ TEST_F(ServiceApiTest, AStoreThatCannotBeReachedIs503) {
         {"add_members", R"({"room":"04ff0817-879c-8a63-b5a8-9ebacad5d927","users":["b"]})"},
         {"remove_member", R"({"room":"04ff0817-879c-8a63-b5a8-9ebacad5d927","user":"b"})"},
         {"rooms", R"({"user":"alice"})"},
-        {"members", R"({"room":"04ff0817-879c-8a63-b5a8-9ebacad5d927"})"}};
+        {"members", R"({"room":"04ff0817-879c-8a63-b5a8-9ebacad5d927"})"},
+        {"disconnect_user", R"({"user":"alice"})"}};
     for (const auto& [op, body] : requests) {
         const Answer a = ask(op, body);
         EXPECT_EQ(a.status, 503) << op;
         EXPECT_EQ(a.field("reason"), "unavailable") << op;
         EXPECT_EQ(a.header("Retry-After"), "1") << op;
     }
-    EXPECT_EQ(api_->counters().unavailable, 6U);
+    EXPECT_EQ(api_->counters().unavailable, 7U);
 }
 
 TEST_F(ServiceApiTest, ConnectionsPastTheCapAndAfterAStopAreClosedAtAccept) {

@@ -561,6 +561,10 @@ std::string ChatServer::render_metrics() const {
                        "call_ring_replays_failed_total {}\n",
                        ring.moved, calls_.ring_writes_failed(), bell.replayed,
                        bell.replay_failures) +
+           // Users the service cut off (ADR-0132).
+           std::format("user_disconnects_total{{of=\"socket\"}} {}\n"
+                       "user_disconnects_total{{of=\"call\"}} {}\n",
+                       chat.disconnects, call.disconnects) +
            // Member lists changed by their users (ADR-0096).
            std::format("directs_opened_total {}\n"
                        "groups_created_total {}\n"

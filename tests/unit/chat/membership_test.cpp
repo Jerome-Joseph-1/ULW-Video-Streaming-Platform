@@ -60,6 +60,7 @@ public:
     }
     [[nodiscard]] std::size_t unsent_bytes() const noexcept override { return 0; }
     void allocation_failed() noexcept override { ++failures; }
+    void disconnect() noexcept override {}
 
     std::vector<std::string> take() { return std::exchange(got, {}); }
 

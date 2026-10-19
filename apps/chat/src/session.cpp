@@ -784,6 +784,17 @@ void Session::allocation_failed() noexcept {
     abandon();
 }
 
+// The service cut the user off (ADR-0132): the socket closes as its token's expiry closes it,
+// from the timer rather than from inside the caller's walk of the clients.
+void Session::disconnect() noexcept {
+    if (phase_ != Phase::Open || disconnected_) {
+        return;
+    }
+    disconnected_ = true;
+    expires_ = now();
+    arm(core::Millis{0});
+}
+
 // Output now waits for the client: from here it has stall_timeout to acknowledge some of it.
 // Looking costs a system call, so it is done on the timer, not for every frame.
 void Session::watch_output() noexcept {
@@ -866,7 +877,9 @@ bool Session::closed_for_expiry(core::MonoTime at) noexcept {
     if (!expires_ || at < *expires_) {
         return false;
     }
-    ++server_.counters().token_expiries;
+    if (!disconnected_) {
+        ++server_.counters().token_expiries;
+    }
     try {
         close_with(kTokenExpired);
     } catch (const std::bad_alloc&) {

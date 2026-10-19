@@ -1383,6 +1383,27 @@ TEST_F(GroupCallHandlerTest, ARemovalElsewhereOrOfSomeoneNotInTheCallMovesNothin
     EXPECT_EQ(sfu_.closes, 0);
 }
 
+// ADR-0132: a user cut off is out of the call as a removed member is; someone not in it, or a
+// call this node does not own, moves nothing.
+TEST_F(GroupCallHandlerTest, AUserCutOffIsPutOutOfTheirCallAsARemovalWould) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    handler_->on_user_disconnected(*core::UserId::parse("erin"));
+    EXPECT_EQ(handler_->counters().disconnects, 0U);
+    plane_.sent.clear();
+    handler_->on_user_disconnected(*core::UserId::parse("bob"));
+    EXPECT_EQ(handler_->counters().disconnects, 1U);
+    EXPECT_EQ(sfu_.closed, std::vector<std::uint64_t>{1});
+    EXPECT_EQ(handler_->counters().moves_removal, 1U);
+    for (const chat::CallNotice& n : plane_.sent) {
+        EXPECT_FALSE(n.by);
+        EXPECT_EQ(n.subject, core::UserId::parse("bob").value());
+    }
+    plane_.owner.reset();
+    handler_->on_user_disconnected(*core::UserId::parse("alice"));
+    EXPECT_EQ(handler_->counters().disconnects, 1U);
+}
+
 TEST_F(GroupCallHandlerTest, AResyncChecksEveryoneInACallAgain) {
     const chat::CallId call = ticket("alice");
     ASSERT_EQ(ticket("bob"), call);

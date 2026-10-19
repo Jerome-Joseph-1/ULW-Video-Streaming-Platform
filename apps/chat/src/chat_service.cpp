@@ -1361,6 +1361,20 @@ void ChatService::on_member_removed(const core::RoomId& room, const core::UserId
     tell_members(room, user, "removed");
 }
 
+void ChatService::on_user_disconnected(const core::UserId& user) noexcept {
+    for (core::ports::IMemberListener* also : also_) {
+        if (also != nullptr) {
+            also->on_user_disconnected(user);
+        }
+    }
+    for (auto& [value, c] : clients_) {
+        if (c.user == user) {
+            ++counters_.disconnects;
+            c.client->disconnect();
+        }
+    }
+}
+
 void ChatService::unconfirmed(const core::RoomId& room, const core::UserId& user) noexcept {
     for (auto& [value, c] : clients_) {
         // A join waiting for its list is answered by that read, which came after the resync.

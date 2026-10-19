@@ -41,6 +41,9 @@ public:
     // Something this client asked for could not be allocated; it pays with its connection
     // (ADR-0036), later, as push() does.
     virtual void allocation_failed() noexcept = 0;
+    // The service cut the user off (ADR-0132): the connection closes `4001`, later, as push()
+    // does.
+    virtual void disconnect() noexcept = 0;
 };
 
 // Told of each message a client here sent, once its room's owner sequenced it (ADR-0111).
@@ -171,6 +174,8 @@ struct ServiceCounters {
     // Joins of a room with no kind recorded that recorded nothing, the user having used up
     // ServiceLimits::record_burst.
     std::uint64_t unrecorded_joins = 0;
+    // Clients closed because the service cut their user off (ADR-0132).
+    std::uint64_t disconnects = 0;
     // Member lists their users changed (ADR-0096): direct chats that listed their pair, group
     // chats created, users listed by add_members, taken off by remove_member, and leaves.
     std::uint64_t directs_opened = 0;
@@ -287,6 +292,8 @@ public:
     // store that is still down loses no removal. A join still waiting for its member list is
     // checked again once it is let in, since the list it was let in by may predate the removal.
     void on_members_resync() noexcept override;
+    // Every client of the user here is closed `4001` (ADR-0132), after those told it too.
+    void on_user_disconnected(const core::UserId& user) noexcept override;
     // Who else hears the changes the store tells this service of, and its resyncs: the call
     // handler, which puts a removed member out of the call (ADR-0095), and presence, which checks
     // again who may still see whom (ADR-0096). Each call adds one, at most kMaxAlsoTold; nullptr

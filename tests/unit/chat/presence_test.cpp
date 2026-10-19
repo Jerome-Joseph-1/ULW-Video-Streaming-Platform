@@ -259,6 +259,7 @@ public:
     }
     [[nodiscard]] std::size_t unsent_bytes() const noexcept override { return 0; }
     void allocation_failed() noexcept override {}
+    void disconnect() noexcept override {}
 
     std::vector<Event> take() { return std::exchange(got, {}); }
 

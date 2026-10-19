@@ -287,6 +287,10 @@ public:
     // Changes may have gone unannounced (the store lost its way to hear them): whatever relies
     // on them must check the member lists it cares about again.
     virtual void on_members_resync() noexcept = 0;
+    // Every socket and call of `user` is to be cut off now, on every node (ADR-0132): told once
+    // per disconnect_user, and not again by a resync, so a node that was not listening misses
+    // it. Their member lists are as they were.
+    virtual void on_user_disconnected(const UserId& /*user*/) noexcept {}
 };
 
 // Where a room's sequenced messages are read back, and its members kept. Bodies are opaque
@@ -354,6 +358,9 @@ public:
     // Where changes to any room's member list are told from now on; nullptr stops them. One
     // listener at a time.
     virtual void watch_members(IMemberListener* listener) noexcept = 0;
+    // Tells every node's listener on_user_disconnected(user), through the same channel as member
+    // changes; succeeds once the notice is out. Changes no list, and repeating it is harmless.
+    virtual void disconnect_user(const UserId& user, MessageCallback<void> done) = 0;
 
     // Member lists as their users change them (ADR-0096). Each decides from the list as it is when
     // it runs, under the room's lock, so two changes of one room never both pass a check that
