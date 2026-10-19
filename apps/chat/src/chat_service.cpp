@@ -606,13 +606,11 @@ void ChatService::statused(ClientId id, const core::RoomId& room, bool asked,
                 error == rt::RouteError::Unavailable || error == rt::RouteError::Fenced;
             write_call_error(out, retry ? "unavailable" : reason(error), room,
                              retry ? std::optional(kCallRetry) : std::nullopt);
-        } else if (!answer) {
-            write_call_error(out, "unavailable", room, kCallRetry);
-        } else if (answer->outcome == CallOutcome::Current && answer->snapshot) {
+        } else if (answer && answer->outcome == CallOutcome::Current && answer->snapshot) {
             write_call_status(out, room, answer->snapshot);
-        } else if (answer->outcome == CallOutcome::NoCall) {
+        } else if (answer && answer->outcome == CallOutcome::NoCall) {
             write_call_status(out, room, std::nullopt);
-        } else if (answer->outcome == CallOutcome::Disabled) {
+        } else if (answer && answer->outcome == CallOutcome::Disabled) {
             write_call_error(out, "calls_disabled", room, std::nullopt);
         } else {
             write_call_error(out, "unavailable", room, kCallRetry);
