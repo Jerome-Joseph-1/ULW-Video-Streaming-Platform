@@ -42,6 +42,11 @@ public:
                     core::ports::MessageCallback<core::ports::MembershipChange> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
     }
+    void set_role(const core::RoomId& /*room*/, const core::UserId& /*user*/,
+                  core::ports::MemberRole /*role*/,
+                  core::ports::MessageCallback<core::ports::MembershipChange> done) override {
+        done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
     void rooms_of(const core::UserId& /*user*/, std::optional<core::RoomId> /*after*/,
                   std::size_t /*limit*/,
                   core::ports::MessageCallback<std::vector<core::ports::RoomEntry>> done) override {

@@ -807,6 +807,64 @@ private:
     bool group_ = false;
 };
 
+class SetRole final : public LockedChange {
+public:
+    SetRole(const core::RoomId& room, const core::UserId& user, core::ports::MemberRole role,
+            MessageCallback<MembershipChange> done) noexcept
+        : LockedChange(room, std::nullopt, std::nullopt, std::move(done)), user_(user),
+          role_(role) {}
+
+private:
+    [[nodiscard]] Step work(std::optional<core::ports::RoomKind> kind) noexcept override {
+        if (!kind) {
+            return refused(MembershipOutcome::NotMember);
+        }
+        group_ = *kind == core::ports::RoomKind::GroupChat;
+        return Statement{.sql = message_sql::kSetRole,
+                         .params = Params{}
+                                       .add_uuid(room().uuid())
+                                       .add_text(user_.view())
+                                       .add_text(role_ == core::ports::MemberRole::Admin
+                                                     ? std::string_view("admin")
+                                                     : std::string_view("member"))
+                                       .add_bool(group_)};
+    }
+    [[nodiscard]] std::optional<MembershipChange> decode(const Result& r) noexcept override {
+        try {
+            const auto was = r.get(0, 0);
+            const auto changed = r.get(0, 1).and_then(parse_bool);
+            if (!changed) {
+                return std::nullopt;
+            }
+            if (!was) {
+                return refused(MembershipOutcome::NotMember);
+            }
+            if (!group_) {
+                return refused(MembershipOutcome::NotGroup);
+            }
+            const auto before = role_of(*was);
+            if (!before) {
+                return std::nullopt;
+            }
+            if (*changed) {
+                return MembershipChange{.outcome = MembershipOutcome::Done,
+                                        .changed = {user_},
+                                        .promoted = std::nullopt};
+            }
+            if (*before == role_) {
+                return refused(MembershipOutcome::Done);
+            }
+            return refused(MembershipOutcome::LastAdmin);
+        } catch (const std::bad_alloc&) {
+            return std::nullopt;
+        }
+    }
+
+    core::UserId user_;
+    core::ports::MemberRole role_;
+    bool group_ = false;
+};
+
 [[nodiscard]] MessageResult<std::vector<core::ports::RoomEntry>> decode_rooms(const Result& r) {
     std::vector<core::ports::RoomEntry> rooms;
     rooms.reserve(static_cast<std::size_t>(r.rows()));
@@ -1220,6 +1278,12 @@ void PgMessageStore::close_direct(const core::RoomId& room,
 void PgMessageStore::leave_room(const core::RoomId& room, const core::UserId& user,
                                 MessageCallback<MembershipChange> done) {
     impl_->pool().submit(std::make_unique<Leave>(room, user, std::move(done)));
+}
+
+void PgMessageStore::set_role(const core::RoomId& room, const core::UserId& user,
+                              core::ports::MemberRole role,
+                              MessageCallback<MembershipChange> done) {
+    impl_->pool().submit(std::make_unique<SetRole>(room, user, role, std::move(done)));
 }
 
 void PgMessageStore::rooms_of(const core::UserId& user, std::optional<core::RoomId> after,

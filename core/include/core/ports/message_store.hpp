@@ -200,6 +200,8 @@ enum class MembershipOutcome : std::uint8_t {
     // create_group of a room that lists nobody any more but holds messages: its members all
     // left, and listing new ones would hand them the history. The request needs a new id.
     Gone,
+    // set_role demoting the group's only admin: a group has an admin while it has members.
+    LastAdmin,
 };
 
 struct MembershipChange {
@@ -389,6 +391,13 @@ public:
     // not change.
     virtual void leave_room(const RoomId& room, const UserId& user,
                             MessageCallback<MembershipChange> done) = 0;
+    // `user`'s role in the group chat, set for the operator's backend (ADR-0123). Done with
+    // `user` in `changed` when it changed, with nobody when it already was so; NotMember when the
+    // room is not recorded or does not list them, NotGroup for any other kind, and LastAdmin,
+    // changing nothing, for a demotion of the group's only admin. Every node hears the change as
+    // on_member_role.
+    virtual void set_role(const RoomId& room, const UserId& user, MemberRole role,
+                          MessageCallback<MembershipChange> done) = 0;
     // The rooms `user` is listed in, in byte order of their ids from after `after`, at most
     // min(limit, kMaxListPage + 1).
     virtual void rooms_of(const UserId& user, std::optional<RoomId> after, std::size_t limit,

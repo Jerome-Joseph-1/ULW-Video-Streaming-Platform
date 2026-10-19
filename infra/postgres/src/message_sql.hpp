@@ -247,6 +247,18 @@ gone AS (
     RETURNING user_id)
 SELECT (SELECT role FROM actor), (SELECT user_id FROM gone))sql";
 
+// $2's role becomes $3 ('admin' or 'member'), if $4 (the room is a group chat), unless that
+// demotes the group's only admin. Answers $2's role before, and whether it changed.
+inline constexpr Sql kSetRole = R"sql(
+WITH listed AS (SELECT role FROM chat_members WHERE room_id = $1 AND user_id = $2),
+changed AS (
+    UPDATE chat_members SET role = $3
+     WHERE room_id = $1 AND user_id = $2 AND $4 AND role <> $3
+       AND ($3 = 'admin' OR EXISTS (SELECT 1 FROM chat_members
+                                     WHERE room_id = $1 AND user_id <> $2 AND role = 'admin'))
+    RETURNING user_id)
+SELECT (SELECT role FROM listed), EXISTS (SELECT 1 FROM changed))sql";
+
 // $2 leaves, if $3 (the room is a group chat). When $2 was the last admin, the member left whose
 // id sorts first becomes one: a group always has an admin while it has members. Answers whether
 // $2 was listed, and who was promoted.

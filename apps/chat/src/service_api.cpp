@@ -57,6 +57,7 @@ enum class Op : std::uint8_t {
     EndCall,
     LeaveCall,
     CallStatus,
+    SetRole,
 };
 
 Op op_of(std::string_view target) noexcept {
@@ -64,7 +65,7 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 12> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 13> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
@@ -77,6 +78,7 @@ Op op_of(std::string_view target) noexcept {
         {"end_call", Op::EndCall},
         {"leave_call", Op::LeaveCall},
         {"call_status", Op::CallStatus},
+        {"set_role", Op::SetRole},
     }};
     const auto* found = std::ranges::find(kOps, name, &std::pair<std::string_view, Op>::first);
     return found == kOps.end() ? Op::None : found->second;
@@ -561,6 +563,9 @@ private:
         case Op::CallStatus:
             started = call_status(*json);
             break;
+        case Op::SetRole:
+            started = set_role(*json);
+            break;
         case Op::None:
             started = std::unexpected(Refusal{.status = Status::NotFound, .reason = "not_found"});
             break;
@@ -608,6 +613,8 @@ private:
             return {.status = Status::Conflict, .reason = "room_limit"};
         case MembershipOutcome::Gone:
             return {.status = Status::Conflict, .reason = "gone"};
+        case MembershipOutcome::LastAdmin:
+            return {.status = Status::Conflict, .reason = "last_admin"};
         case MembershipOutcome::WrongKind:
         case MembershipOutcome::Done:
             break;
@@ -768,6 +775,47 @@ private:
                         core::json::append_string(out, change.promoted->view());
                     }
                     out += '}';
+                });
+            }));
+        return {};
+    }
+
+    // A group member made its admin, or a plain member again (ADR-0123). Everyone in the room
+    // hears `member` `promoted` or `demoted`, as for a leave that promotes.
+    Parsed<void> set_role(const core::json::Value& body) {
+        if (!only(body, {"room", "user", "role"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto room = room_of(body, "room");
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        if (core::ports::named_kind(*room) != core::ports::RoomKind::GroupChat) {
+            return std::unexpected(kBadRoom);
+        }
+        auto user = user_of(body, "user");
+        if (!user) {
+            return std::unexpected(user.error());
+        }
+        const core::json::Value* role_field = body.find("role");
+        const auto role_text = role_field != nullptr ? role_field->as_string() : std::nullopt;
+        if (role_text != "admin" && role_text != "member") {
+            return std::unexpected(kMalformed);
+        }
+        const auto role =
+            role_text == "admin" ? core::ports::MemberRole::Admin : core::ports::MemberRole::Member;
+        api_.store_.set_role(
+            *room, *user, role,
+            reply<MembershipChange>([room = *room, user = *user, role](
+                                        Connection& c, ServiceApi& api, MembershipChange change) {
+                c.change_answer(api, change, [&](std::string& out) {
+                    out += R"({"type":"role","room":")";
+                    out += room.to_string();
+                    out += R"(","user":)";
+                    core::json::append_string(out, user.view());
+                    out += role == core::ports::MemberRole::Admin ? R"(,"role":"admin")"
+                                                                  : R"(,"role":"member")";
+                    out += change.changed.empty() ? R"(,"changed":false})" : R"(,"changed":true})";
                 });
             }));
         return {};

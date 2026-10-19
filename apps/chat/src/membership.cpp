@@ -105,9 +105,11 @@ void ChatService::changed(ClientId id, const ErrorContext& context,
         ++counters_.membership_gone;
         refuse(*c->client, "gone", context);
         return;
+    case MembershipOutcome::LastAdmin:
     case MembershipOutcome::WrongKind:
-        // A named room is recorded only as the kind its id names (migration 0015), so the store
-        // has answered what nothing here can have written.
+        // A named room is recorded only as the kind its id names (migration 0015), and only the
+        // service API sets roles (ADR-0123), so the store has answered what nothing here can
+        // have asked for.
         ++counters_.membership_unavailable;
         refuse(*c->client, "unavailable", context);
         return;

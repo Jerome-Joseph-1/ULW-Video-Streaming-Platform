@@ -435,6 +435,37 @@ void MemoryMessageStore::leave_room(const core::RoomId& room, const core::UserId
     answer_change(std::move(change), false, room, std::move(done));
 }
 
+void MemoryMessageStore::set_role(const core::RoomId& room, const core::UserId& user,
+                                  MemberRole role, MessageCallback<MembershipChange> done) {
+    const auto recorded = kinds_.find(room);
+    const auto listed = members_.find(room);
+    MembershipChange change = refusal(MembershipOutcome::Done);
+    if (recorded == kinds_.end() || listed == members_.end() || !listed->second.contains(user)) {
+        change = refusal(MembershipOutcome::NotMember);
+    } else if (recorded->second != core::ports::RoomKind::GroupChat) {
+        change = refusal(MembershipOutcome::NotGroup);
+    } else if (Members& members = listed->second; members.at(user) != role) {
+        const bool other_admin = std::ranges::any_of(members, [&](const auto& m) {
+            return m.first != user && m.second == MemberRole::Admin;
+        });
+        if (role == MemberRole::Member && !other_admin) {
+            change = refusal(MembershipOutcome::LastAdmin);
+        } else {
+            members.at(user) = role;
+            change.changed.push_back(user);
+        }
+    }
+    const bool changed = !change.changed.empty();
+    // Heard as the durable store's role notification is, after the answer.
+    defer([this, change = std::move(change), changed, room, user, role,
+           done = std::move(done)]() mutable noexcept {
+        done(std::move(change));
+        if (changed && listener_ != nullptr) {
+            listener_->on_member_role(room, user, role);
+        }
+    });
+}
+
 void MemoryMessageStore::rooms_of(const core::UserId& user, std::optional<core::RoomId> after,
                                   std::size_t limit,
                                   MessageCallback<std::vector<core::ports::RoomEntry>> done) {

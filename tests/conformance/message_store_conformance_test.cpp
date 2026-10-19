@@ -20,6 +20,7 @@
 #include <format>
 #include <functional>
 #include <gtest/gtest.h>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -981,6 +982,49 @@ TEST_P(MembershipConformance, WhenTheLastAdminLeavesTheFirstMemberLeftBecomesOne
     ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
     EXPECT_EQ(leave(direct, alice_), refused(MembershipOutcome::NotGroup));
     EXPECT_EQ(leave(named_room("04"), alice_), refused(MembershipOutcome::NotMember));
+}
+
+// ADR-0123: the operator's backend sets a member's role; a group keeps an admin.
+TEST_P(MembershipConformance, ARoleIsSetForTheServiceAndTheLastAdminStays) {
+    Heard heard;
+    ASSERT_NO_FATAL_FAILURE(backend_->watch(heard, heard.resyncs));
+    const auto set = [&](const core::RoomId& room, const core::UserId& user, MemberRole role) {
+        return ask<MembershipChange>(
+            [&](auto done) { store().set_role(room, user, role, std::move(done)); });
+    };
+    const core::RoomId room = group();
+    EXPECT_EQ(set(room, bob_, MemberRole::Admin), done({bob_}));
+    EXPECT_EQ(set(room, bob_, MemberRole::Admin), done({}));
+    EXPECT_EQ(set(room, alice_, MemberRole::Member), done({alice_}));
+    // bob is now the only admin, and stays one.
+    EXPECT_EQ(set(room, bob_, MemberRole::Member), refused(MembershipOutcome::LastAdmin));
+    EXPECT_EQ(set(room, carol_, MemberRole::Member), done({}));
+    EXPECT_EQ(roster(room, bob_),
+              (Roster{.asker_listed = true,
+                      .members = {{.user = alice_, .role = MemberRole::Member},
+                                  {.user = bob_, .role = MemberRole::Admin},
+                                  {.user = carol_, .role = MemberRole::Member}}}));
+    EXPECT_EQ(set(room, dave_, MemberRole::Admin), refused(MembershipOutcome::NotMember));
+    EXPECT_EQ(set(named_room("04"), alice_, MemberRole::Admin),
+              refused(MembershipOutcome::NotMember));
+    const core::RoomId direct = named_room("03");
+    ASSERT_EQ(open_direct(direct, alice_, bob_), done({alice_, bob_}));
+    EXPECT_EQ(set(direct, alice_, MemberRole::Admin), refused(MembershipOutcome::NotGroup));
+    // Every node hears each change, and nothing of a repeat or a refusal.
+    const std::string r = room.to_string();
+    const std::vector<std::string> roles{"* " + r + " admin auth0|bob",
+                                         "* " + r + " member auth0|alice"};
+    const auto heard_roles = [&] {
+        std::vector<std::string> out;
+        std::ranges::copy_if(heard.changes, std::back_inserter(out),
+                             [](const std::string& c) { return c.starts_with("* "); });
+        return out;
+    };
+    EXPECT_TRUE(ulw::test::pump_until(backend_->reactor(),
+                                      [&] { return heard_roles().size() >= roles.size(); }));
+    ulw::test::pump_pending(backend_->reactor());
+    EXPECT_EQ(heard_roles(), roles);
+    store().watch_members(nullptr);
 }
 
 TEST_P(MembershipConformance, AMembersOwnRoomsPageInIdOrderWithTheirKindRoleAndPeer) {
