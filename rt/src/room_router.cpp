@@ -8,6 +8,7 @@
 #include "wire.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <deque>
 #include <format>
@@ -604,6 +605,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
                                            .seq = f->seq,
                                            .sender = f->sender,
                                            .key = f->key,
+                                           .sent_at = f->sent_at,
                                            .body = f->body});
                 return true;
             }
@@ -1256,6 +1258,8 @@ private:
         core::UserId sender;
         MessageKey key;
         std::vector<std::byte> body;
+        // Set as its append starts (pump).
+        core::WallTime sent_at{};
         SendCallback local;
         std::optional<net::Slab<Inbound>::Handle> peer;
         std::uint64_t request = 0;
@@ -1270,6 +1274,8 @@ private:
         bool appending = false;
         // The last seq this node took for the room.
         std::uint64_t head = 0;
+        // The time of the last write whose append started, which the next is never before.
+        core::WallTime sent_at{};
     };
 
     // The latest seq known here: taken as the owner, delivered, or named by the owner.
@@ -1626,10 +1632,18 @@ private:
         if (it == owned_.end() || it->second.appending || it->second.writes.empty()) {
             return;
         }
-        it->second.appending = true;
-        const Write& next = it->second.writes.front();
+        OwnedRoomState& o = it->second;
+        o.appending = true;
+        Write& next = o.writes.front();
+        // To the microsecond, what the store keeps, and never before the room's previous write:
+        // a clock that steps back does not put a later seq at an earlier time (ADR-0112).
+        o.sent_at = std::max<core::WallTime>(
+            o.sent_at, std::chrono::floor<std::chrono::microseconds>(clock_.wall_now()));
+        next.sent_at = o.sent_at;
         const bool started = registry_.append(
-            room, Outgoing{.sender = next.sender, .key = next.key, .body = next.body},
+            room,
+            Outgoing{
+                .sender = next.sender, .key = next.key, .sent_at = next.sent_at, .body = next.body},
             [this, room](std::expected<std::uint64_t, AppendError> seq) noexcept {
                 appended(room, seq);
             });
@@ -1678,12 +1692,13 @@ private:
                              .seq = seq,
                              .sender = write.sender,
                              .key = write.key,
+                             .sent_at = write.sent_at,
                              .body = write.body});
         if (o.subscribers.empty()) {
             return;
         }
         std::vector<std::byte> frame;
-        wire::encode_deliver(frame, room, seq, write.sender, write.key, write.body);
+        wire::encode_deliver(frame, room, seq, write.sender, write.key, write.sent_at, write.body);
         std::erase_if(o.subscribers, [&](const net::Slab<Inbound>::Handle& h) {
             Inbound* in = inbound_.get(h);
             if (in == nullptr) {

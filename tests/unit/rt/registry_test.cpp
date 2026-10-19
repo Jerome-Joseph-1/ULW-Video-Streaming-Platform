@@ -67,8 +67,10 @@ protected:
     ulw::test::FakeClock clock_;
     ulw::test::FakeRandom random_;
     FakeRoomStore store_;
-    const rt::Outgoing message_{
-        .sender = *core::UserId::parse("alice"), .key = *rt::MessageKey::parse("k1"), .body = {}};
+    const rt::Outgoing message_{.sender = *core::UserId::parse("alice"),
+                                .key = *rt::MessageKey::parse("k1"),
+                                .sent_at = {},
+                                .body = {}};
     Observer observer_;
     const core::NodeId self_ = node("chat-a");
     const core::NodeId other_ = node("chat-b");

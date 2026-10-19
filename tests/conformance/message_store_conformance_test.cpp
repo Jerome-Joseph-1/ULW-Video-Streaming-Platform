@@ -61,9 +61,10 @@ public:
         store().watch_members(&listener);
         (void)resyncs;
     }
-    // Stores a message under the room's next seq and answers that seq.
+    // Stores a message under the room's next seq, at `sent_at`, and answers that seq.
     virtual void write(const core::RoomId& room, const core::UserId& sender, std::string key,
-                       std::vector<std::byte> body, MessageCallback<std::uint64_t> done) = 0;
+                       std::vector<std::byte> body, core::WallTime sent_at,
+                       MessageCallback<std::uint64_t> done) = 0;
 
 protected:
     [[nodiscard]] bool make_reactor() {
@@ -90,10 +91,10 @@ public:
     void open(const core::RoomId& /*room*/) override {}
 
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
-               std::vector<std::byte> body, MessageCallback<std::uint64_t> done) override {
+               std::vector<std::byte> body, core::WallTime sent_at,
+               MessageCallback<std::uint64_t> done) override {
         const std::uint64_t seq = next_[room] + 1;
-        store_->append(room, seq, sender, std::move(key), std::move(body),
-                       std::chrono::system_clock::now(),
+        store_->append(room, seq, sender, std::move(key), std::move(body), sent_at,
                        [this, room, seq,
                         done = std::move(done)](MessageResult<std::uint64_t> r) mutable noexcept {
                            // A repeat is answered with the seq it already has, and takes none.
@@ -168,8 +169,9 @@ public:
     }
 
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
-               std::vector<std::byte> body, MessageCallback<std::uint64_t> done) override {
-        rooms_->append(room, generations_.at(room), ulw::test::outgoing(sender, key, body),
+               std::vector<std::byte> body, core::WallTime sent_at,
+               MessageCallback<std::uint64_t> done) override {
+        rooms_->append(room, generations_.at(room), ulw::test::outgoing(sender, key, body, sent_at),
                        [done = std::move(done)](
                            rt::StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
                            if (!r) {
@@ -235,11 +237,16 @@ protected:
 
     // Each call a message of its own, under a key never used before.
     MessageResult<std::uint64_t> write(const core::RoomId& room, const core::UserId& sender,
-                                       std::vector<std::byte> body) {
+                                       std::vector<std::byte> body,
+                                       std::optional<core::WallTime> sent_at = std::nullopt) {
         return ask<std::uint64_t>([&](auto done) {
             backend_->write(room, sender, std::format("m{}", ++keys_), std::move(body),
-                            std::move(done));
+                            sent_at.value_or(now()), std::move(done));
         });
+    }
+    // The time an owner gives a write: the wall clock's, to the microsecond (ADR-0112).
+    [[nodiscard]] static core::WallTime now() {
+        return std::chrono::floor<std::chrono::microseconds>(std::chrono::system_clock::now());
     }
 
     // Messages 1..count, one at a time as an owner writes a room's
@@ -316,7 +323,7 @@ TEST_P(MessageStoreConformance, AMessageComesBackWithEveryByteItWasStoredWith) {
         every[i] = static_cast<std::byte>(i);
     }
     ASSERT_EQ(ask<std::uint64_t>([&](auto done) {
-                  backend_->write(room, alice_, "01J9Z-key_0", every, std::move(done));
+                  backend_->write(room, alice_, "01J9Z-key_0", every, now(), std::move(done));
               }),
               1U);
     ASSERT_EQ(write(room, bob_, {}), 2U);
@@ -331,6 +338,19 @@ TEST_P(MessageStoreConformance, AMessageComesBackWithEveryByteItWasStoredWith) {
     EXPECT_EQ((*page)[1].sender, alice_);
     EXPECT_EQ((*page)[1].key, "01J9Z-key_0");
     EXPECT_EQ((*page)[1].body, every);
+}
+
+TEST_P(MessageStoreConformance, SentAtIsTheTimeTheWriterGaveIt) {
+    const core::RoomId room = new_room();
+    const core::WallTime first{std::chrono::microseconds{1767225700123456}};
+    const core::WallTime second{std::chrono::microseconds{1767225700123457}};
+    ASSERT_TRUE(write(room, alice_, bytes("first"), first));
+    ASSERT_TRUE(write(room, alice_, bytes("second"), second));
+    const auto page = after(room, 0, 10);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 2U);
+    EXPECT_EQ((*page)[0].sent_at, first);
+    EXPECT_EQ((*page)[1].sent_at, second);
 }
 
 TEST_P(MessageStoreConformance, SentAtIsWhenTheMessageWasStoredToTheMicrosecond) {
@@ -549,7 +569,7 @@ TEST_P(MessageStoreConformance, AKeyUsedAgainGetsItsSeqWithTheSameBodyAndIsAConf
     const core::RoomId room = new_room();
     const auto write_as = [&](const core::UserId& sender, std::string key, std::string_view body) {
         return ask<std::uint64_t>([&](auto done) {
-            backend_->write(room, sender, std::move(key), bytes(body), std::move(done));
+            backend_->write(room, sender, std::move(key), bytes(body), now(), std::move(done));
         });
     };
     ASSERT_EQ(write_as(alice_, "k1", "hello"), 1U);

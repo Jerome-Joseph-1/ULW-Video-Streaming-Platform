@@ -9,6 +9,7 @@
 #include "support/fake_random.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <format>
 #include <gtest/gtest.h>
 #include <initializer_list>
@@ -217,11 +218,13 @@ TEST(Envelope, AMessageReturnsItsBodyBytesExactlyAndItsId) {
     const std::string body("line one\n\"two\"\\ \x7f \x00\xfe", 20);
     const auto sender = *core::UserId::parse("auth0|alice");
     std::string out;
-    chat::write_message(out, {.room = room(),
-                              .seq = 9,
-                              .sender = sender,
-                              .key = *rt::MessageKey::parse("k_1-A"),
-                              .body = std::as_bytes(std::span{body})});
+    chat::write_message(out,
+                        {.room = room(),
+                         .seq = 9,
+                         .sender = sender,
+                         .key = *rt::MessageKey::parse("k_1-A"),
+                         .sent_at = core::WallTime{std::chrono::microseconds{1767225700123999}},
+                         .body = std::as_bytes(std::span{body})});
     const auto json = core::json::parse(out);
     ASSERT_TRUE(json) << out;
     EXPECT_EQ(json->find("type")->as_string(), "message");
@@ -229,6 +232,8 @@ TEST(Envelope, AMessageReturnsItsBodyBytesExactlyAndItsId) {
     EXPECT_EQ(json->find("seq")->as_u64(), 9U);
     EXPECT_EQ(json->find("sender")->as_string(), "auth0|alice");
     EXPECT_EQ(json->find("id")->as_string(), "k_1-A");
+    // Unix milliseconds, floored.
+    EXPECT_EQ(json->find("at")->as_u64(), 1767225700123U);
     const auto encoded = json->find("body")->as_string();
     ASSERT_TRUE(encoded);
     EXPECT_EQ(infra::auth::decode_base64url(*encoded), body);
@@ -247,6 +252,8 @@ TEST(Envelope, AMessagesWireSizeBoundsWhatWriteMessageMakes) {
                                   .seq = UINT64_MAX,
                                   .sender = *core::UserId::parse(longest_sender),
                                   .key = *rt::MessageKey::parse(longest_id),
+                                  // The longest time a system_clock holds: 14 characters.
+                                  .sent_at = core::WallTime::min(),
                                   .body = std::as_bytes(std::span{body})});
         // The frame header of a text message under 64 KiB is 4 bytes.
         EXPECT_LE(out.size() + 4, chat::message_wire_size(size)) << size;
@@ -261,6 +268,7 @@ TEST(Envelope, AMessageWrittenIntoAReusedTextIsTheSameAsIntoANewOne) {
                            .seq = 3,
                            .sender = sender,
                            .key = *rt::MessageKey::parse("k"),
+                           .sent_at = {},
                            .body = std::as_bytes(std::span{body})};
     };
     std::string reused;

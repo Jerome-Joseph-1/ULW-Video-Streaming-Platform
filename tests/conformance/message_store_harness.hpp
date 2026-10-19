@@ -6,6 +6,7 @@
 
 #include "support/reactor_harness.hpp"
 
+#include <chrono>
 #include <gtest/gtest.h>
 #include <optional>
 #include <span>
@@ -26,11 +27,15 @@ core::ports::MessageResult<T> ask(net::IReactor& reactor, Call call) {
     return std::move(*answer);
 }
 
-// What the router hands the room store to append. `key` must be a valid message key; the view
-// of `body` must outlive the call it is passed to.
+// What the router hands the room store to append, at `sent_at`: by default now, to the
+// microsecond, as an owner stamps it. `key` must be a valid message key; the view of `body`
+// must outlive the call it is passed to.
 inline rt::Outgoing outgoing(const core::UserId& sender, std::string_view key,
-                             std::span<const std::byte> body) {
-    return rt::Outgoing{.sender = sender, .key = *rt::MessageKey::parse(key), .body = body};
+                             std::span<const std::byte> body,
+                             core::WallTime sent_at = std::chrono::floor<std::chrono::microseconds>(
+                                 std::chrono::system_clock::now())) {
+    return rt::Outgoing{
+        .sender = sender, .key = *rt::MessageKey::parse(key), .sent_at = sent_at, .body = body};
 }
 
 // The same, for the room store.

@@ -2,6 +2,7 @@
 #include "support/fake_random.hpp"
 #include "wire.hpp"
 
+#include <chrono>
 #include <gtest/gtest.h>
 #include <string>
 #include <string_view>
@@ -89,7 +90,8 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     wire::encode_unsubscribe(out, room_);
     wire::encode_send(out, 1ULL << 40U, room_, alice_, key_, body);
     wire::encode_reply(out, 9, wire::Status::Fenced, 12);
-    wire::encode_deliver(out, room_, 13, alice_, key_, body);
+    const core::WallTime sent_at{std::chrono::microseconds{1767225700123456}};
+    wire::encode_deliver(out, room_, 13, alice_, key_, sent_at, body);
 
     auto frames = decode_all(out);
     ASSERT_EQ(frames.size(), 8U);
@@ -123,6 +125,7 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     EXPECT_EQ(deliver.seq, 13U);
     EXPECT_EQ(deliver.sender, alice_);
     EXPECT_EQ(deliver.key, key_);
+    EXPECT_EQ(deliver.sent_at, sent_at);
     EXPECT_EQ(text(deliver.body), text(body));
 }
 
@@ -175,7 +178,7 @@ TEST_F(WireTest, AnEmptyBodyAndTheLargestBodyBothTravel) {
     std::vector<std::byte> out;
     wire::encode_send(out, 1, room_, alice_, key_, {});
     const std::vector<std::byte> largest(wire::kMaxBody, std::byte{0x5A});
-    wire::encode_deliver(out, room_, 2, alice_, key_, largest);
+    wire::encode_deliver(out, room_, 2, alice_, key_, core::WallTime{}, largest);
     const auto frames = decode_all(out);
     ASSERT_EQ(frames.size(), 2U);
     EXPECT_TRUE(std::get<wire::Send>(frames[0]).body.empty());
@@ -185,7 +188,7 @@ TEST_F(WireTest, AnEmptyBodyAndTheLargestBodyBothTravel) {
 TEST_F(WireTest, BytesFedOneAtATimeDecodeToTheSameFrames) {
     std::vector<std::byte> out;
     wire::encode_subscribe(out, 3, room_);
-    wire::encode_deliver(out, room_, 4, alice_, key_, bytes("hi"));
+    wire::encode_deliver(out, room_, 4, alice_, key_, core::WallTime{}, bytes("hi"));
     std::vector<wire::Frame> frames;
     for (const std::byte b : out) {
         const auto got = decode_all(std::span{&b, 1});
@@ -295,6 +298,10 @@ TEST_F(WireTest, ASendOrDeliverWithABodyPastTheLargestIsMalformed) {
                   "a"
                   "\x01"
                   "k";
+        // A Deliver's time, before its body.
+        if (type == 6) {
+            fields += std::string(8, '\0');
+        }
         fields += std::string(body, 'x');
         return raw(type, fields);
     };

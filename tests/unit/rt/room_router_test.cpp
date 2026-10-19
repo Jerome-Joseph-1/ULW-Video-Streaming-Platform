@@ -54,8 +54,11 @@ public:
         got.push_back({.seq = m.seq,
                        .sender = std::string(m.sender.view()),
                        .body = ulw::test::as_text(m.body)});
+        sent_at.push_back(m.sent_at);
     }
     std::vector<Received> got;
+    // Each delivered message's time, in the order of got.
+    std::vector<core::WallTime> sent_at;
 };
 
 class Events final : public rt::IRouterEvents {
@@ -343,6 +346,18 @@ private:
     core::Millis skew_{0};
 };
 
+// The system's clock for deadlines, and a wall clock the test sets.
+class SetWallClock final : public core::ports::IClock {
+public:
+    [[nodiscard]] core::MonoTime now() const noexcept override { return real_.now(); }
+    [[nodiscard]] core::WallTime wall_now() const noexcept override { return wall_; }
+    void set(core::WallTime wall) noexcept { wall_ = wall; }
+
+private:
+    os::SystemClock real_;
+    core::WallTime wall_{};
+};
+
 class RoomRouterTest : public ::testing::TestWithParam<ReactorKind> {
 protected:
     void SetUp() override {
@@ -485,6 +500,34 @@ TEST_P(RoomRouterTest, MembersOnDifferentNodesSeeEachOthersMessagesInOneOrder) {
     EXPECT_EQ(b.router->counters().forwarded, 1U);
     // Each message reached the store in the very write that took its seq.
     EXPECT_EQ(db_.bodies.at(room_), (std::vector<std::string>{"one", "two"}));
+}
+
+// The owner's time, to the microsecond, is the one every member gets and the store keeps, and a
+// wall clock that steps back does not put a later seq at an earlier time (ADR-0112).
+TEST_P(RoomRouterTest, EveryMemberGetsTheTimeTheOwnerSequencedAMessageAtAndTheStoreKeepsIt) {
+    SetWallClock owner_clock;
+    const core::WallTime t1 = core::WallTime{std::chrono::microseconds{1767225700123456}};
+    owner_clock.set(t1 + std::chrono::nanoseconds{789});
+    Node& a = start("chat-a", kSecret, {.clock = &owner_clock});
+    Node& b = start("chat-b");
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    ASSERT_EQ(db_.rooms.at(room_).owner, *core::NodeId::parse("chat-a"));
+
+    ASSERT_EQ(send(b, bob, "bob", "one"), 1U);
+    owner_clock.set(t1 - std::chrono::hours{1});
+    ASSERT_EQ(send(a, alice, "alice", "two"), 2U);
+    const core::WallTime t3 = t1 + std::chrono::seconds{5};
+    owner_clock.set(t3);
+    ASSERT_EQ(send(b, bob, "bob", "three"), 3U);
+
+    const std::vector<core::WallTime> expected{t1, t1, t3};
+    ASSERT_TRUE(pump([&] { return bob.got.size() == 3; }));
+    EXPECT_EQ(alice.sent_at, expected);
+    EXPECT_EQ(bob.sent_at, expected);
+    EXPECT_EQ(db_.sent_at.at(room_), expected);
 }
 
 TEST_P(RoomRouterTest, AJoinIsAnsweredWithTheRoomsHeadWhereverTheOwnerIs) {
@@ -1156,12 +1199,13 @@ TEST_P(RoomRouterTest, AHelloOfAnotherVersionIsRefusedAsSuch) {
     RawPeer peer(*reactor_, a.port);
     std::vector<std::byte> hello;
     wire::encode_hello(hello, *core::NodeId::parse("chat-x"), wire::Nonce{});
-    // After the length (4 bytes) and the type (1), the version: M16's was 1.
-    hello.at(5) = std::byte{1};
+    // After the length (4 bytes) and the type (1), the version: 5 was the last before
+    // messages carried their time (ADR-0112).
+    hello.at(5) = std::byte{5};
     peer.send(hello);
     EXPECT_TRUE(peer.hung_up());
     EXPECT_EQ(a.events.refused,
-              std::vector<std::string>{"version mismatch: peer speaks 1, this node 5"});
+              std::vector<std::string>{"version mismatch: peer speaks 5, this node 6"});
 }
 
 TEST_P(RoomRouterTest, AHelloIsNotEnoughWithoutTheProofThatFollowsIt) {

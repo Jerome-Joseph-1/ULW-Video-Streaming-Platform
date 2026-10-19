@@ -2,6 +2,7 @@
 
 #include "core/models/ids.hpp"
 #include "core/ports/message_store.hpp"
+#include "core/util/time.hpp"
 #include "rt/message_key.hpp"
 
 #include <array>
@@ -21,7 +22,8 @@ namespace rt::wire {
 // 2: Send and Deliver carry the client's message key. 3: a Reply may say Conflict. 4: Ask and
 // Answer carry what a room's owner answers for its members (a call's ticket, ADR-0050). 5: Notify
 // and Notice carry what any node hands a room's members, unsequenced (a call's ring, ADR-0091).
-inline constexpr std::uint8_t kVersion = 5;
+// 6: Deliver carries the time the owner sequenced the message at (ADR-0112).
+inline constexpr std::uint8_t kVersion = 6;
 // The largest message a client may send (codec::ws::Decoder's 64 KiB, ADR-0029), plus room for
 // the other fields, which take at most 239 bytes (a Send: type, request, room, sender, key).
 inline constexpr std::size_t kMaxBody = std::size_t{64} * 1024;
@@ -113,12 +115,13 @@ struct Reply {
     Status status = Status::Ok;
     std::uint64_t seq = 0;
 };
-// As Send, the body is a view.
+// As Send, the body is a view. `sent_at` goes as microseconds since the Unix epoch.
 struct Deliver {
     core::RoomId room;
     std::uint64_t seq = 0;
     core::UserId sender;
     MessageKey key;
+    core::WallTime sent_at;
     std::span<const std::byte> body;
 };
 
@@ -159,8 +162,9 @@ void encode_send(std::vector<std::byte>& out, std::uint64_t request, const core:
                  std::span<const std::byte> body);
 void encode_reply(std::vector<std::byte>& out, std::uint64_t request, Status status,
                   std::uint64_t seq);
+// `sent_at` before the epoch is the caller's bug; it goes as the epoch.
 void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::uint64_t seq,
-                    const core::UserId& sender, const MessageKey& key,
+                    const core::UserId& sender, const MessageKey& key, core::WallTime sent_at,
                     std::span<const std::byte> body);
 // Bodies above kMaxBody are the caller's bug, as for encode_send.
 void encode_ask(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,

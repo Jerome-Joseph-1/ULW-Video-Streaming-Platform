@@ -73,10 +73,12 @@ enum class StoreError : std::uint8_t {
 };
 
 // A message on its way to its sequence number. The body is a view, valid only during the call
-// that carries it.
+// that carries it. `sent_at` is the owner's time for it, to the microsecond: a store that keeps
+// messages keeps it as the message's time (ADR-0112).
 struct Outgoing {
     core::UserId sender;
     MessageKey key;
+    core::WallTime sent_at;
     std::span<const std::byte> body;
 };
 
