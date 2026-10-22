@@ -9,9 +9,9 @@ pass through the gateway (ADR-0002, ADR-0024).
 A video's owner (the user whose token created the upload, or the broadcaster of the stream it
 recorded) decides who else may see and play it ([Who can see a video](#who-can-see-a-video)).
 For anyone who may not, every endpoint below answers `404`, exactly as for a video that does not
-exist. The owner may delete the video ([Deleting a video](#deleting-a-video)), and the operator's
-backend may set its visibility, take it down and list a user's videos
-([Service API](#service-api-visibility-takedown-and-listing)).
+exist. The owner may delete the video ([Deleting a video](#deleting-a-video)) and give it
+captions ([Captions](#captions)), and the operator's backend may set its visibility, take it
+down and list a user's videos ([Service API](#service-api-visibility-takedown-and-listing)).
 
 ## Lifecycle
 
@@ -76,7 +76,7 @@ async function waitUntilPlayable(id, token, onProgress) {
 
 ## Endpoints
 
-<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (on_video, start_playlist, on_playlist, start_own_listing), apps/gateway/src/playback.cpp, apps/gateway/src/video_access.cpp (own_video_query, videos_json) -->
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (on_video, start_playlist, on_playlist, start_own_listing), apps/gateway/src/playback.cpp (build_playlist, build_caption_playlist), core/src/hls.cpp (add_subtitles, subtitle_playlist), apps/gateway/src/video_access.cpp (own_video_query, videos_json) -->
 
 All need a token ([auth.md](auth.md)) and take no body. `{id}` is the `video_id` from the create
 response: a lowercase canonical UUID. Anything else (uppercase included) answers `404`.
@@ -87,6 +87,7 @@ response: a lowercase canonical UUID. Anything else (uppercase included) answers
 | `GET /api/v1/videos/{id}` | `200`, `application/json`, the video object below | `401`, `404`, `503`, `500` |
 | `GET /api/v1/videos/{id}/master.m3u8` | `200`, `application/vnd.apple.mpegurl`, the master playlist | `401`, `404`, `409`, `503`, `500` |
 | `GET /api/v1/videos/{id}/{rendition}/index.m3u8` | `200`, `application/vnd.apple.mpegurl`, a media playlist | `401`, `404`, `409`, `503`, `500` |
+| `GET /api/v1/videos/{id}/captions/{language}/index.m3u8` | `200`, `application/vnd.apple.mpegurl`, the subtitles playlist of the video's captions in `{language}` ([Captions](#captions)) | `401`, `404`, `409`, `503`, `500` |
 
 The video object:
 
@@ -136,7 +137,8 @@ upload in flight, instead of polling each video.
 
 ### Playlists
 
-- The master lists one variant per rendition. Renditions are named `<height>p`: `1080p`,
+- The master lists one variant per rendition, and the video's captions, if it has any, as a
+  subtitles rendition per language ([Captions](#captions)). Renditions are named `<height>p`: `1080p`,
   `720p` and `360p`, each only when the source is at least that tall; a source shorter than 360
   lines gets one rendition at its own height. Each variant URI is rewritten to the gateway path
   `/api/v1/videos/{id}/{rendition}/index.m3u8`, so it is fetched from the gateway with the same
@@ -201,16 +203,142 @@ Playlist errors:
 | Status | Meaning | Client action |
 |---|---|---|
 | `401` | No valid token | Refresh the token, retry once |
-| `404` | A video you may not see, no such video, bad id, or a rendition the master does not list | Stop |
+| `404` | A video you may not see, no such video, bad id, or a rendition or a captions language the master does not list | Stop |
 | `409` | The video is not `ready` (still processing, or `failed`) | Poll `GET /api/v1/videos/{id}`; fetch again once `ready` |
 | `503` | The store is throttling or unreachable; `Retry-After: 5` | Retry after the delay |
 | `500` | The stored playlist is broken or a URL could not be signed | Report with `X-Request-Id`; do not retry in a loop |
 
 All error bodies are empty.
 
+## Captions
+
+<!-- apps/gateway/src/routes.hpp, apps/gateway/src/connection.cpp (start_caption, on_caption_view, on_caption_stored, on_caption_removed, start_playlist), apps/gateway/src/playback.cpp (caption_key, build_caption_playlist), core/src/webvtt.cpp (check), core/src/caption_language.cpp, core/src/hls.cpp (add_subtitles, subtitle_playlist), apps/gateway/src/video_access.cpp (caption_error_json), infra/postgres/src/upload_catalog.cpp (kPutCaption, kRemoveCaption, kListCaptions), migrations/0030_video_captions.sql, docs/adr/0139-a-video-carries-captions-in-webvtt.md -->
+
+A video may carry captions: one WebVTT file per language, which its owner (or the operator's
+backend, [below](#service-api-captions)) uploads. The master playlist lists each language as a
+subtitles rendition, and players show them in their captions menu. Nothing writes captions for
+you: speech to text is not part of the platform, so bring the file from your editor, a
+captioning service or your own transcription step. The file is also the transcript: fetch it
+from the URL in its playlist to show or search the text.
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `PUT /api/v1/videos/{id}/captions/{language}` | `204`: the file is stored and listed, replacing the one before | `400`, `401`, `403`, `404`, `413`, `429`, `503`, `500` |
+| `DELETE /api/v1/videos/{id}/captions/{language}` | `204`: the language is no longer listed and its file is gone. Deleting one not there changes nothing. | `400`, `401`, `403`, `404`, `503`, `500` |
+
+The owner only. `{language}` is a BCP 47 tag of the plain shape: 2 or 3 letters, then subtags
+of 1 to 8 letters or digits after `-` (`en`, `pt-BR`, `zh-Hant`, `es-419`), at most 35
+characters. Case does not matter, and the playlists give it lowercase: `en-US` and `en-us` are
+the same file. The `PUT`'s body is the file itself, at most 512 KiB, sent as
+`Content-Type: text/vtt`; a cookie request needs an allowed `Origin`, as the PATCH does
+([auth.md](auth.md#cookies-and-other-sites)). Captions may be put in any state, before the
+upload is committed too; their playlists answer `409` until the video is `ready`, as its own do.
+
+```
+PUT /api/v1/videos/0199950c-.../captions/en
+Authorization: Bearer <token>
+Content-Type: text/vtt
+Content-Length: 78
+
+WEBVTT
+
+00:00.000 --> 00:02.500
+Hello.
+
+00:02.500 --> 00:04.000
+Welcome back.
+```
+
+A file is taken only when every player will read it as written:
+
+- UTF-8 (a byte order mark is allowed), without NUL.
+- The first line is `WEBVTT`, alone or after a space or a tab with anything after it. Header
+  lines up to the first blank line are allowed, `X-TIMESTAMP-MAP` among them.
+- Blocks are separated by blank lines, and each is a cue, a `NOTE`, or a `STYLE` or `REGION`
+  ahead of the first cue. A cue is an optional identifier line, then its timing,
+  `<start> --> <end>`, then its text. Lines may end in CR LF, LF or CR.
+- Times are `mm:ss.ttt` or `hh:mm:ss.ttt` (two or more digits of hours), minutes and seconds
+  below 60, and a cue ends after it starts. Cue settings after the end time are passed through
+  as they are.
+- Cues come in the order they start (two may start together, and overlap).
+- `-->` appears in timing lines only: not in a cue's text, an identifier, a note or the header.
+
+Cue times are the video's own, from 0. Nothing else in the file is looked into: its markup
+(`<v Alice>`, `<i>`) and settings are the player's.
+
+Refusals carry a JSON body:
+
+| Status | `error` | Meaning |
+|---|---|---|
+| `400` | `bad_captions` | The file breaks a rule above. `reason` says which (`encoding`, `header`, `timing`, `order` or `block`) and `line` where, 1-based: `{"error":"bad_captions","reason":"timing","line":12}` |
+| `400` | `bad_language` | `{language}` is not a tag of the shape above |
+| `403` | `forbidden` | You may see the video but are not its owner |
+| `404` | `not_found` | No such video, a bad id, or a video you may not see: the three are indistinguishable |
+
+An empty body is `400` and one over 512 KiB `413`, both with no body. A `PUT` counts as one of
+your uploads in flight while its body is read: `429` once three are, `503` when the gateway is
+full ([uploads.md](uploads.md)). `401` and `503` (`Retry-After: 5`) come with an empty body, as
+elsewhere; a `503` is safe to retry, as is a `DELETE` that failed.
+
+### In the playlists
+
+Once a language is listed, the master names it ahead of the variants, all in one group that
+every variant names:
+
+```
+#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="en",LANGUAGE="en",DEFAULT=NO,AUTOSELECT=YES,URI="/api/v1/videos/0199950c-.../captions/en/index.m3u8"
+#EXT-X-STREAM-INF:BANDWIDTH=3220800,RESOLUTION=1280x720,CODECS="avc1.4d4028,mp4a.40.2",SUBTITLES="subs"
+/api/v1/videos/0199950c-.../720p/index.m3u8
+```
+
+Languages come in the order of their tags. `NAME` is the tag too: label the track in your own
+UI if the player shows the tag. `DEFAULT=NO` leaves captions off until the viewer, or a player
+following the system's language (`AUTOSELECT=YES`), turns them on.
+
+The subtitles playlist is one segment, the file's presigned URL, as long as the video:
+
+```
+#EXTM3U
+#EXT-X-VERSION:3
+#EXT-X-TARGETDURATION:6
+#EXT-X-MEDIA-SEQUENCE:0
+#EXT-X-PLAYLIST-TYPE:VOD
+#EXTINF:5.250,
+https://<store>/videos/0199950c-.../hls/captions/en.vtt?X-Amz-Signature=...
+#EXT-X-ENDLIST
+```
+
+It is fetched from the gateway with the same credentials as the master and answered as the
+media playlists are ([Playlists](#playlists)): the same access check, the same URL lifetime,
+`Cache-Control: private, max-age=60`, and the same errors. A language the master does not list
+is `404`. A file replaced is served from the next playlist fetch on; one deleted stops being
+listed at once, though a URL handed out before stays valid until it expires. The file comes from
+the store with the store's default content type, not `text/vtt`: hls.js and the native players
+read it either way, and the bucket's CORS rule ([CORS](#cors)) covers it.
+
+With hls.js the captions are text tracks of the `<video>`: `hls.subtitleTracks` lists them and
+`hls.subtitleTrack = i` (or `-1`) turns one on or off. Safari, `AVPlayer` and ExoPlayer show them
+in their own captions menu.
+
+### Service API: captions
+
+The operator's backend may put and delete any video's captions, with the token and the rules of
+its other routes ([Service API](#service-api-grants)): anything else is `403` `forbidden` before
+the video is looked at.
+
+| Endpoint | Success | Errors |
+|---|---|---|
+| `PUT /api/v1/service/videos/{id}/captions/{language}` | `204`, as the owner's `PUT` | `400`, `401`, `403`, `404`, `413`, `429`, `503`, `500` |
+| `DELETE /api/v1/service/videos/{id}/captions/{language}` | `204`, as the owner's `DELETE` | `400`, `401`, `403`, `404`, `503`, `500` |
+
+Bodies, checks and refusals are the owner's. `404` `not_found` is a video that does not exist
+(deleted ones included); nothing is stored for it.
+
 ## Who can see a video
 
-<!-- core/src/video_access.cpp (access_of), core/src/visibility.cpp, infra/postgres/src/upload_catalog.cpp (kFindVideoFor, kSetVisibility, kGrantAccess), apps/gateway/src/connection.cpp (on_video, start_update, start_service_route), apps/gateway/src/video_access.cpp, migrations/0016_video_access.sql, migrations/0024_public_videos.sql, docs/adr/0097-videos-shared-by-visibility-and-service-grants.md, docs/adr/0121-a-public-video-plays-without-a-token.md -->
+<!-- core/src/video_access.cpp (access_of), core/src/visibility.cpp, infra/postgres/src/upload_catalog.cpp (kFindVideoFor, kSetVisibility, kGrantAccess), apps/gateway/src/connection.cpp (on_video, start_update, start_service_route, on_caption_view), apps/gateway/src/video_access.cpp, migrations/0016_video_access.sql, migrations/0024_public_videos.sql, docs/adr/0097-videos-shared-by-visibility-and-service-grants.md, docs/adr/0121-a-public-video-plays-without-a-token.md -->
 
 Every video has a **visibility**, which its owner sets:
 
@@ -228,8 +356,9 @@ Whatever the visibility and the grants say, a video whose upload is still in pro
 `uploading`) is its owner's alone. Once committed (`processing`, `ready`, `failed`) it follows
 the rules above.
 
-The same check runs on every request for the video's metadata and for both playlists: the media
-playlist, and so every presigned segment URL, is only built for someone who may see the video.
+The same check runs on every request for the video's metadata and for every playlist, its
+captions' included: the media playlist, and so every presigned segment URL, is only built for
+someone who may see the video.
 Nothing is cached, on any gateway. A segment URL already handed out stays valid until it expires
 (see [Playlists](#playlists)); revoking access stops new playlists, not URLs already issued.
 
@@ -239,8 +368,8 @@ videos ([Listing a user's videos](#listing-a-users-videos)) and may hand them to
 
 ### Playing without a token
 
-A request for a video's metadata (`GET /api/v1/videos/{id}`) or either playlist that carries no
-token at all (no `Authorization` header, no auth cookie) is served when the video is `public`
+A request for a video's metadata (`GET /api/v1/videos/{id}`) or any of its playlists, its
+captions' included, that carries no token at all (no `Authorization` header, no auth cookie) is served when the video is `public`
 and its upload is committed, exactly as for a signed-in viewer: the video object without its
 visibility, and playlists whose segment URLs are presigned as usual. Embed a player on a page
 anyone can open and point it at the master playlist.

@@ -69,6 +69,13 @@ public:
                        core::ports::CatalogCallback<void> done) override;
     void list_grants(const core::VideoId& id, std::optional<core::UserId> after, std::size_t limit,
                      core::ports::CatalogCallback<core::ports::GrantPage> done) override;
+    void put_caption(const core::VideoId& id, const core::CaptionLanguage& language,
+                     core::ports::CatalogCallback<void> done) override;
+    void remove_caption(const core::VideoId& id, const core::CaptionLanguage& language,
+                        core::ports::CatalogCallback<void> done) override;
+    void
+    list_captions(const core::VideoId& id,
+                  core::ports::CatalogCallback<std::vector<core::CaptionLanguage>> done) override;
     void record_views(std::vector<core::ports::ViewEvent> batch,
                       core::ports::CatalogCallback<void> done) override;
 
@@ -135,6 +142,8 @@ private:
     std::set<std::pair<core::RoomId, std::string>> members_;
     // Each video's grants by user id, which a std::string orders bytewise as the database does.
     std::unordered_map<core::VideoId, std::map<std::string, core::ports::VideoGrant>> grants_;
+    // Each video's caption languages, which a std::set orders bytewise as the database does.
+    std::unordered_map<core::VideoId, std::set<core::CaptionLanguage>> captions_;
     // Each claim held, by the token of its grant.
     std::unordered_map<core::UploadId, core::ports::ClaimToken> claimed_;
     std::uint64_t last_token_ = 0;

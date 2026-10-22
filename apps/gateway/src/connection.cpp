@@ -3,6 +3,7 @@
 #include "core/util/hls.hpp"
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
+#include "core/util/webvtt.hpp"
 #include "http/ascii.hpp"
 #include "http/origin.hpp"
 #include "infra/auth/token_extractor.hpp"
@@ -58,6 +59,8 @@ void count_playlist(Counters& counters, RouteId route) noexcept {
         ++counters.playlists_master;
     } else if (route == RouteId::MediaPlaylist) {
         ++counters.playlists_media;
+    } else if (route == RouteId::CaptionPlaylist) {
+        ++counters.playlists_captions;
     } else {
         ++counters.playlists_live;
     }
@@ -354,6 +357,17 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
             return http::HeadVerdict::reject(*refused);
         }
         break;
+    // A caption file is held whole until it is checked, so its bound is set before a byte of
+    // it is read (ADR-0139).
+    case RouteId::PutCaption:
+    case RouteId::PutServiceCaption:
+        if (head.content_length == 0) {
+            return http::HeadVerdict::reject(Status::BadRequest);
+        }
+        if (head.content_length > core::webvtt::kMaxFileBytes) {
+            return http::HeadVerdict::reject(Status::ContentTooLarge);
+        }
+        break;
     case RouteId::AppendChunk: {
         const auto offset = http::find_header(head.headers, "upload-offset");
         req_.upload_offset = offset ? core::parse_integer<std::uint64_t>(*offset) : std::nullopt;
@@ -382,6 +396,7 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
         break;
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
+    case RouteId::CaptionPlaylist:
     case RouteId::LivePlaylist:
         count_playlist(gw().counters(), match->id);
         [[fallthrough]];
@@ -402,6 +417,8 @@ http::HeadVerdict Connection::on_head(const http::RequestHead& head) noexcept {
     // A deletion names its video in the path and carries nothing else.
     case RouteId::DeleteVideo:
     case RouteId::DeleteServiceVideo:
+    case RouteId::DeleteCaption:
+    case RouteId::DeleteServiceCaption:
     case RouteId::Healthz:
     case RouteId::Readyz:
     case RouteId::Metrics:
@@ -452,7 +469,7 @@ http::HeadVerdict Connection::authenticate_head(const http::RequestHead& head) n
         // under its address's limits.
         // An Authorization header that names no usable token is still refused.
         if ((req_.route == RouteId::GetVideo || req_.route == RouteId::MasterPlaylist ||
-             req_.route == RouteId::MediaPlaylist) &&
+             req_.route == RouteId::MediaPlaylist || req_.route == RouteId::CaptionPlaylist) &&
             !http::find_header(head.headers, "authorization")) {
             req_.authenticated = true;
             return http::HeadVerdict::accept();
@@ -544,7 +561,8 @@ http::BodyVerdict Connection::on_body(std::span<const std::byte> bytes) noexcept
     last_progress_ = last_activity_;
     if (req_.route == RouteId::CreateUpload || req_.route == RouteId::UpdateVideo ||
         req_.route == RouteId::UpdateServiceVideo || req_.route == RouteId::UpdateServiceVideos ||
-        req_.route == RouteId::UpdateStream || req_.route == RouteId::UpdateServiceStream) {
+        req_.route == RouteId::UpdateStream || req_.route == RouteId::UpdateServiceStream ||
+        req_.route == RouteId::PutCaption || req_.route == RouteId::PutServiceCaption) {
         std::ranges::transform(bytes, std::back_inserter(req_.body),
                                [](std::byte b) { return static_cast<char>(b); });
         return http::BodyVerdict::Continue;
@@ -617,6 +635,26 @@ void Connection::advance() noexcept {
             start_patch();
         }
         return;
+    // A caption file is an upload in flight from its head on: it holds one of the user's upload
+    // slots while its body is read and kept, then it is checked and stored (ADR-0139).
+    case RouteId::PutCaption:
+    case RouteId::PutServiceCaption:
+        if (!req_.started) {
+            req_.started = true;
+            const core::ports::Claims* claims = get(req_.claims);
+            if (claims == nullptr) {
+                fail(Status::InternalServerError);
+                return;
+            }
+            if (!take_upload_slot(claims->subject)) {
+                return;
+            }
+        }
+        if (req_.message_complete && !req_.finishing) {
+            req_.finishing = true;
+            start_caption();
+        }
+        return;
     case RouteId::AppendChunk:
         if (!req_.started) {
             req_.started = true;
@@ -632,6 +670,7 @@ void Connection::advance() noexcept {
     case RouteId::GetVideo:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
+    case RouteId::CaptionPlaylist:
     case RouteId::LivePlaylist:
     case RouteId::CreateStream:
     case RouteId::StreamStatus:
@@ -645,6 +684,8 @@ void Connection::advance() noexcept {
     case RouteId::ListVideos:
     case RouteId::ListServiceVideos:
     case RouteId::DeleteServiceVideo:
+    case RouteId::DeleteCaption:
+    case RouteId::DeleteServiceCaption:
         if (req_.message_complete && !req_.started) {
             req_.started = true;
             start_bodiless();
@@ -679,6 +720,9 @@ void Connection::start_bodiless() noexcept {
         start_service_route();
     } else if (req_.route == RouteId::DeleteVideo) {
         start_delete();
+    } else if (req_.route == RouteId::DeleteCaption ||
+               req_.route == RouteId::DeleteServiceCaption) {
+        start_caption();
     } else if (req_.route == RouteId::ListVideos) {
         start_own_listing();
     } else {
@@ -841,17 +885,7 @@ void Connection::start_append() noexcept {
         return;
     }
     req_.upload_id = *id;
-    switch (gw().acquire_upload_slot(claims->subject)) {
-    case Admission::Admitted:
-        slot_user_ = claims->subject;
-        break;
-    case Admission::UserAtLimit:
-        ++gw().counters().admission_rejections;
-        fail(Status::TooManyRequests);
-        return;
-    case Admission::Full:
-        ++gw().counters().admission_rejections;
-        fail(Status::ServiceUnavailable);
+    if (!take_upload_slot(claims->subject)) {
         return;
     }
     // Charged by what the PATCH says it carries, before any of it is read: the bytes a
@@ -870,6 +904,24 @@ void Connection::start_append() noexcept {
                                     --pending_;
                                     on_claimed(request, upload, std::move(result));
                                 });
+}
+
+bool Connection::take_upload_slot(const core::UserId& user) noexcept {
+    switch (gw().acquire_upload_slot(user)) {
+    case Admission::Admitted:
+        slot_user_ = user;
+        return true;
+    case Admission::UserAtLimit:
+        ++gw().counters().admission_rejections;
+        fail(Status::TooManyRequests);
+        return false;
+    case Admission::Full:
+        ++gw().counters().admission_rejections;
+        fail(Status::ServiceUnavailable);
+        return false;
+    }
+    fail(Status::InternalServerError);
+    return false;
 }
 
 void Connection::on_claimed(
@@ -1034,7 +1086,7 @@ void Connection::on_durable() noexcept {
 
 void Connection::start_lookup() noexcept {
     if (req_.route == RouteId::GetVideo || req_.route == RouteId::MasterPlaylist ||
-        req_.route == RouteId::MediaPlaylist) {
+        req_.route == RouteId::MediaPlaylist || req_.route == RouteId::CaptionPlaylist) {
         const auto id = core::VideoId::parse(req_.params[0]);
         if (!id) {
             fail(Status::NotFound);
@@ -1134,6 +1186,11 @@ void Connection::on_found(core::ports::CatalogResult<core::ports::StoredUpload> 
     case RouteId::UpdateServiceStream:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
+    case RouteId::CaptionPlaylist:
+    case RouteId::PutCaption:
+    case RouteId::DeleteCaption:
+    case RouteId::PutServiceCaption:
+    case RouteId::DeleteServiceCaption:
     case RouteId::LivePlaylist:
     case RouteId::CreateStream:
     case RouteId::StreamStatus:
@@ -1192,14 +1249,189 @@ void Connection::start_playlist(const core::VideoRecord& video) noexcept {
     }
     // A ready video always has one (the catalog enforces it); zero would still get the floor.
     const core::Millis duration = video.duration.value_or(core::Millis{0});
+    const PlaylistKind kind = req_.route == RouteId::MasterPlaylist    ? PlaylistKind::Master
+                              : req_.route == RouteId::CaptionPlaylist ? PlaylistKind::Captions
+                                                                       : PlaylistKind::Media;
     ControlJob job;
     job.op = ControlOp::Playlist;
-    job.playlist = PlaylistRequest{
-        .kind = req_.route == RouteId::MasterPlaylist ? PlaylistKind::Master : PlaylistKind::Media,
-        .video = video.id,
-        .rendition = std::string(req_.params[1]),
-        .ttl = core::hls::presign_ttl(duration)};
-    start_job(std::move(job));
+    job.playlist = PlaylistRequest{.kind = kind,
+                                   .video = video.id,
+                                   .rendition = std::string(req_.params[1]),
+                                   .ttl = core::hls::presign_ttl(duration),
+                                   .captions = {},
+                                   .duration = duration};
+    if (kind == PlaylistKind::Media) {
+        start_job(std::move(job));
+        return;
+    }
+    // The master lists the video's captions, and a captions playlist is built for one of them
+    // only (ADR-0139): what the catalog lists at this request, read as the access check is.
+    ++pending_;
+    deps().catalog.list_captions(video.id, [this, request = request_seq_,
+                                            job = std::move(job)](auto result) mutable noexcept {
+        --pending_;
+        if (!serving(request)) {
+            return;
+        }
+        if (!result) {
+            fail_catalog(result.error());
+            return;
+        }
+        if (job.playlist) {
+            job.playlist->captions = std::move(*result);
+        }
+        start_job(std::move(job));
+    });
+}
+
+// A caption change names the video and the language in its path; a PUT's file is checked here,
+// before anything is looked up, and a refusal says what is wrong with it and on which line.
+void Connection::start_caption() noexcept {
+    const core::ports::Claims* claims = get(req_.claims);
+    if (claims == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    const bool service =
+        req_.route == RouteId::PutServiceCaption || req_.route == RouteId::DeleteServiceCaption;
+    // The operator's backend's routes, as its others: refused before the video is looked at.
+    if (service && (!claims->is_service || !req_.bearer)) {
+        fail_with(Status::Forbidden, "forbidden");
+        return;
+    }
+    const auto id = core::VideoId::parse(req_.params[0]);
+    if (!id) {
+        fail_with(Status::NotFound, "not_found");
+        return;
+    }
+    auto language = core::CaptionLanguage::parse(req_.params[1]);
+    if (!language) {
+        fail_with(Status::BadRequest, "bad_language");
+        return;
+    }
+    const bool put = req_.route == RouteId::PutCaption || req_.route == RouteId::PutServiceCaption;
+    if (put) {
+        if (const auto checked = core::webvtt::check(req_.body); !checked) {
+            ++gw().counters().captions_rejected;
+            respond_json(Status::BadRequest, caption_error_json(checked.error()));
+            return;
+        }
+    }
+    req_.caption = CaptionChange{.video = *id, .language = std::move(*language)};
+    // Read first, for the owner's routes as for the service's: nothing is written under a
+    // video that does not exist, nor under one the caller does not own.
+    ++pending_;
+    deps().catalog.find_video_for(*id, claims->subject,
+                                  [this, request = request_seq_](auto result) noexcept {
+                                      --pending_;
+                                      on_caption_view(request, std::move(result));
+                                  });
+}
+
+void Connection::on_caption_view(
+    std::uint64_t request, core::ports::CatalogResult<core::ports::VideoView> result) noexcept {
+    if (!serving(request)) {
+        return;
+    }
+    const core::ports::Claims* claims = get(req_.claims);
+    const CaptionChange* change = get(req_.caption);
+    if (claims == nullptr || change == nullptr) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (!result) {
+        fail_access(result.error(), "forbidden");
+        return;
+    }
+    // The owner alone changes a video's captions, as its visibility: a viewer, who knows the
+    // video exists, gets 403, anyone else the 404 a missing video gets.
+    const bool service =
+        req_.route == RouteId::PutServiceCaption || req_.route == RouteId::DeleteServiceCaption;
+    if (!service) {
+        switch (core::access_of(result->video, claims->subject, result->viewer)) {
+        case core::VideoAccess::None:
+            fail_with(Status::NotFound, "not_found");
+            return;
+        case core::VideoAccess::Viewer:
+            fail_with(Status::Forbidden, "forbidden");
+            return;
+        case core::VideoAccess::Owner:
+            break;
+        }
+    }
+    auto key = core::StorageKey::parse(caption_key(change->video, change->language));
+    if (!key) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    ControlJob job;
+    job.key = std::move(*key);
+    if (req_.route == RouteId::PutCaption || req_.route == RouteId::PutServiceCaption) {
+        // The file first, then the row: a language the master lists always has its file.
+        job.op = ControlOp::PutCaption;
+        job.caption = std::move(req_.body);
+        start_job(std::move(job));
+        return;
+    }
+    // The row first, so that no playlist names the file once it starts to go.
+    job.op = ControlOp::RemoveCaption;
+    ++pending_;
+    deps().catalog.remove_caption(
+        change->video, change->language,
+        [this, request, job = std::move(job)](core::ports::CatalogResult<void> r) mutable noexcept {
+            --pending_;
+            if (!serving(request)) {
+                return;
+            }
+            if (!r) {
+                fail_access(r.error(), "forbidden");
+                return;
+            }
+            start_job(std::move(job));
+        });
+}
+
+void Connection::on_caption_stored(ControlJob job) noexcept {
+    const CaptionChange* change = get(req_.caption);
+    if (change == nullptr || !job.done) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    if (!*job.done) {
+        fail_storage(job.done->error());
+        return;
+    }
+    ++pending_;
+    deps().catalog.put_caption(
+        change->video, change->language,
+        [this, request = job.request](core::ports::CatalogResult<void> r) noexcept {
+            --pending_;
+            if (!serving(request)) {
+                return;
+            }
+            if (!r) {
+                // NotFound: the video was deleted since it was read. Its file goes with the
+                // rest of its objects at the reaper's purge.
+                fail_access(r.error(), "forbidden");
+                return;
+            }
+            ++gw().counters().captions_stored;
+            respond({.status = Status::NoContent}, {});
+        });
+}
+
+void Connection::on_caption_removed(ControlJob job) noexcept {
+    if (!job.done) {
+        fail(Status::InternalServerError);
+        return;
+    }
+    // A file gone already is the deletion done: a repeat, or one that stopped halfway.
+    if (!*job.done && job.done->error() != StorageError::NotFound) {
+        fail_storage(job.done->error());
+        return;
+    }
+    ++gw().counters().captions_removed;
+    respond({.status = Status::NoContent}, {});
 }
 
 void Connection::on_playlist(ControlJob job) noexcept {
@@ -2030,6 +2262,13 @@ void Connection::run() noexcept {
             job.body = build_playlist(deps().reader, *job.playlist, gw().limits().local_read_url);
         }
         return;
+    case ControlOp::PutCaption:
+        job.done =
+            job.key ? deps().objects.put(*job.key, std::as_bytes(std::span(job.caption))) : missing;
+        return;
+    case ControlOp::RemoveCaption:
+        job.done = job.key ? deps().objects.remove(*job.key) : missing;
+        return;
     case ControlOp::None:
         return;
     }
@@ -2078,6 +2317,12 @@ void Connection::complete() noexcept {
         return;
     case ControlOp::Playlist:
         on_playlist(std::move(job));
+        return;
+    case ControlOp::PutCaption:
+        on_caption_stored(std::move(job));
+        return;
+    case ControlOp::RemoveCaption:
+        on_caption_removed(std::move(job));
         return;
     case ControlOp::None:
         return;

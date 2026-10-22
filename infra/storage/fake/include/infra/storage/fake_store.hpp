@@ -31,6 +31,8 @@ struct FaultPlan {
     bool accept_zero = false;
     // Every fetch_small fails with this.
     std::optional<core::ports::StorageError> fail_fetch = std::nullopt;
+    // Every put and remove fails with this.
+    std::optional<core::ports::StorageError> fail_admin = std::nullopt;
 };
 
 // In-memory ingest store with S3-family semantics: bytes become durable a whole chunk at a

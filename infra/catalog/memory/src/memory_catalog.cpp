@@ -366,6 +366,52 @@ void MemoryCatalog::list_grants(const core::VideoId& id, std::optional<core::Use
     });
 }
 
+void MemoryCatalog::put_caption(const core::VideoId& id, const core::CaptionLanguage& language,
+                                CatalogCallback<void> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<void> result{};
+    if (live_video(id) == nullptr) {
+        result = std::unexpected(CatalogError::NotFound);
+    } else {
+        captions_[id].insert(language);
+    }
+    defer([done = std::move(done), result]() mutable noexcept { done(result); });
+}
+
+void MemoryCatalog::remove_caption(const core::VideoId& id, const core::CaptionLanguage& language,
+                                   CatalogCallback<void> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<void> result{};
+    if (live_video(id) == nullptr) {
+        result = std::unexpected(CatalogError::NotFound);
+    } else if (const auto it = captions_.find(id); it != captions_.end()) {
+        it->second.erase(language);
+    }
+    defer([done = std::move(done), result]() mutable noexcept { done(result); });
+}
+
+void MemoryCatalog::list_captions(const core::VideoId& id,
+                                  CatalogCallback<std::vector<core::CaptionLanguage>> done) {
+    if (refused(done)) {
+        return;
+    }
+    core::ports::CatalogResult<std::vector<core::CaptionLanguage>> result =
+        std::unexpected(CatalogError::NotFound);
+    if (live_video(id) != nullptr) {
+        result.emplace();
+        if (const auto it = captions_.find(id); it != captions_.end()) {
+            result->assign(it->second.begin(), it->second.end());
+        }
+    }
+    defer([done = std::move(done), result = std::move(result)]() mutable noexcept {
+        done(std::move(result));
+    });
+}
+
 void MemoryCatalog::delete_video(const core::VideoId& id, const std::optional<core::UserId>& owner,
                                  CatalogCallback<void> done) {
     if (refused(done)) {

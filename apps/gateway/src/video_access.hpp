@@ -5,6 +5,7 @@
 #include "core/models/video_access.hpp"
 #include "core/models/visibility.hpp"
 #include "core/ports/catalog.hpp"
+#include "core/util/webvtt.hpp"
 
 #include <cstddef>
 #include <optional>
@@ -99,5 +100,9 @@ struct BulkVisibility {
 
 // {"error":"<code>"}: the bodies of the access API's refusals.
 [[nodiscard]] std::string error_json(std::string_view code);
+
+// {"error":"bad_captions","reason":"<encoding|header|timing|order|block>","line":<n>}: a caption
+// file refused (ADR-0139), what is wrong with it and the line it was found on, 1-based.
+[[nodiscard]] std::string caption_error_json(const core::webvtt::Error& error);
 
 } // namespace gateway

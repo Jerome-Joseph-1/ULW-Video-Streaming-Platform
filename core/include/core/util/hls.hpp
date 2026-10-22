@@ -8,6 +8,7 @@
 #include <expected>
 #include <functional>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -60,6 +61,27 @@ rewrite_master(std::string_view master, std::string_view route_prefix);
 // ends in '/'.
 [[nodiscard]] std::expected<std::string, PlaylistError>
 rewrite_media(std::string_view media, std::string_view directory, const Signer& sign);
+
+// One subtitles rendition of a master playlist (ADR-0139): its language, which LANGUAGE and
+// NAME both carry, and the URI its media playlist is fetched from.
+struct SubtitleTrack {
+    std::string_view language;
+    std::string uri;
+};
+
+// The GROUP-ID of the subtitles renditions add_subtitles lists.
+inline constexpr std::string_view kSubtitleGroup = "subs";
+
+// Lists `tracks` in a master playlist rewrite_master answered: one EXT-X-MEDIA TYPE=SUBTITLES
+// each, in their order, ahead of the first variant, in one group that every EXT-X-STREAM-INF
+// then names. Malformed for a master whose variants name a subtitles group already, and for a
+// track whose language or URI holds a quote or a control character.
+[[nodiscard]] std::expected<std::string, PlaylistError>
+add_subtitles(std::string_view master, std::span<const SubtitleTrack> tracks);
+
+// A VOD media playlist of one WebVTT segment, `url`, that spans the whole video, `duration`
+// long: a file of captions is one segment, its cues timed from the video's start.
+[[nodiscard]] std::string subtitle_playlist(std::string_view url, Millis duration);
 
 // How long a segment URL stays valid: twice the video's length, so pauses and seeks fit in,
 // and never under an hour, so a short video is not cut off mid-view. The store caps it at the

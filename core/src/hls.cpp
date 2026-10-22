@@ -327,6 +327,77 @@ rewrite_media(std::string_view media, std::string_view directory, const Signer& 
     });
 }
 
+std::expected<std::string, PlaylistError> add_subtitles(std::string_view master,
+                                                        std::span<const SubtitleTrack> tracks) {
+    constexpr std::string_view kVariant = "#EXT-X-STREAM-INF:";
+    const auto quotable = [](std::string_view value) {
+        return std::ranges::none_of(value, [](char c) {
+            return c == '"' || static_cast<unsigned char>(c) < 0x20 || c == 0x7f;
+        });
+    };
+    std::string media;
+    for (const SubtitleTrack& track : tracks) {
+        if (!quotable(track.language) || !quotable(track.uri)) {
+            return std::unexpected(PlaylistError::Malformed);
+        }
+        media.append(R"(#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=")")
+            .append(kSubtitleGroup)
+            .append(R"(",NAME=")")
+            .append(track.language)
+            .append(R"(",LANGUAGE=")")
+            .append(track.language)
+            .append(R"(",DEFAULT=NO,AUTOSELECT=YES,URI=")")
+            .append(track.uri)
+            .append("\"\n");
+    }
+    if (media.empty()) {
+        return std::string(master);
+    }
+    std::string out;
+    out.reserve(master.size() + media.size() + 64);
+    bool listed = false;
+    auto r =
+        for_each_line(master, [&](std::string_view line) -> std::expected<void, PlaylistError> {
+            if (!line.starts_with(kVariant)) {
+                out.append(line).append(1, '\n');
+                return {};
+            }
+            // A group of the stored master's own would leave a variant naming two.
+            const std::string_view attributes = line.substr(kVariant.size());
+            if (attributes.starts_with("SUBTITLES=") ||
+                attributes.find(",SUBTITLES=") != std::string_view::npos) {
+                return std::unexpected(PlaylistError::Malformed);
+            }
+            if (!listed) {
+                out.append(media);
+                listed = true;
+            }
+            out.append(line).append(R"(,SUBTITLES=")").append(kSubtitleGroup).append("\"\n");
+            return {};
+        });
+    if (!r) {
+        return std::unexpected(r.error());
+    }
+    if (!listed) {
+        out.append(media);
+    }
+    return out;
+}
+
+std::string subtitle_playlist(std::string_view url, Millis duration) {
+    const auto ms = static_cast<std::uint64_t>(std::max<Millis::rep>(duration.count(), 0));
+    // The segment's duration rounded to the nearest second must not exceed the target
+    // (RFC 8216 4.3.3.1); rounded up, and never 0, it cannot.
+    const std::uint64_t target = std::max<std::uint64_t>((ms + 999) / 1000, 1);
+    std::string out = "#EXTM3U\n#EXT-X-VERSION:3\n";
+    out += "#EXT-X-TARGETDURATION:" + std::to_string(target) + "\n";
+    out += "#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n";
+    const std::string fraction = std::to_string(1000 + (ms % 1000)).substr(1);
+    out += "#EXTINF:" + std::to_string(ms / 1000) + "." + fraction + ",\n";
+    out.append(url).append("\n#EXT-X-ENDLIST\n");
+    return out;
+}
+
 Seconds presign_ttl(Millis duration) noexcept {
     const auto twice = std::chrono::ceil<Seconds>(duration * 2);
     return std::max<Seconds>(twice, std::chrono::hours(1));

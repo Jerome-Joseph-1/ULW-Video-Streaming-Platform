@@ -93,6 +93,18 @@ public:
                      std::size_t /*limit*/, CatalogCallback<core::ports::GrantPage> done) override {
         done(std::unexpected(CatalogError::Unavailable));
     }
+    void put_caption(const core::VideoId& /*id*/, const core::CaptionLanguage& /*language*/,
+                     CatalogCallback<void> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void remove_caption(const core::VideoId& /*id*/, const core::CaptionLanguage& /*language*/,
+                        CatalogCallback<void> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
+    void list_captions(const core::VideoId& /*id*/,
+                       CatalogCallback<std::vector<core::CaptionLanguage>> done) override {
+        done(std::unexpected(CatalogError::Unavailable));
+    }
 
     std::vector<core::UploadId> released;
     std::vector<ClaimToken> tokens;

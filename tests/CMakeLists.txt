@@ -38,7 +38,8 @@ ulw_add_test_suite(core_unit_tests unit
     unit/core/upload_test.cpp
     unit/core/uuid_test.cpp
     unit/core/video_access_test.cpp
-    unit/core/video_test.cpp)
+    unit/core/video_test.cpp
+    unit/core/webvtt_test.cpp)
 target_link_libraries(core_unit_tests PRIVATE ulw::core_domain)
 target_include_directories(core_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests)
 target_compile_definitions(core_unit_tests PRIVATE ULW_EXPECTED_VERSION="${PROJECT_VERSION}")
@@ -287,6 +288,7 @@ target_include_directories(s3util_unit_tests PRIVATE ${PROJECT_SOURCE_DIR}/tests
 ulw_add_test_suite(gateway_tests unit
     gateway/config_test.cpp
     gateway/gateway_access_test.cpp
+    gateway/gateway_captions_test.cpp
     gateway/gateway_claim_test.cpp
     gateway/gateway_harness.cpp
     gateway/gateway_limits_test.cpp

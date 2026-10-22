@@ -139,6 +139,26 @@ std::optional<LiveShape> live_shape(std::string_view text) {
     return shape;
 }
 
+// Only a language the catalog lists is ever turned into a key, as only a rendition the master
+// lists is: a request cannot make the gateway sign a file nobody put.
+std::expected<std::string, PlaylistFailure>
+build_caption_playlist(core::ports::IObjectReader& reader, const PlaylistRequest& request,
+                       std::string_view local_read_url) {
+    const auto language = core::CaptionLanguage::parse(request.rendition);
+    if (!language || std::ranges::find(request.captions, *language) == request.captions.end()) {
+        return std::unexpected(PlaylistFailure::NoSuchRendition);
+    }
+    const auto key = core::StorageKey::parse(caption_key(request.video, *language));
+    if (!key) {
+        return std::unexpected(PlaylistFailure::Broken);
+    }
+    const auto url = signer(reader, request.ttl, local_read_url)(*key);
+    if (!url) {
+        return std::unexpected(PlaylistFailure::Unsigned);
+    }
+    return core::hls::subtitle_playlist(*url, request.duration);
+}
+
 } // namespace
 
 bool valid_stream_id(std::string_view id) noexcept {
@@ -183,21 +203,38 @@ std::expected<LivePlaylist, PlaylistFailure> build_live_playlist(core::ports::IO
     return LivePlaylist{.body = std::move(*out), .fresh_for = fresh_for, .ended = shape->ended};
 }
 
+std::string caption_key(const core::VideoId& video, const core::CaptionLanguage& language) {
+    return hls_prefix(video) + "captions/" + language.str() + ".vtt";
+}
+
 std::expected<std::string, PlaylistFailure> build_playlist(core::ports::IObjectReader& reader,
                                                            const PlaylistRequest& request,
                                                            std::string_view local_read_url) {
+    if (request.kind == PlaylistKind::Captions) {
+        return build_caption_playlist(reader, request, local_read_url);
+    }
     const std::string prefix = hls_prefix(request.video);
     auto master = fetch(reader, prefix + "master.m3u8");
     if (!master) {
         return master;
     }
     if (request.kind == PlaylistKind::Master) {
-        auto out =
-            core::hls::rewrite_master(*master, "/api/v1/videos/" + request.video.to_string() + "/");
+        const std::string routes = "/api/v1/videos/" + request.video.to_string() + "/";
+        auto out = core::hls::rewrite_master(*master, routes);
         if (!out) {
             return std::unexpected(from_rewrite(out.error()));
         }
-        return std::move(*out);
+        std::vector<core::hls::SubtitleTrack> tracks;
+        tracks.reserve(request.captions.size());
+        for (const core::CaptionLanguage& language : request.captions) {
+            tracks.push_back({.language = language.view(),
+                              .uri = routes + "captions/" + language.str() + "/index.m3u8"});
+        }
+        auto listed = core::hls::add_subtitles(*out, tracks);
+        if (!listed) {
+            return std::unexpected(from_rewrite(listed.error()));
+        }
+        return std::move(*listed);
     }
 
     // Only a name the master lists is ever turned into a key, so a request cannot make the

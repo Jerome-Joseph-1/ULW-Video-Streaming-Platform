@@ -45,6 +45,8 @@ struct Deps {
     core::ports::IIngestStore& store;
     // Thread-safe: playlists are fetched and signed on the offload pool.
     core::ports::IObjectReader& reader;
+    // The same store's blocking writes, on the offload pool: a video's captions (ADR-0139).
+    core::ports::IObjectAdmin& objects;
     core::ports::IUploadCatalog& catalog;
     core::ports::IViewLog& views;
     core::ports::IJwtVerifier& verifier;
@@ -166,9 +168,15 @@ struct Counters {
     std::uint64_t playlists_master = 0;
     std::uint64_t playlists_media = 0;
     std::uint64_t playlists_live = 0;
+    std::uint64_t playlists_captions = 0;
     // A stored playlist broke a rewriting rule: the worker wrote something wrong.
     std::uint64_t playlists_rejected = 0;
     std::uint64_t presign_failures = 0;
+    // Caption files (ADR-0139): stored (new or replacing one), deleted, and refused as not the
+    // WebVTT players read alike.
+    std::uint64_t captions_stored = 0;
+    std::uint64_t captions_removed = 0;
+    std::uint64_t captions_rejected = 0;
     // By status class: 1xx, 2xx, 3xx, 4xx, 5xx.
     std::array<std::uint64_t, 5> responses{};
 };

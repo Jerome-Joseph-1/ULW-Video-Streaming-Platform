@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/models/caption_language.hpp"
 #include "core/models/ids.hpp"
 #include "core/ports/auth.hpp"
 #include "core/ports/catalog.hpp"
@@ -96,7 +97,17 @@ public:
 
 private:
     enum class Phase : std::uint8_t { Idle, Request, Lingering, Closed };
-    enum class ControlOp : std::uint8_t { None, Create, Offset, Commit, Discard, Playlist };
+    enum class ControlOp : std::uint8_t {
+        None,
+        Create,
+        Offset,
+        Commit,
+        Discard,
+        Playlist,
+        // A video's captions (ADR-0139): the file written, or removed.
+        PutCaption,
+        RemoveCaption,
+    };
 
     // Everything a create needs between parsing its body and the catalog insert.
     struct PendingCreate {
@@ -108,6 +119,12 @@ private:
         core::StorageKey key;
         // The request's Idempotency-Key and what it asked for (ADR-0108).
         std::optional<core::ports::UploadRequestKey> request;
+    };
+
+    // PUT or DELETE .../captions/{language} (ADR-0139): the video and the language, from the path.
+    struct CaptionChange {
+        core::VideoId video;
+        core::CaptionLanguage language;
     };
 
     // Fields ordered largest first so the struct packs without holes.
@@ -133,6 +150,7 @@ private:
         // PATCH /api/v1/service/videos: what is asked, the next video to change, and the
         // answer's two lists so far, each still open.
         std::optional<BulkVisibility> bulk;
+        std::optional<CaptionChange> caption;
         std::size_t bulk_next = 0;
         std::string bulk_changed;
         std::string bulk_failed;
@@ -184,6 +202,8 @@ private:
         std::optional<std::expected<void, core::ports::StorageError>> done;
         std::optional<PlaylistRequest> playlist;
         std::optional<std::expected<std::string, PlaylistFailure>> body;
+        // PutCaption: the file, moved out of the request once it has been checked.
+        std::string caption;
     };
 
     [[nodiscard]] Gateway& gw() const noexcept { return gateway_; }
@@ -245,6 +265,16 @@ private:
     void on_deleted(std::uint64_t request, const core::VideoId& video,
                     core::ports::CatalogResult<void> result) noexcept;
     void start_playlist(const core::VideoRecord& video) noexcept;
+    // PUT and DELETE .../captions/{language} (ADR-0139), the owner's and the operator's
+    // backend's: the path and the file checked, then a read of the video, then the store and
+    // the catalog, in the order that keeps every language listed backed by its file.
+    void start_caption() noexcept;
+    void on_caption_view(std::uint64_t request,
+                         core::ports::CatalogResult<core::ports::VideoView> result) noexcept;
+    void on_caption_stored(ControlJob job) noexcept;
+    void on_caption_removed(ControlJob job) noexcept;
+    // Takes one of the user's upload slots for the request, or answers 429 or 503 and false.
+    [[nodiscard]] bool take_upload_slot(const core::UserId& user) noexcept;
     void on_playlist(ControlJob job) noexcept;
     void fail_playlist(PlaylistFailure failure) noexcept;
     void start_live() noexcept;

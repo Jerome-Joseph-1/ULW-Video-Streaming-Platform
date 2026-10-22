@@ -92,6 +92,13 @@ public:
                        core::ports::CatalogCallback<void> done) override;
     void list_grants(const core::VideoId& id, std::optional<core::UserId> after, std::size_t limit,
                      core::ports::CatalogCallback<core::ports::GrantPage> done) override;
+    void put_caption(const core::VideoId& id, const core::CaptionLanguage& language,
+                     core::ports::CatalogCallback<void> done) override;
+    void remove_caption(const core::VideoId& id, const core::CaptionLanguage& language,
+                        core::ports::CatalogCallback<void> done) override;
+    void
+    list_captions(const core::VideoId& id,
+                  core::ports::CatalogCallback<std::vector<core::CaptionLanguage>> done) override;
     void record_views(std::vector<core::ports::ViewEvent> batch,
                       core::ports::CatalogCallback<void> done) override;
 

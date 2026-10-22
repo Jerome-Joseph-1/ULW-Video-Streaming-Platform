@@ -367,12 +367,18 @@ std::size_t FakeStore::held_fetches() const {
 std::expected<void, StorageError> FakeStore::put(const core::StorageKey& key,
                                                  std::span<const std::byte> bytes) {
     const std::scoped_lock lock(mutex_);
+    if (plan_.fail_admin) {
+        return std::unexpected(*plan_.fail_admin);
+    }
     objects_[key.str()].assign(bytes.begin(), bytes.end());
     return {};
 }
 
 std::expected<void, StorageError> FakeStore::remove(const core::StorageKey& key) {
     const std::scoped_lock lock(mutex_);
+    if (plan_.fail_admin) {
+        return std::unexpected(*plan_.fail_admin);
+    }
     objects_.erase(key.str());
     return {};
 }
