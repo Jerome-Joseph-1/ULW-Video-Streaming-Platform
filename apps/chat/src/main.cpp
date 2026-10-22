@@ -438,6 +438,7 @@ int run() {
         chat::NotifyLimits notify_limits;
         notify_limits.message_present = notify->message_present;
         notify_limits.sequenced = notify->sequenced;
+        notify_limits.preview_chars = notify->preview_chars;
         s.notifier = std::make_unique<chat::Notifier>(*s.reactor, *s.notify_store, *s.hook, s.clock,
                                                       s.random, std::bit_cast<std::uint64_t>(tag),
                                                       notify_limits);

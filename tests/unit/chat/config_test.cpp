@@ -517,4 +517,32 @@ TEST_F(ChatConfigTest, AnEventForEveryMessageIsOffUnlessAskedForWithTheHook) {
     EXPECT_FALSE(config->notify->sequenced);
 }
 
+// ADR-0134: a message's preview is off unless asked for, at most 200 characters, and only with
+// the hook.
+TEST_F(ChatConfigTest, AMessagePreviewIsOffUnlessAskedForAndCapped) {
+    env["ULW_NOTIFY_MESSAGE_PREVIEW_CHARS"] = "80";
+    EXPECT_EQ(refused_variable(), "ULW_NOTIFY_MESSAGE_PREVIEW_CHARS");
+    env["ULW_NOTIFY_URL"] = "http://push.example.svc:8080/ulw/events";
+    env["ULW_NOTIFY_SECRET"] = "a-hook-secret-of-at-least-32-bytes!!";
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->notify->preview_chars, 80U);
+    env["ULW_NOTIFY_MESSAGE_PREVIEW_CHARS"] = "200";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->notify->preview_chars, 200U);
+    for (const char* bad : {"201", "-1", "x"}) {
+        env["ULW_NOTIFY_MESSAGE_PREVIEW_CHARS"] = bad;
+        EXPECT_EQ(refused_variable(), "ULW_NOTIFY_MESSAGE_PREVIEW_CHARS") << bad;
+    }
+    env["ULW_NOTIFY_MESSAGE_PREVIEW_CHARS"] = "0";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->notify->preview_chars, 0U);
+    env.erase("ULW_NOTIFY_MESSAGE_PREVIEW_CHARS");
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_EQ(config->notify->preview_chars, 0U);
+}
+
 } // namespace

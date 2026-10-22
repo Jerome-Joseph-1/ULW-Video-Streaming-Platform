@@ -49,6 +49,9 @@ struct NotifyLimits {
     // ULW_NOTIFY_SEQUENCED (ADR-0133): every message this node sequences as its room's owner is
     // also a `message_sequenced`, whoever is owed word of it.
     bool sequenced = false;
+    // ULW_NOTIFY_MESSAGE_PREVIEW_CHARS (ADR-0134): `message` carries the first this many
+    // characters of the message's body, when it is text; 0, the default, none.
+    std::size_t preview_chars = 0;
 };
 
 struct NotifyCounters {
@@ -95,8 +98,11 @@ public:
     void closed(const core::UserId& user, const std::optional<core::DeviceId>& device) noexcept;
 
     // A message `sender` sent here was sequenced `seq` in the room.
-    void message(const core::RoomId& room, const core::UserId& sender,
-                 std::uint64_t seq) noexcept override;
+    void message(const core::RoomId& room, const core::UserId& sender, std::uint64_t seq,
+                 std::string_view preview) noexcept override;
+    [[nodiscard]] std::size_t preview_chars() const noexcept override {
+        return limits_.preview_chars;
+    }
     // A message this node sequenced as its room's owner: `message_sequenced`, when
     // NotifyLimits::sequenced, for a direct or group chat.
     void sequenced(const rt::Message& message) noexcept override;
@@ -151,7 +157,8 @@ private:
                  const std::optional<std::vector<core::ports::SocketDevice>>& devices);
     [[nodiscard]] std::string message_text(const core::RoomId& room, const core::UserId& sender,
                                            std::uint64_t seq,
-                                           const core::ports::MessageAudience& audience);
+                                           const core::ports::MessageAudience& audience,
+                                           std::string_view preview);
     void offer(std::string event) noexcept;
     void head(std::string& out, std::string_view type);
 

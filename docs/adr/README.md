@@ -137,3 +137,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0131](0131-a-direct-call-takes-two-devices-of-each-member.md) | A direct call takes two devices of each member | Accepted |
 | [0132](0132-the-service-cuts-a-user-off.md) | The service cuts a user off | Accepted |
 | [0133](0133-the-backend-reads-and-hears-every-message.md) | The backend reads and hears every message | Accepted |
+| [0134](0134-a-message-event-may-carry-a-preview.md) | A message event may carry a preview | Accepted |

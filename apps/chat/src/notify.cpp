@@ -56,6 +56,14 @@ void append_users(std::string& out, const std::vector<core::UserId>& users) {
     out += ']';
 }
 
+// The start of the message's body, when the hook gives one (ADR-0134).
+void append_preview(std::string& out, std::string_view preview) {
+    if (!preview.empty()) {
+        out += R"(,"preview":)";
+        core::json::append_string(out, preview);
+    }
+}
+
 std::int64_t unix_seconds(core::WallTime t) noexcept {
     return std::chrono::duration_cast<core::Seconds>(t.time_since_epoch()).count();
 }
@@ -359,8 +367,8 @@ void Notifier::offer(std::string event) noexcept {
     sink_.offer(std::move(event));
 }
 
-void Notifier::message(const core::RoomId& room, const core::UserId& sender,
-                       std::uint64_t seq) noexcept {
+void Notifier::message(const core::RoomId& room, const core::UserId& sender, std::uint64_t seq,
+                       std::string_view preview) noexcept {
     // A stream's live chat has no member list to tell, and thousands of senders.
     if (stopped_ || core::ports::is_stream_chat(room)) {
         return;
@@ -369,12 +377,22 @@ void Notifier::message(const core::RoomId& room, const core::UserId& sender,
         ++counters_.message_failures;
         return;
     }
+    // Kept while the lookup runs, and only while previews are on (ADR-0134).
+    std::string text;
+    try {
+        if (limits_.preview_chars > 0) {
+            text = std::string(preview);
+        }
+    } catch (const std::bad_alloc&) {
+        // The event goes without it.
+        ++counters_.allocation_failures;
+    }
     ++message_lookups_;
     if (limits_.message_present) {
         store_.message_audience(
             room, sender,
-            [weak = std::weak_ptr(self_), room, sender,
-             seq](NotifyResult<core::ports::MessageAudience> result) mutable noexcept {
+            [weak = std::weak_ptr(self_), room, sender, seq, text = std::move(text)](
+                NotifyResult<core::ports::MessageAudience> result) mutable noexcept {
                 const auto self = weak.lock();
                 if (!self) {
                     return;
@@ -389,7 +407,7 @@ void Notifier::message(const core::RoomId& room, const core::UserId& sender,
                     return;
                 }
                 try {
-                    n.offer(n.message_text(room, sender, seq, *result));
+                    n.offer(n.message_text(room, sender, seq, *result, text));
                 } catch (...) {
                     ++n.counters_.allocation_failures;
                 }
@@ -397,8 +415,8 @@ void Notifier::message(const core::RoomId& room, const core::UserId& sender,
         return;
     }
     store_.message_targets(room, sender,
-                           [weak = std::weak_ptr(self_), room, sender,
-                            seq](NotifyResult<std::vector<core::UserId>> result) mutable noexcept {
+                           [weak = std::weak_ptr(self_), room, sender, seq, text = std::move(text)](
+                               NotifyResult<std::vector<core::UserId>> result) mutable noexcept {
                                const auto self = weak.lock();
                                if (!self) {
                                    return;
@@ -422,6 +440,7 @@ void Notifier::message(const core::RoomId& room, const core::UserId& sender,
                                    std::format_to(std::back_inserter(out), R"(,"seq":{},"users":)",
                                                   seq);
                                    append_users(out, *result);
+                                   append_preview(out, text);
                                    out += '}';
                                    n.offer(std::move(out));
                                } catch (...) {
@@ -468,8 +487,8 @@ void Notifier::sequenced(const rt::Message& message) noexcept {
 // the devices those sockets named, so that the receiver pushes to their other devices
 // (ADR-0126).
 std::string Notifier::message_text(const core::RoomId& room, const core::UserId& sender,
-                                   std::uint64_t seq,
-                                   const core::ports::MessageAudience& audience) {
+                                   std::uint64_t seq, const core::ports::MessageAudience& audience,
+                                   std::string_view preview) {
     std::string out;
     head(out, "message");
     out += R"(,"room":")";
@@ -502,7 +521,9 @@ std::string Notifier::message_text(const core::RoomId& room, const core::UserId&
     if (!audience.present.empty()) {
         out += "]}";
     }
-    out += "]}";
+    out += ']';
+    append_preview(out, preview);
+    out += '}';
     return out;
 }
 

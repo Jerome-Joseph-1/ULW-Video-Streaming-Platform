@@ -46,12 +46,23 @@ public:
     virtual void disconnect() noexcept = 0;
 };
 
+// The first `chars` characters (code points) of `body`, never cut inside one; empty when `chars`
+// is 0 or the body is not text: an MLS message (ADR-0016) or any other binary, which is not
+// UTF-8 or holds a control character other than a tab or a line break before its `chars`-th
+// character. What a body past them holds is not looked at.
+[[nodiscard]] std::string message_preview(std::span<const std::byte> body, std::size_t chars);
+
 // Told of each message a client here sent, once its room's owner sequenced it (ADR-0111).
 class IMessageWatcher {
 public:
     virtual ~IMessageWatcher() = default;
-    virtual void message(const core::RoomId& room, const core::UserId& sender,
-                         std::uint64_t seq) noexcept = 0;
+    // `preview`: the start of the body, as message_preview makes it with preview_chars() (empty:
+    // none).
+    virtual void message(const core::RoomId& room, const core::UserId& sender, std::uint64_t seq,
+                         std::string_view preview) noexcept = 0;
+    // How many characters of each body message() is to be given; 0, the default, gives none and
+    // keeps no body's start past its send (ADR-0134).
+    [[nodiscard]] virtual std::size_t preview_chars() const noexcept { return 0; }
 };
 
 // Told of each message this node sequenced as its room's owner, whoever sent it and from whichever
@@ -363,7 +374,8 @@ private:
                 std::expected<std::uint64_t, rt::RouteError> result) noexcept;
     void delivered(Room& room, const rt::Message& message) noexcept;
     void sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key, std::size_t bytes,
-              bool quiet, std::expected<std::uint64_t, rt::RouteError> result) noexcept;
+              bool quiet, std::string_view preview,
+              std::expected<std::uint64_t, rt::RouteError> result) noexcept;
     void
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;

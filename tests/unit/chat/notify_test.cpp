@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -309,7 +310,7 @@ TEST_F(NotifierTest, WithPresentOnAMessageAlsoNamesThePresentAndTheirDevices) {
     notifier_->opened(user("carol"), std::nullopt);
     notifier_->opened(user("dave"), std::nullopt);
     wait_past(chat::NotifyLimits{}.flush_after);
-    notifier_->message(room_id(), user("alice"), 7);
+    notifier_->message(room_id(), user("alice"), 7, "");
     pump();
     ASSERT_EQ(sink_.events.size(), 1U);
     const std::string raw = sink_.events[0];
@@ -320,7 +321,7 @@ TEST_F(NotifierTest, WithPresentOnAMessageAlsoNamesThePresentAndTheirDevices) {
               std::string::npos)
         << raw;
     // Once per interval, present or not.
-    notifier_->message(room_id(), user("alice"), 8);
+    notifier_->message(room_id(), user("alice"), 8, "");
     pump();
     EXPECT_TRUE(sink_.take().empty());
 }
@@ -330,7 +331,7 @@ TEST_F(NotifierTest, WithoutPresentAMessageNamesNobodyPresent) {
     registry_->set_room(room_id(), core::ports::RoomKind::GroupChat, {user("alice"), user("bob")});
     notifier_->opened(user("bob"), device(kLaptop));
     wait_past(chat::NotifyLimits{}.flush_after);
-    notifier_->message(room_id(), user("alice"), 7);
+    notifier_->message(room_id(), user("alice"), 7, "");
     pump();
     EXPECT_TRUE(sink_.take().empty());
 }
@@ -341,7 +342,7 @@ TEST_F(NotifierTest, AMessageNamesTheMembersWithNoSocketAndTellsEachOncePerInter
                         {user("alice"), user("bob"), user("carol")});
     notifier_->opened(user("carol"), std::nullopt);
     wait_past(chat::NotifyLimits{}.flush_after);
-    notifier_->message(room_id(), user("alice"), 41);
+    notifier_->message(room_id(), user("alice"), 41, "");
     pump();
     auto events = sink_.take();
     ASSERT_EQ(events.size(), 1U);
@@ -353,19 +354,19 @@ TEST_F(NotifierTest, AMessageNamesTheMembersWithNoSocketAndTellsEachOncePerInter
     EXPECT_EQ(events[0].find("body"), nullptr) << "never content";
     // Within the interval bob was told already; alice has no socket here either, and is owed
     // carol's message.
-    notifier_->message(room_id(), user("carol"), 42);
+    notifier_->message(room_id(), user("carol"), 42, "");
     pump();
     events = sink_.take();
     ASSERT_EQ(events.size(), 1U);
     EXPECT_EQ(strings(events[0].find("users")), std::vector<std::string>{"alice"});
-    notifier_->message(room_id(), user("carol"), 43);
+    notifier_->message(room_id(), user("carol"), 43, "");
     pump();
     EXPECT_TRUE(sink_.take().empty());
     // A stream's live chat is never looked up.
     const auto live = chat::live_chat_room("stream-1");
     ASSERT_TRUE(live);
     registry_->set_room(*live, core::ports::RoomKind::StreamLiveChat, {user("bob")});
-    notifier_->message(*live, user("alice"), 1);
+    notifier_->message(*live, user("alice"), 1, "");
     pump();
     EXPECT_TRUE(sink_.take().empty());
 }
@@ -422,6 +423,85 @@ TEST_F(NotifierTest, WithSequencedOnEveryMessageTheOwnerSequencesIsAnEventWithou
     notifier_->stop([]() noexcept {});
     notifier_->sequenced(message(room_id(), 9, false));
     EXPECT_TRUE(sink_.events.empty());
+}
+
+// ADR-0134: a preview is the body's first characters, whole code points only, and none at all
+// for a body that is not text, an MLS message's first.
+TEST(MessagePreviewTest, IsTheFirstCharactersOfATextBodyAndNothingOfAnyOther) {
+    const auto preview = [](std::string_view body, std::size_t chars) {
+        return chat::message_preview(std::as_bytes(std::span{body}), chars);
+    };
+    EXPECT_EQ(preview("hello there", 5), "hello");
+    EXPECT_EQ(preview("hi", 200), "hi");
+    EXPECT_EQ(preview("hi", 0), "");
+    EXPECT_EQ(preview("", 5), "");
+    // Characters, not bytes: "é" is two, "€" three and "😀" four, each counted once.
+    EXPECT_EQ(preview("\xC3\xA9t\xC3\xA9 \xE2\x82\xAC", 4), "\xC3\xA9t\xC3\xA9 ");
+    EXPECT_EQ(preview("\xF0\x9F\x98\x80!", 1), "\xF0\x9F\x98\x80");
+    EXPECT_EQ(preview("line one\nline\ttwo\r", 20), "line one\nline\ttwo\r");
+    // What lies past the preview is not looked at.
+    EXPECT_EQ(preview("ok\xFF\xFE", 2), "ok");
+    // Not text: an MLS message, a control character, broken or overlong UTF-8, a surrogate,
+    // past U+10FFFF, a sequence cut short.
+    EXPECT_EQ(preview(std::string_view("\x00\x01\x00\x02rest", 8), 5), "");
+    EXPECT_EQ(preview(std::string_view("\x00\x01\x00\x09", 4), 5), "");
+    EXPECT_EQ(preview("a\x07z", 5), "");
+    EXPECT_EQ(preview("a\x7F", 5), "");
+    EXPECT_EQ(preview("\xC3(", 5), "");
+    EXPECT_EQ(preview("\xC0\xAF", 5), "");
+    EXPECT_EQ(preview("\xE0\x80\xAF", 5), "");
+    EXPECT_EQ(preview("\xED\xA0\x80", 5), "");
+    EXPECT_EQ(preview("\xF4\x90\x80\x80", 5), "");
+    EXPECT_EQ(preview("\xF8\x88\x80\x80\x80", 5), "");
+    EXPECT_EQ(preview("ab\xE2\x82", 5), "");
+    EXPECT_EQ(preview("\x80", 5), "");
+}
+
+// ADR-0134: with ULW_NOTIFY_MESSAGE_PREVIEW_CHARS, `message` carries the preview it was given,
+// with or without the present; without it, never.
+TEST_F(NotifierTest, WithPreviewsOnAMessageCarriesThePreviewItWasGiven) {
+    make();
+    EXPECT_EQ(notifier_->preview_chars(), 0U);
+    registry_->set_room(room_id(), core::ports::RoomKind::GroupChat, {user("alice"), user("bob")});
+    notifier_->message(room_id(), user("alice"), 1, "hello");
+    pump();
+    auto events = sink_.take();
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0].find("preview"), nullptr) << "off: never, whatever it was given";
+
+    chat::NotifyLimits limits;
+    limits.preview_chars = 40;
+    make(false, limits);
+    EXPECT_EQ(notifier_->preview_chars(), 40U);
+    const core::RoomId other = *core::RoomId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f9fe");
+    registry_->set_room(other, core::ports::RoomKind::GroupChat, {user("alice"), user("bob")});
+    notifier_->message(other, user("alice"), 2, "say \"hi\"");
+    pump();
+    events = sink_.take();
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(text(events[0], "preview"), "say \"hi\"");
+    // An empty one is no preview.
+    const core::RoomId third = *core::RoomId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f9fa");
+    registry_->set_room(third, core::ports::RoomKind::GroupChat, {user("alice"), user("bob")});
+    notifier_->message(third, user("alice"), 3, "");
+    pump();
+    events = sink_.take();
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events[0].find("preview"), nullptr);
+
+    limits.message_present = true;
+    make(false, limits);
+    const core::RoomId fourth = *core::RoomId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f9fb");
+    registry_->set_room(fourth, core::ports::RoomKind::GroupChat,
+                        {user("alice"), user("bob"), user("carol")});
+    notifier_->opened(user("carol"), std::nullopt);
+    wait_past(chat::NotifyLimits{}.flush_after);
+    notifier_->message(fourth, user("alice"), 4, "with the present");
+    pump();
+    events = sink_.take();
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(text(events[0], "preview"), "with the present");
+    EXPECT_NE(events[0].find("present"), nullptr);
 }
 
 TEST_F(NotifierTest, ARegistryThatForgotTheNodeIsWrittenEverySocketAgain) {
