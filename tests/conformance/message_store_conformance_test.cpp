@@ -1111,6 +1111,31 @@ TEST_P(MembershipConformance, AMembersOwnRoomsPageInIdOrderWithTheirKindRoleAndP
     EXPECT_EQ(rooms_of(dave_, std::nullopt, 10), std::vector<RoomEntry>{});
 }
 
+// ADR-0137: each of a member's rooms says its latest seq and when its newest message was
+// sequenced; a room with none says seq 0 and no time.
+TEST_P(MembershipConformance, AMembersRoomsSayTheirLatestSeqAndWhen) {
+    const core::RoomId room = group();
+    const auto entry = [&]() -> std::optional<RoomEntry> {
+        const auto page = rooms_of(bob_, std::nullopt, 10);
+        if (!page || page->size() != 1) {
+            ADD_FAILURE() << "one room expected";
+            return std::nullopt;
+        }
+        return page->front();
+    };
+    const auto empty = entry();
+    ASSERT_TRUE(empty);
+    EXPECT_EQ(empty->seq, 0U);
+    EXPECT_EQ(empty->last_at, std::nullopt);
+    backend_->open(room);
+    ASSERT_EQ(write(room, alice_, bytes("one"), at(5)), 1U);
+    ASSERT_EQ(write(room, alice_, bytes("two"), at(7), true), 2U);
+    const auto moved = entry();
+    ASSERT_TRUE(moved);
+    EXPECT_EQ(moved->seq, 2U);
+    EXPECT_EQ(moved->last_at, at(7));
+}
+
 TEST_P(MembershipConformance, ARoomsMembersAreReadOnlyByOneOfThemAndPageInIdOrder) {
     const core::RoomId room = group();
     EXPECT_EQ(roster(room, dave_), (Roster{.asker_listed = false, .members = {}}));

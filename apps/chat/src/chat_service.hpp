@@ -8,6 +8,7 @@
 #include "rt/room_router.hpp"
 
 #include "envelope.hpp"
+#include "room_notices.hpp"
 #include "token_bucket.hpp"
 
 #include <array>
@@ -18,6 +19,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <queue>
 #include <span>
 #include <string>
 #include <string_view>
@@ -83,6 +85,9 @@ public:
     virtual void send(const core::RoomId& room, rt::IMember& from, const core::UserId& sender,
                       const rt::MessageKey& key, std::vector<std::byte> body, bool quiet,
                       rt::SendCallback done) = 0;
+    // An unsequenced, unstored notice to the room's members on every node
+    // (rt::RoomRouter::notify): best effort, at most rt::kMaxOwnerMessage bytes.
+    virtual void notify(const core::RoomId& room, std::span<const std::byte> notice) noexcept = 0;
     // What the room's owner answers itself (rt::RoomRouter::ask_owner): a call's ticket.
     virtual void ask_owner(const core::RoomId& room, rt::IMember& from,
                            std::span<const std::byte> request, rt::OwnerAnswer done) = 0;
@@ -169,6 +174,11 @@ struct ServiceLimits {
     // request and accept), and lists them through the service API (ADR-0096). Leaving, an
     // admin's removal of others and the listings stay with users either way.
     bool self_service = false;
+    // A room's members hear of its latest message at most once each this long from this node,
+    // whether their sockets joined it or not (ADR-0137): the messages in between are folded into
+    // the next notice. A second is as soon as a room list needs to move, and holds a group of 100
+    // members to 100 notices a second whatever its senders here send.
+    core::Millis activity_interval{1'000};
     // How long a room stays joined, and its messages kept, after its last client here left:
     // a page reload, a network switch, or a slow reader's reconnect take seconds; a client's
     // backoff reaches half a minute after a few failures.
@@ -217,6 +227,12 @@ struct ServiceCounters {
     std::uint64_t membership_unavailable = 0;
     // `member` frames sent to clients when a member list changed.
     std::uint64_t member_events = 0;
+    // Activity (ADR-0137): notices handed to the room plane, one per member; messages folded into
+    // a later notice by the interval; and messages whose member list could not be read, which
+    // told nobody.
+    std::uint64_t activity_notices = 0;
+    std::uint64_t activity_folded = 0;
+    std::uint64_t activity_failures = 0;
 };
 
 // Identifies an attached client; never reused while the service lives.
@@ -339,9 +355,31 @@ public:
     // Entries in the order kept messages are dropped in, those of messages already gone
     // included: at most a quarter over buffer_messages.
     [[nodiscard]] std::size_t kept_order_entries() const noexcept { return kept_order_.size(); }
+    // Rooms whose activity this node has told lately, or still owes (ADR-0137).
+    [[nodiscard]] std::size_t activity_rooms() const noexcept { return activity_.size(); }
 
 private:
     struct Room;
+    // A room's activity on this node (activity.cpp, ADR-0137): when it may next be told, what is
+    // owed meanwhile, and its member list, read once and kept until it changes.
+    struct Activity {
+        core::MonoTime next = {};
+        std::optional<ActivityNotice> owed;
+        // Waiting in activity_due_ for `next`.
+        bool queued = false;
+        std::optional<std::vector<core::UserId>> members;
+        // Bumped by every change of the list: a read that was asked before one is not kept.
+        std::uint64_t generation = 0;
+        core::MonoTime used;
+    };
+    struct ActivityDue {
+        core::MonoTime at;
+        core::RoomId room;
+        // The earliest first, for a std::priority_queue.
+        friend bool operator<(const ActivityDue& a, const ActivityDue& b) noexcept {
+            return a.at > b.at;
+        }
+    };
 
     struct Client {
         IClient* client;
@@ -376,6 +414,19 @@ private:
     void sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key, std::size_t bytes,
               bool quiet, std::string_view preview,
               std::expected<std::uint64_t, rt::RouteError> result) noexcept;
+    // A message a client here sent was sequenced `at`: its room's members are told now, or once
+    // the room's interval is over (activity.cpp).
+    void note_activity(const core::RoomId& room, const core::UserId& sender, std::uint64_t seq,
+                       core::WallTime at, bool quiet) noexcept;
+    void tell_activity(const core::RoomId& room, Activity& activity) noexcept;
+    void activity_read(const core::RoomId& room, std::uint64_t generation,
+                       const ActivityNotice& notice,
+                       core::ports::MessageResult<std::vector<core::UserId>> members) noexcept;
+    void notify_members(std::span<const core::UserId> members, ActivityNotice notice) noexcept;
+    // Tells what is due, and forgets rooms quiet for a linger; from sweep().
+    void sweep_activity(core::MonoTime now, bool full) noexcept;
+    // The room's member list changed: what activity kept of it is read again.
+    void forget_members(const core::RoomId& room) noexcept;
     void
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
@@ -477,6 +528,8 @@ private:
     bool stopped_ = false;
     std::array<core::ports::IMemberListener*, kMaxAlsoTold> also_{};
     bool resync_owed_ = false;
+    std::unordered_map<core::RoomId, Activity> activity_;
+    std::priority_queue<ActivityDue> activity_due_;
     IMessageWatcher* message_watcher_ = nullptr;
 };
 

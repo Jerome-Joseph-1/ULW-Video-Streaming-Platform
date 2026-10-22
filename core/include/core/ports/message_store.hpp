@@ -159,6 +159,11 @@ struct RoomEntry {
     MemberRole role = MemberRole::Member;
     // The other member of a direct chat, while one is listed.
     std::optional<UserId> peer;
+    // The room's latest seq (last_seq), 0 before its first message, and when its newest stored
+    // message was sequenced: what a room list sorts by and compares against the seq it last read
+    // (ADR-0137). No time before anything is stored.
+    std::uint64_t seq = 0;
+    std::optional<WallTime> last_at = std::nullopt;
 
     friend bool operator==(const RoomEntry&, const RoomEntry&) = default;
 };

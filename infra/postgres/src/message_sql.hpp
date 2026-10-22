@@ -292,7 +292,9 @@ promoted AS (
 SELECT EXISTS (SELECT 1 FROM listed), (SELECT user_id FROM promoted))sql";
 
 // A user's rooms by room id, through chat_members_by_user (0015), with each room's kind (NULL
-// when none is recorded) and, for a direct chat, the other member listed. The first page has no
+// when none is recorded), for a direct chat the other member listed, and the room's latest seq
+// and when its newest stored message was sequenced, in Unix microseconds (ADR-0137): each a probe
+// of a primary key, room_state's and chat_messages' (room_id, seq). The first page has no
 // cursor. $1 user, $2 row limit, $3 the room to page after. A view, as the history pages are,
 // so that a test can EXPLAIN it.
 inline constexpr std::string_view kRoomsFirstText = R"sql(
@@ -300,7 +302,10 @@ SELECT m.room_id, r.kind, m.role,
        CASE WHEN r.kind = 'direct_chat' THEN
            (SELECT o.user_id FROM chat_members o
              WHERE o.room_id = m.room_id AND o.user_id <> $1 ORDER BY o.user_id LIMIT 1)
-       END
+       END,
+       coalesce((SELECT s.last_seq FROM room_state s WHERE s.room_id = m.room_id), 0),
+       (SELECT (extract(epoch FROM c.sent_at) * 1000000)::bigint FROM chat_messages c
+         WHERE c.room_id = m.room_id ORDER BY c.seq DESC LIMIT 1)
   FROM chat_members m LEFT JOIN chat_rooms r ON r.room_id = m.room_id
  WHERE m.user_id = $1
  ORDER BY m.room_id
@@ -313,7 +318,10 @@ SELECT m.room_id, r.kind, m.role,
        CASE WHEN r.kind = 'direct_chat' THEN
            (SELECT o.user_id FROM chat_members o
              WHERE o.room_id = m.room_id AND o.user_id <> $1 ORDER BY o.user_id LIMIT 1)
-       END
+       END,
+       coalesce((SELECT s.last_seq FROM room_state s WHERE s.room_id = m.room_id), 0),
+       (SELECT (extract(epoch FROM c.sent_at) * 1000000)::bigint FROM chat_messages c
+         WHERE c.room_id = m.room_id ORDER BY c.seq DESC LIMIT 1)
   FROM chat_members m LEFT JOIN chat_rooms r ON r.room_id = m.room_id
  WHERE m.user_id = $1 AND m.room_id > $3
  ORDER BY m.room_id

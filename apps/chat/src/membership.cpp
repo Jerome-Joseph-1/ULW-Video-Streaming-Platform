@@ -380,6 +380,7 @@ void ChatService::on_member_added(const core::RoomId& room, const core::UserId& 
     if (core::ports::is_stream_chat(room)) {
         return;
     }
+    forget_members(room);
     tell_members(room, user, "added");
 }
 

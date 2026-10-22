@@ -138,3 +138,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0132](0132-the-service-cuts-a-user-off.md) | The service cuts a user off | Accepted |
 | [0133](0133-the-backend-reads-and-hears-every-message.md) | The backend reads and hears every message | Accepted |
 | [0134](0134-a-message-event-may-carry-a-preview.md) | A message event may carry a preview | Accepted |
+| [0137](0137-a-room-tells-its-members-it-moved-on.md) | A room tells its members it moved on | Accepted |

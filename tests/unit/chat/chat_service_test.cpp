@@ -3,6 +3,8 @@
 
 #include "call.hpp"
 #include "chat_service.hpp"
+#include "presence_room.hpp"
+#include "room_notices.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
 #include "support/no_membership_store.hpp"
@@ -76,6 +78,10 @@ public:
                          .quiet = quiet});
     }
 
+    void notify(const core::RoomId& room, std::span<const std::byte> notice) noexcept override {
+        notices.push_back({.room = room, .body = {notice.begin(), notice.end()}});
+    }
+
     void ask_owner(const core::RoomId& room, rt::IMember& from, std::span<const std::byte> request,
                    rt::OwnerAnswer done) override {
         // What a join asks of the room's call (ADR-0114) is kept apart from what clients ask.
@@ -103,8 +109,14 @@ public:
         return *j.member;
     }
 
+    struct Notice {
+        core::RoomId room;
+        std::vector<std::byte> body;
+    };
+
     std::vector<Joining> joins;
     std::vector<Sending> sends;
+    std::vector<Notice> notices;
     std::vector<Asking> asks;
     std::vector<Asking> statuses;
     std::vector<core::RoomId> left;
@@ -151,8 +163,17 @@ public:
     void members(const core::RoomId& /*room*/, std::optional<core::UserId> /*after*/,
                  std::size_t /*limit*/,
                  core::ports::MessageCallback<std::vector<core::UserId>> done) override {
-        done(std::vector<core::UserId>{});
+        ++member_reads;
+        if (members_fail) {
+            done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+            return;
+        }
+        done(listed);
     }
+    // What members() answers, and how often it was asked.
+    std::vector<core::UserId> listed;
+    int member_reads = 0;
+    bool members_fail = false;
     using core::ports::IMessageStore::admits;
     void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
                 core::ports::Recording recording,
@@ -2431,6 +2452,110 @@ TEST_F(ChatServiceTest, AJoinStillWaitingForTheListHearsOnlyOfItsOwnUser) {
     alice.take();
     messages_.watcher->on_member_added(room_id(), *core::UserId::parse("bob"));
     EXPECT_EQ(seen(alice.take().at(0)).user, "bob");
+}
+
+// ADR-0137: a message sent here tells each of its room's members, through their presence room,
+// that the room moved on: at once, then at most once an interval, the messages in between folded
+// into the next notice, quiet only if they all were. The list is read once and kept until it
+// changes.
+TEST_F(ChatServiceTest, AMessageSentHereTellsEveryMemberOfItsRoomAtMostOnceAnInterval) {
+    const auto uid = [](std::string_view name) { return *core::UserId::parse(name); };
+    messages_.listed = {uid("alice"), uid("bob"), uid("carol")};
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rt::IMember& member = rooms_.admit();
+    const auto told = [&]() {
+        std::vector<chat::ActivityNotice> out;
+        for (const auto& n : std::exchange(rooms_.notices, {})) {
+            const auto notice = chat::decode_activity(n.body);
+            EXPECT_TRUE(notice);
+            if (notice) {
+                EXPECT_EQ(n.room, chat::presence_room(notice->to));
+                out.push_back(*notice);
+            }
+        }
+        return out;
+    };
+
+    send(a, "m1");
+    rooms_.sends.back().done(1);
+    auto first = told();
+    ASSERT_EQ(first.size(), 3U);
+    EXPECT_EQ(first[0].to, uid("alice"));
+    EXPECT_EQ(first[2].to, uid("carol"));
+    for (const auto& n : first) {
+        EXPECT_EQ(n.room, room_id());
+        EXPECT_EQ(n.seq, 1U);
+        EXPECT_EQ(n.sender, uid("alice"));
+        EXPECT_EQ(n.at, clock_.wall_now());
+        EXPECT_FALSE(n.quiet);
+    }
+
+    // Within the interval: folded, and told once it is over.
+    send(a, "m2");
+    rooms_.sends.back().done(2);
+    service_->send(a, {.room = room_id(), .id = key("r3"), .body = bytes("+1"), .quiet = true});
+    rooms_.sends.back().done(3);
+    service_->sweep();
+    EXPECT_TRUE(told().empty());
+    EXPECT_EQ(service_->counters().activity_folded, 1U);
+    clock_.advance(std::chrono::seconds(1));
+    service_->sweep();
+    auto second = told();
+    ASSERT_EQ(second.size(), 3U);
+    EXPECT_EQ(second[1].seq, 3U);
+    EXPECT_FALSE(second[1].quiet);
+    EXPECT_EQ(messages_.member_reads, 1);
+    EXPECT_EQ(service_->counters().activity_notices, 6U);
+
+    // A change of the list is read again; a message delivered here first says when the owner
+    // sequenced it, and one quiet message alone is quiet.
+    messages_.watcher->on_member_added(room_id(), uid("dave"));
+    messages_.listed.push_back(uid("dave"));
+    clock_.advance(std::chrono::seconds(1));
+    service_->send(a, {.room = room_id(), .id = key("r4"), .body = bytes("+1"), .quiet = true});
+    deliver(member, 4, "+1", "alice");
+    rooms_.sends.back().done(4);
+    auto third = told();
+    ASSERT_EQ(third.size(), 4U);
+    EXPECT_EQ(third[3].to, uid("dave"));
+    EXPECT_EQ(third[3].at, core::WallTime{});
+    EXPECT_TRUE(third[3].quiet);
+    EXPECT_EQ(messages_.member_reads, 2);
+
+    // A list that cannot be read tells nobody, and is counted.
+    messages_.watcher->on_member_removed(room_id(), uid("dave"));
+    messages_.members_fail = true;
+    clock_.advance(std::chrono::seconds(1));
+    send(a, "m5");
+    rooms_.sends.back().done(5);
+    EXPECT_TRUE(told().empty());
+    EXPECT_EQ(service_->counters().activity_failures, 1U);
+
+    // A room nobody here sent to for a linger is forgotten.
+    EXPECT_EQ(service_->activity_rooms(), 1U);
+    clock_.advance(std::chrono::seconds(31));
+    service_->sweep();
+    EXPECT_EQ(service_->activity_rooms(), 0U);
+}
+
+// A resync drops every list activity kept: the next notice reads its list again.
+TEST_F(ChatServiceTest, AResyncRereadsTheListsActivityKept) {
+    messages_.listed = {*core::UserId::parse("alice")};
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    send(a, "m1");
+    rooms_.sends.back().done(1);
+    EXPECT_EQ(rooms_.notices.size(), 1U);
+    service_->on_members_resync();
+    clock_.advance(std::chrono::seconds(1));
+    send(a, "m2");
+    rooms_.sends.back().done(2);
+    EXPECT_EQ(rooms_.notices.size(), 2U);
+    EXPECT_EQ(messages_.member_reads, 2);
 }
 
 } // namespace

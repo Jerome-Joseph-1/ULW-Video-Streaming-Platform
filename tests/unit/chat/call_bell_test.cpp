@@ -3,6 +3,7 @@
 #include "call_bell.hpp"
 #include "presence_room.hpp"
 #include "ring.hpp"
+#include "room_notices.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
 
@@ -173,6 +174,76 @@ TEST_F(CallBellTest, ASocketHearsItsUsersRingsAsItConnects) {
     std::move(rings.waiting.back())(std::unexpected(core::ports::RingStoreError::Unavailable));
     EXPECT_EQ(bell_.counters().replay_failures, 1U);
     bell_.replay_from(nullptr);
+}
+
+} // namespace
+
+namespace {
+
+// ADR-0137: a room's activity, told to a member's presence room, reaches every socket here of
+// that member as an activity frame, with no body.
+TEST_F(CallBellTest, ARoomsActivityReachesEverySocketOfTheMemberItNames) {
+    Socket phone;
+    Socket laptop;
+    Socket alices;
+    static_cast<void>(bell_.attach(phone, user("bob")));
+    static_cast<void>(bell_.attach(laptop, user("bob")));
+    static_cast<void>(bell_.attach(alices, user("alice")));
+    const chat::ActivityNotice notice{.to = user("bob"),
+                                      .room = room_,
+                                      .seq = 12,
+                                      .sender = user("alice"),
+                                      .at = clock_.wall_now() + core::Millis{345},
+                                      .quiet = false};
+    const auto bytes = chat::encode_activity(notice);
+    EXPECT_TRUE(chat::is_activity(bytes));
+    EXPECT_FALSE(chat::decode_notice(bytes));
+    bell_.on_notice(chat::presence_room(user("bob")), bytes);
+    ASSERT_EQ(phone.got.size(), 1U);
+    EXPECT_EQ(laptop.got, phone.got);
+    EXPECT_TRUE(alices.got.empty());
+    EXPECT_EQ(phone.got[0], R"({"type":"activity","room":")" + room_.to_string() +
+                                R"(","seq":12,"sender":"alice","at":1767225600345,)"
+                                R"("quiet":false})");
+    EXPECT_EQ(bell_.counters().activity, 2U);
+
+    // Outside the member's presence room, or cut short, or with a byte too many: dropped.
+    bell_.on_notice(chat::presence_room(user("alice")), bytes);
+    bell_.on_notice(room_, bytes);
+    auto cut = bytes;
+    cut.pop_back();
+    bell_.on_notice(chat::presence_room(user("bob")), cut);
+    auto longer = bytes;
+    longer.push_back(std::byte{0});
+    bell_.on_notice(chat::presence_room(user("bob")), longer);
+    auto bad_quiet = bytes;
+    bad_quiet.back() = std::byte{2};
+    bell_.on_notice(chat::presence_room(user("bob")), bad_quiet);
+    EXPECT_EQ(bell_.counters().malformed, 5U);
+    EXPECT_EQ(phone.got.size(), 1U);
+    EXPECT_FALSE(chat::decode_activity(chat::encode_notice({.event = chat::RingEvent::Ringing,
+                                                            .to = user("bob"),
+                                                            .room = room_,
+                                                            .call = call_,
+                                                            .from = user("alice"),
+                                                            .by = std::nullopt,
+                                                            .expires_at = clock_.wall_now()})));
+    EXPECT_FALSE(chat::is_activity({}));
+
+    // A member with no socket here hears nothing.
+    const auto carols = chat::encode_activity({.to = user("carol"),
+                                               .room = room_,
+                                               .seq = 12,
+                                               .sender = user("alice"),
+                                               .at = clock_.wall_now(),
+                                               .quiet = true});
+    bell_.on_notice(chat::presence_room(user("carol")), carols);
+    EXPECT_EQ(bell_.counters().unheard, 1U);
+    const auto decoded = chat::decode_activity(carols);
+    ASSERT_TRUE(decoded);
+    EXPECT_TRUE(decoded->quiet);
+    EXPECT_EQ(decoded->to, user("carol"));
+    EXPECT_EQ(decoded->at, clock_.wall_now());
 }
 
 } // namespace

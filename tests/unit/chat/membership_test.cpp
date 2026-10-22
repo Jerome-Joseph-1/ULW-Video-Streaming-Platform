@@ -43,6 +43,8 @@ public:
               rt::SendCallback done) override {
         done(std::unexpected(rt::RouteError::Unavailable));
     }
+    void notify(const core::RoomId& /*room*/,
+                std::span<const std::byte> /*notice*/) noexcept override {}
     void ask_owner(const core::RoomId& /*room*/, rt::IMember& /*from*/,
                    std::span<const std::byte> /*request*/, rt::OwnerAnswer done) override {
         done(std::unexpected(rt::RouteError::Unavailable));
@@ -344,13 +346,13 @@ TEST_F(MembershipTest, AUsersRoomsArePagedWithWhatTheyAre) {
     EXPECT_EQ(
         first,
         std::format(
-            R"({{"type":"rooms","rooms":[{{"room":"{}","kind":"direct","role":"member","peer":"bob"}}],"more":true}})",
+            R"({{"type":"rooms","rooms":[{{"room":"{}","kind":"direct","role":"member","peer":"bob","seq":0}}],"more":true}})",
             pair.to_string()));
     service_->list_rooms(a, {.after = pair, .limit = 1});
     EXPECT_EQ(
         next(alice),
         std::format(
-            R"({{"type":"rooms","rooms":[{{"room":"{}","kind":"group","role":"admin"}}],"more":false}})",
+            R"({{"type":"rooms","rooms":[{{"room":"{}","kind":"group","role":"admin","seq":0}}],"more":false}})",
             mine.to_string()));
     Client dave;
     const auto d = attach(dave, "dave");

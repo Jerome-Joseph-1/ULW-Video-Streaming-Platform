@@ -1,0 +1,63 @@
+#include "room_notices.hpp"
+
+#include "layout.hpp"
+
+#include <chrono>
+
+namespace chat {
+
+namespace {
+
+// After the ring's notice layout (1).
+constexpr std::uint8_t kActivityLayout = 2;
+
+std::uint64_t unix_millis(core::WallTime at) noexcept {
+    const auto ms = std::chrono::floor<core::Millis>(at.time_since_epoch()).count();
+    return ms < 0 ? 0 : static_cast<std::uint64_t>(ms);
+}
+
+core::WallTime from_unix_millis(std::uint64_t ms) noexcept {
+    return core::WallTime{core::Millis{static_cast<core::Millis::rep>(ms)}};
+}
+
+} // namespace
+
+std::vector<std::byte> encode_activity(const ActivityNotice& notice) {
+    std::vector<std::byte> out;
+    layout::put_u8(out, kActivityLayout);
+    layout::put_short(out, notice.to.view());
+    layout::put_uuid(out, notice.room);
+    layout::put_u64(out, notice.seq);
+    layout::put_short(out, notice.sender.view());
+    layout::put_u64(out, unix_millis(notice.at));
+    layout::put_u8(out, notice.quiet ? 1 : 0);
+    return out;
+}
+
+std::optional<ActivityNotice> decode_activity(std::span<const std::byte> bytes) {
+    layout::Reader in{bytes};
+    if (in.u8() != kActivityLayout) {
+        return std::nullopt;
+    }
+    auto to = in.user();
+    const auto room = in.uuid<core::RoomId>();
+    const auto seq = in.u64();
+    auto sender = in.user();
+    const auto at = in.u64();
+    const auto quiet = in.u8();
+    if (!to || !room || !seq || !sender || !at || !quiet || *quiet > 1 || !in.empty()) {
+        return std::nullopt;
+    }
+    return ActivityNotice{.to = std::move(*to),
+                          .room = *room,
+                          .seq = *seq,
+                          .sender = std::move(*sender),
+                          .at = from_unix_millis(*at),
+                          .quiet = *quiet == 1};
+}
+
+bool is_activity(std::span<const std::byte> bytes) noexcept {
+    return !bytes.empty() && std::to_integer<std::uint8_t>(bytes.front()) == kActivityLayout;
+}
+
+} // namespace chat

@@ -1133,6 +1133,17 @@ void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageK
     if (message_watcher_ != nullptr && !quiet) {
         message_watcher_->message(room, c->user, *result, preview);
     }
+    // Every member hears that the room moved on, quiet or not (ADR-0137): when the owner
+    // sequenced it, if its delivery here came first; this node's clock otherwise, which is the
+    // owner's give or take the answer's way back.
+    core::WallTime at = clock_.wall_now();
+    if (const Room* r = find(room); r != nullptr) {
+        const auto kept = std::ranges::find(r->kept, *result, &Room::Kept::seq);
+        if (kept != r->kept.end()) {
+            at = kept->sent_at;
+        }
+    }
+    note_activity(room, c->user, *result, at, quiet);
     try {
         std::string out;
         write_sent(out, room, key, *result);
@@ -1348,9 +1359,11 @@ void ChatService::sweep() noexcept {
     ask_rechecks();
     const core::MonoTime now = clock_.now();
     if (now < next_sweep_) {
+        sweep_activity(now, false);
         return;
     }
     next_sweep_ = now + kSweepEvery;
+    sweep_activity(now, true);
     // Checks a full queue or a failed allocation left out: a resync of its own, once the one
     // before is done.
     if (resync_owed_ && rechecks_.empty() && rechecks_in_flight_ == 0) {
@@ -1405,6 +1418,7 @@ void ChatService::on_member_removed(const core::RoomId& room, const core::UserId
     if (core::ports::is_stream_chat(room)) {
         return;
     }
+    forget_members(room);
     for (auto& [value, c] : clients_) {
         if (c.user != user || std::ranges::find(c.rooms, room) == c.rooms.end()) {
             continue;
@@ -1463,6 +1477,11 @@ void ChatService::on_members_resync() noexcept {
         if (also != nullptr) {
             also->on_members_resync();
         }
+    }
+    // Any list activity kept may have missed a change.
+    for (auto& [room, activity] : activity_) {
+        activity.members.reset();
+        ++activity.generation;
     }
     // Checks asked before now may have been read before a removal this resync is for: a failure
     // of one of them is not asked again (below, rechecked), since this resync asks anew. Those

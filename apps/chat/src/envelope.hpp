@@ -9,6 +9,7 @@
 #include "rt/room_router.hpp"
 
 #include "ring.hpp"
+#include "room_notices.hpp"
 
 #include <cstddef>
 #include <cstdint>
@@ -88,6 +89,9 @@
 //   {"type":"ticket","room":"<uuid>","url":"<wss url>","token":"<jwt>","expires_at":<unix s>,
 //    "call":"<uuid>"}   the answer to call: connect the SFU's client SDK to url with token before
 //       expires_at. call names the ring the ticket belongs to; absent when there is none
+//   {"type":"activity","room":"<uuid>","seq":<integer>,"sender":"<sub>","at":<unix ms>,
+//    "quiet":<bool>}   unasked, on every socket of every member, joined or not: the room's
+//       latest message, at most once a second per room from each node (ADR-0137)
 //   {"type":"call_ringing","room":"<uuid>","call":"<uuid>","from":"<sub>","expires_at":<unix s>}
 //       unasked, on every socket of both members: from is calling, until expires_at
 //   {"type":"call_answered"|"call_declined"|"call_cancelled"|"call_ended","room":"<uuid>",
@@ -105,7 +109,8 @@
 //   {"type":"left","room":"<uuid>"}   the answer to leave; "promoted":"<sub>" when the group's
 //       last admin left and that member became its admin
 //   {"type":"rooms","rooms":[{"room":..,"kind":"direct"|"group"|"live","role":"member"|"admin",
-//    "peer":"<sub>"}],"more":<bool>}   a page; "peer" for a direct chat's other member
+//    "peer":"<sub>","seq":<integer>,"last_at":<unix ms>}],"more":<bool>}   a page; "peer" for a
+//       direct chat's other member, "last_at" once a message is stored (ADR-0137)
 //   {"type":"members","room":"<uuid>","members":[{"user":..,"role":..}],"more":<bool>}
 //   {"type":"member","room":"<uuid>","user":"<sub>",
 //    "change":"added"|"removed"|"promoted"|"demoted"}   unasked: a
@@ -370,6 +375,9 @@ void write_ice_servers(std::string& out, const core::RoomId& room,
 void write_ticket(std::string& out, const core::RoomId& room,
                   const core::ports::MediaTicket& ticket,
                   const std::optional<CallId>& call = std::nullopt);
+// {"type":"activity","room":..,"seq":..,"sender":..,"at":..,"quiet":..}: unasked, to every
+// socket of a member, joined or not, as a room they are on moves on (ADR-0137).
+void write_activity(std::string& out, const ActivityNotice& notice);
 // What a ring's notice tells each socket of its member, and what a member's own decline,
 // cancel or end is answered with.
 void write_call_event(std::string& out, const CallNotice& notice);

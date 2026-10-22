@@ -1,4 +1,5 @@
 ulw_add_library(chat_lib
+    src/activity.cpp
     src/call.cpp
     src/call_bell.cpp
     src/chat.cpp
@@ -15,6 +16,7 @@ ulw_add_library(chat_lib
     src/presence.cpp
     src/presence_room.cpp
     src/ring.cpp
+    src/room_notices.cpp
     src/service_api.cpp
     src/sha256.cpp
     src/session.cpp

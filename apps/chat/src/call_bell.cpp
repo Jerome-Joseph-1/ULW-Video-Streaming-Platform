@@ -3,6 +3,7 @@
 #include "envelope.hpp"
 #include "presence_room.hpp"
 #include "ring.hpp"
+#include "room_notices.hpp"
 
 #include <algorithm>
 #include <new>
@@ -90,8 +91,33 @@ void CallBell::detach(BellId id) noexcept {
     }
 }
 
+void CallBell::activity(const core::RoomId& room, std::span<const std::byte> body) {
+    const auto notice = decode_activity(body);
+    // As for a ring: only the member's own presence room carries their room's activity.
+    if (!notice || presence_room(notice->to) != room) {
+        ++counters_.malformed;
+        return;
+    }
+    const auto it = users_.find(notice->to);
+    if (it == users_.end()) {
+        ++counters_.unheard;
+        return;
+    }
+    text_.clear();
+    write_activity(text_, *notice);
+    for (const Socket& s : it->second) {
+        if (s.client->push(text_)) {
+            ++counters_.activity;
+        }
+    }
+}
+
 void CallBell::on_notice(const core::RoomId& room, std::span<const std::byte> body) noexcept {
     try {
+        if (is_activity(body)) {
+            activity(room, body);
+            return;
+        }
         const auto notice = decode_notice(body);
         // Only the member's own presence room carries their ring: a notice in any other room
         // is not one the ring sent.

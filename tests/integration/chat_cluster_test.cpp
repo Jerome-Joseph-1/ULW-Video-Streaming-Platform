@@ -1393,7 +1393,9 @@ TEST_P(ChatClusterTest, ADirectChatOpenedOnOneNodeIsTheSameRoomOnEveryOtherAndTh
     auto alice = connect(nodes_[0], 0);
     auto bob = connect(nodes_[1], 1);
     auto carol = connect(nodes_[2], 2);
-    ASSERT_TRUE(alice && bob && carol);
+    // Another socket of bob's, on a third node, that never joins the room.
+    auto bobs_phone = connect(nodes_[2], 1);
+    ASSERT_TRUE(alice && bob && carol && bobs_phone);
     const std::string room = open_direct(*alice, "bob");
     ASSERT_EQ(room.find("error"), std::string::npos) << room;
     ASSERT_EQ(room.substr(0, 2), "03") << "not a pair's room";
@@ -1414,6 +1416,12 @@ TEST_P(ChatClusterTest, ADirectChatOpenedOnOneNodeIsTheSameRoomOnEveryOtherAndTh
     ASSERT_TRUE(alice->send(send_command(room, "hello bob", "d1")));
     ASSERT_TRUE(bob->message("hello bob"));
     EXPECT_FALSE(carol->ever_saw("hello bob"));
+    // The socket that did not join hears that the room moved on (ADR-0137), and not what was said.
+    const auto moved = bobs_phone->wait_for(
+        [&](const Seen& s) { return s.type == "activity" && s.room == room && s.seq == 1; });
+    ASSERT_TRUE(moved);
+    EXPECT_EQ(moved->sender, "alice");
+    EXPECT_FALSE(bobs_phone->ever_saw("hello bob"));
     EXPECT_EQ(metric(nodes_[0], "directs_opened_total") + metric(nodes_[1], "directs_opened_total"),
               1U);
 
@@ -1421,7 +1429,8 @@ TEST_P(ChatClusterTest, ADirectChatOpenedOnOneNodeIsTheSameRoomOnEveryOtherAndTh
     const auto rooms = ask(*bob, R"({"type":"rooms"})", "rooms");
     ASSERT_TRUE(rooms);
     EXPECT_NE(rooms->raw.find(R"({"room":")" + room +
-                              R"(","kind":"direct","role":"member","peer":"alice"})"),
+                              R"(","kind":"direct","role":"member","peer":"alice","seq":1,)"
+                              R"("last_at":)"),
               std::string::npos)
         << rooms->raw;
     // A direct chat's pair is fixed: nobody is added, nobody leaves.

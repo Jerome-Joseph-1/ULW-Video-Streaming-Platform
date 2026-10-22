@@ -28,6 +28,9 @@ struct BellCounters {
     // Rings sent to a socket as it connected, from the store (ADR-0129), and reads that failed.
     std::uint64_t replayed = 0;
     std::uint64_t replay_failures = 0;
+    // activity frames pushed to sockets here, one per socket (ADR-0137); a notice for a user
+    // with no socket here is counted in unheard, one that does not decode in malformed.
+    std::uint64_t activity = 0;
 };
 
 struct BellId {
@@ -37,8 +40,9 @@ struct BellId {
 
 // Where a call's ring reaches the sockets of a member on this node (ADR-0091): the room plane
 // hands it the notices sent to the presence rooms this node is in (rt::INoticeListener), and
-// the bell pushes each, as its event, to every socket here of the member it names. Everything
-// runs on the reactor thread.
+// the bell pushes each, as its event, to every socket here of the member it names. A room's
+// activity (ADR-0137) reaches them the same way, as an activity frame. Everything runs on the
+// reactor thread.
 class CallBell final : public rt::INoticeListener {
 public:
     // With a ring store, the socket also hears at once every ring that is its user's now
@@ -59,6 +63,7 @@ private:
         IClient* client;
     };
 
+    void activity(const core::RoomId& room, std::span<const std::byte> body);
     void replay(const std::weak_ptr<int>& alive, std::uint64_t id, const core::UserId& user,
                 core::ports::RingStoreResult<std::vector<core::ports::StoredRing>> rings) noexcept;
 
