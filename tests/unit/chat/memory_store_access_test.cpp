@@ -6,9 +6,13 @@
 
 #include "conformance/message_store_harness.hpp"
 
+#include <chrono>
+#include <cstdint>
 #include <gtest/gtest.h>
 #include <memory>
+#include <optional>
 #include <utility>
+#include <vector>
 
 namespace {
 
@@ -67,6 +71,57 @@ TEST_F(MemoryStoreAccess, OnlyAListedUserIsAMember) {
     ASSERT_TRUE(ulw::test::ask<void>(
         *reactor_, [&](auto done) { store_->remove_member(room, alice_, std::move(done)); }));
     EXPECT_EQ(access(room, alice_), (RoomAccess{.kind = RoomKind::GroupChat, .member = false}));
+}
+
+// ADR-0135 on the store a development chat_server keeps: its sender, an admin of the room or the
+// service blanks a message, and nobody else; the same laws on Postgres are in
+// integration/message_store_test.cpp.
+TEST_F(MemoryStoreAccess, AMessageIsRedactedByItsSenderAnAdminOrTheServiceAndStaysSo) {
+    using core::ports::RedactOutcome;
+    const core::RoomId room = new_room();
+    const core::UserId carol = *core::UserId::parse("auth0|carol");
+    for (const core::UserId& user : {alice_, bob_, carol}) {
+        ASSERT_TRUE(ulw::test::ask<void>(
+            *reactor_, [&](auto done) { store_->add_member(room, user, std::move(done)); }));
+    }
+    ASSERT_TRUE(ulw::test::ask<core::ports::MembershipChange>(*reactor_, [&](auto done) {
+        store_->set_role(room, carol, core::ports::MemberRole::Admin, std::move(done));
+    }));
+    const auto append = [&](std::uint64_t seq, const core::UserId& sender, std::string key,
+                            std::vector<std::byte> body) {
+        return ulw::test::ask<std::uint64_t>(*reactor_, [&](auto done) {
+            store_->append(room, seq, sender, std::move(key), std::move(body),
+                           std::chrono::system_clock::now(), std::move(done));
+        });
+    };
+    for (std::uint64_t seq = 1; seq <= 3; ++seq) {
+        ASSERT_TRUE(append(seq, alice_, "k" + std::to_string(seq), {std::byte{7}}));
+    }
+    const auto redact = [&](std::uint64_t seq, const core::ports::Actor& actor) {
+        return ulw::test::ask<RedactOutcome>(
+            *reactor_, [&](auto done) { store_->redact(room, seq, actor, std::move(done)); });
+    };
+    EXPECT_EQ(redact(1, bob_), RedactOutcome::NotAllowed);
+    EXPECT_EQ(redact(1, alice_), RedactOutcome::Done);
+    EXPECT_EQ(redact(1, alice_), RedactOutcome::Done);
+    EXPECT_EQ(redact(2, carol), RedactOutcome::Done);
+    EXPECT_EQ(redact(3, core::ports::Actor::service()), RedactOutcome::Done);
+    EXPECT_EQ(redact(4, alice_), RedactOutcome::NotFound);
+    EXPECT_EQ(
+        ulw::test::ask<RedactOutcome>(
+            *reactor_, [&](auto done) { store_->redact(new_room(), 1, alice_, std::move(done)); }),
+        RedactOutcome::NotFound);
+    const auto page = ulw::test::ask<std::vector<core::ports::StoredMessage>>(
+        *reactor_, [&](auto done) { store_->history_after(room, 0, 10, std::move(done)); });
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 3U);
+    for (const core::ports::StoredMessage& m : *page) {
+        EXPECT_TRUE(m.redacted);
+        EXPECT_TRUE(m.body.empty());
+        EXPECT_EQ(m.sender, alice_);
+    }
+    // A repeat of the send is answered with its seq, whatever its body, and restores nothing.
+    EXPECT_EQ(append(9, alice_, "k1", {std::byte{8}}), 1U);
 }
 
 } // namespace

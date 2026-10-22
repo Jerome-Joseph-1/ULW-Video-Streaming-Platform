@@ -1382,4 +1382,56 @@ TEST_F(MessageStoreTest, ARoleIsSetUnderTheRoomsLockAndAQuietMessageIsSkippedByT
     EXPECT_FALSE(page->back().quiet);
 }
 
+// ADR-0135 on Postgres alone: its sender, the group's admin or the service blanks a message, in
+// place, and anyone else is refused; the owner's write answers a repeat of a redacted message's
+// send with its seq, whatever the body, and restores nothing.
+TEST_F(MessageStoreTest, AMessageIsRedactedInPlaceByItsSenderAnAdminOrTheService) {
+    using core::ports::MembershipChange;
+    using core::ports::RedactOutcome;
+    const core::RoomId group = named_room("04");
+    const core::UserId bob = *core::UserId::parse("auth0|bob");
+    const core::UserId carol = *core::UserId::parse("auth0|carol");
+    ASSERT_TRUE(ask<MembershipChange>(
+        [&](auto done) { store_->create_group(group, alice_, {bob, carol}, std::move(done)); }));
+    const std::uint64_t generation = own(group);
+    const auto append = [&](const core::UserId& sender, std::string_view key,
+                            std::string_view text) {
+        return ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
+            const auto body = bytes(text);
+            rooms_->append(group, generation, ulw::test::outgoing(sender, key, body),
+                           std::move(done));
+        });
+    };
+    for (int i = 1; i <= 3; ++i) {
+        const auto stored = append(bob, std::format("b{}", i), "secret");
+        ASSERT_TRUE(stored && *stored == static_cast<std::uint64_t>(i));
+    }
+    const auto redact = [&](std::uint64_t seq, const core::ports::Actor& actor) {
+        return ask<RedactOutcome>(
+            [&](auto done) { store_->redact(group, seq, actor, std::move(done)); });
+    };
+    EXPECT_EQ(redact(1, carol), RedactOutcome::NotAllowed);
+    EXPECT_EQ(redact(1, bob), RedactOutcome::Done);
+    EXPECT_EQ(redact(1, bob), RedactOutcome::Done);
+    EXPECT_EQ(redact(2, alice_), RedactOutcome::Done);
+    EXPECT_EQ(redact(4, bob), RedactOutcome::NotFound);
+    EXPECT_EQ(redact(4, core::ports::Actor::service()), RedactOutcome::NotFound);
+    const auto page = before(group, std::nullopt, 10);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 3U);
+    EXPECT_FALSE(page->at(0).redacted);
+    EXPECT_EQ(page->at(0).body, bytes("secret"));
+    for (const std::size_t i : {1U, 2U}) {
+        EXPECT_TRUE(page->at(i).redacted);
+        EXPECT_TRUE(page->at(i).body.empty());
+        EXPECT_EQ(page->at(i).sender, bob);
+        EXPECT_EQ(page->at(i).key, std::format("b{}", 3 - i));
+    }
+    EXPECT_EQ(redact(3, core::ports::Actor::service()), RedactOutcome::Done);
+    const auto repeat = append(bob, "b1", "something else");
+    EXPECT_TRUE(repeat && *repeat == 1U);
+    const auto fourth = append(bob, "b4", "new");
+    EXPECT_TRUE(fourth && *fourth == 4U);
+}
+
 } // namespace

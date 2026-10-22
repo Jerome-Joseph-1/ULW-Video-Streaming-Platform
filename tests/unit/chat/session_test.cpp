@@ -538,7 +538,10 @@ TEST_P(ChatSessionTest, EveryMetricsLineIsANameAndANumberAndEveryFeatureHasItsLi
           "membership_refusals_total{reason=\"room_limit\"}",
           "membership_refusals_total{reason=\"gone\"}",
           "membership_refusals_total{reason=\"rate_limited\"}",
-          "membership_refusals_total{reason=\"unavailable\"}", "member_events_total"}) {
+          "membership_refusals_total{reason=\"unavailable\"}", "member_events_total",
+          // Redactions (ADR-0135).
+          "messages_redacted_total", "redact_refusals_total{reason=\"not_found\"}",
+          "redact_refusals_total{reason=\"not_allowed\"}", "redacted_events_total"}) {
         EXPECT_NE(std::ranges::find(names, name), names.end()) << name;
     }
 }
@@ -806,6 +809,26 @@ TEST_P(ChatSessionTest, TypingReachesTheRoomsOtherJoinedSocketsAndReadsAreReadBa
     ASSERT_TRUE(alice->send_text(R"({"type":"reads","room":")" + room + R"("})"));
     EXPECT_EQ(next_but_activity(*alice, seconds(10)),
               R"({"type":"reads","room":")" + room + R"(","reads":[]})");
+}
+
+// ADR-0135: a redact reaches the chat service from the socket. This node's message store keeps
+// nothing the room store sequences, so the seq is not found there.
+TEST_P(ChatSessionTest, ARedactIsAnsweredOnTheSocketWithItsSeq) {
+    auto alice = open_as("alice");
+    ASSERT_TRUE(alice);
+    const std::string redact =
+        R"({"type":"redact","room":")" + std::string(kRoom) + R"(","seq":1})";
+    ASSERT_TRUE(alice->send_text(redact));
+    EXPECT_EQ(next_but_activity(*alice, seconds(10)),
+              R"({"type":"error","reason":"not_joined","room":")" + std::string(kRoom) +
+                  R"(","seq":1})");
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    EXPECT_EQ(next_but_activity(*alice, seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
+    ASSERT_TRUE(alice->send_text(redact));
+    EXPECT_EQ(next_but_activity(*alice, seconds(10)),
+              R"({"type":"error","reason":"not_found","room":")" + std::string(kRoom) +
+                  R"(","seq":1})");
 }
 
 TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {

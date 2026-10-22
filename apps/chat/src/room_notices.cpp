@@ -12,6 +12,7 @@ namespace {
 constexpr std::uint8_t kActivityLayout = 2;
 constexpr std::uint8_t kTypingLayout = 3;
 constexpr std::uint8_t kReadLayout = 4;
+constexpr std::uint8_t kRedactionLayout = 5;
 
 std::uint64_t unix_millis(core::WallTime at) noexcept {
     const auto ms = std::chrono::floor<core::Millis>(at.time_since_epoch()).count();
@@ -79,9 +80,26 @@ std::vector<std::byte> encode_read(const ReadNotice& notice) {
     return out;
 }
 
+std::vector<std::byte> encode_redaction(const RedactionNotice& notice) {
+    std::vector<std::byte> out;
+    layout::put_u8(out, kRedactionLayout);
+    layout::put_uuid(out, notice.room);
+    layout::put_u64(out, notice.seq);
+    return out;
+}
+
 std::optional<RoomNotice> decode_room_notice(std::span<const std::byte> bytes) {
     layout::Reader in{bytes};
     const auto kind = in.u8();
+    // A redaction names no user: its room and the seq blanked.
+    if (kind == kRedactionLayout) {
+        const auto room = in.uuid<core::RoomId>();
+        const auto seq = in.u64();
+        if (!room || !seq || !in.empty()) {
+            return std::nullopt;
+        }
+        return RedactionNotice{.room = *room, .seq = *seq};
+    }
     if (kind != kTypingLayout && kind != kReadLayout) {
         return std::nullopt;
     }

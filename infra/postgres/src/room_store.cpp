@@ -130,10 +130,11 @@ RETURNING room_assignments.room_id)sql";
 // stream's live chat) keeps its newest 1000: storing seq N deletes seq N - 1000, one more
 // primary key write, so a live room's rows stay about 2 MiB however long the stream (ADR-0070).
 // sent_at is the owner's time for the message, in microseconds since the epoch (ADR-0112); $7
-// whether it is quiet (ADR-0128).
+// whether it is quiet (ADR-0128). A redacted message's body is gone (ADR-0135): a repeat of its
+// send is answered with its seq, whatever the body, and restores nothing.
 constexpr Sql kAppendMessage = R"sql(
 WITH prior AS (
-    SELECT seq, body = $5 AS same
+    SELECT seq, body = $5 OR redacted AS same
       FROM chat_messages WHERE room_id = $1 AND sender = $3 AND msg_key = $4),
 next AS (
     UPDATE room_state

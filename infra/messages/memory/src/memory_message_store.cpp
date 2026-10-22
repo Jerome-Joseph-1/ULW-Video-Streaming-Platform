@@ -71,8 +71,10 @@ void MemoryMessageStore::append(const core::RoomId& room, std::uint64_t seq,
         // Its seq is taken; its message is not kept.
         r.last = std::max(r.last, seq);
     } else if (const auto stored = r.keys.find(sender_key); stored != r.keys.end()) {
-        // The same message again is answered with its seq; another under its key is refused.
-        const bool same = r.messages.at(stored->second).body == body;
+        // The same message again is answered with its seq; another under its key is refused. A
+        // redacted message's body is gone: a repeat of its send is answered, and restores nothing.
+        const StoredMessage& kept = r.messages.at(stored->second);
+        const bool same = kept.redacted || kept.body == body;
         result = same ? MessageResult<std::uint64_t>{stored->second}
                       : std::unexpected(MessageStoreError::Conflict);
     } else if (r.messages.contains(seq)) {
@@ -144,6 +146,39 @@ void MemoryMessageStore::last_loud_seq(const core::RoomId& room,
         }
     }
     defer([done = std::move(done), seq]() mutable noexcept { done(seq); });
+}
+
+void MemoryMessageStore::redact(const core::RoomId& room, std::uint64_t seq,
+                                const core::ports::Actor& actor,
+                                MessageCallback<core::ports::RedactOutcome> done) {
+    using core::ports::RedactOutcome;
+    RedactOutcome outcome = RedactOutcome::NotFound;
+    StoredMessage* m = nullptr;
+    if (const auto it = rooms_.find(room); it != rooms_.end()) {
+        if (const auto found = it->second.messages.find(seq); found != it->second.messages.end()) {
+            m = &found->second;
+        }
+    }
+    if (m != nullptr) {
+        // The sender, an admin of the room, or the service.
+        const auto admin = [&](const core::UserId& user) {
+            const auto members = members_.find(room);
+            if (members == members_.end()) {
+                return false;
+            }
+            const auto role = members->second.find(user);
+            return role != members->second.end() && role->second == core::ports::MemberRole::Admin;
+        };
+        const auto& user = actor.user();
+        if (!user || *user == m->sender || admin(*user)) {
+            m->body.clear();
+            m->redacted = true;
+            outcome = RedactOutcome::Done;
+        } else {
+            outcome = RedactOutcome::NotAllowed;
+        }
+    }
+    defer([done = std::move(done), outcome]() mutable noexcept { done(outcome); });
 }
 
 void MemoryMessageStore::add_member(const core::RoomId& room, const core::UserId& user,

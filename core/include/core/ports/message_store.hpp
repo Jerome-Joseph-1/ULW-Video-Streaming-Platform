@@ -281,8 +281,20 @@ struct StoredMessage {
     std::vector<std::byte> body;
     // Its sender asked that it notify nobody (ADR-0128).
     bool quiet = false;
+    // Redacted (ADR-0135): its body is empty, and stays so.
+    bool redacted = false;
 
     friend bool operator==(const StoredMessage&, const StoredMessage&) = default;
+};
+
+// What redact answers when the store could be asked (ADR-0135).
+enum class RedactOutcome : std::uint8_t {
+    // The message is redacted, by this call or an earlier one.
+    Done,
+    // No message is stored under the seq: never taken, or pruned from a stream's live chat.
+    NotFound,
+    // The actor is neither the message's sender nor an admin of the room.
+    NotAllowed,
 };
 
 // Told when a member list shrinks, on the reactor thread, never from inside a store call.
@@ -333,6 +345,12 @@ public:
     // The newest stored message that is not quiet (ADR-0128): what an unread count reads; 0 when
     // there is none.
     virtual void last_loud_seq(const RoomId& room, MessageCallback<std::uint64_t> done) = 0;
+    // Blanks the message stored under `seq` (ADR-0135): its body emptied and the message marked
+    // redacted, its seq, sender, key and time kept. For its sender, an admin of the room, or the
+    // service. Idempotent: a redacted message is answered Done again. The only write of a stored
+    // message after its owner's: it takes no seq, so it needs no fence.
+    virtual void redact(const RoomId& room, std::uint64_t seq, const Actor& actor,
+                        MessageCallback<RedactOutcome> done) = 0;
 
     // Both idempotent. Adding a member to a room with no kind recorded records it as a group
     // chat, so that the room is closed before it lists anyone and record_live, which waits for
