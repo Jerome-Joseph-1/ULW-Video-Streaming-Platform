@@ -62,6 +62,9 @@ struct NotifyConfig {
     // ULW_NOTIFY_MESSAGE_PRESENT: on, `message` also names the members with a socket in view and
     // their devices (ADR-0126); off by default.
     bool message_present = false;
+    // ULW_NOTIFY_SEQUENCED: on, every message is also a `message_sequenced`, from its room's
+    // owner (ADR-0133); off by default.
+    bool sequenced = false;
 };
 
 inline constexpr std::size_t kMinNotifySecretBytes = 32;

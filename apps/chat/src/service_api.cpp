@@ -7,6 +7,7 @@
 #include "http/request.hpp"
 #include "http/request_parser.hpp"
 #include "http/response.hpp"
+#include "infra/auth/base64url.hpp"
 #include "infra/auth/token_extractor.hpp"
 #include "rt/message_key.hpp"
 
@@ -62,6 +63,7 @@ enum class Op : std::uint8_t {
     SetRole,
     Presence,
     DisconnectUser,
+    History,
 };
 
 Op op_of(std::string_view target) noexcept {
@@ -69,7 +71,7 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 15> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 16> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
@@ -85,6 +87,7 @@ Op op_of(std::string_view target) noexcept {
         {"set_role", Op::SetRole},
         {"presence", Op::Presence},
         {"disconnect_user", Op::DisconnectUser},
+        {"history", Op::History},
     }};
     const auto* found = std::ranges::find(kOps, name, &std::pair<std::string_view, Op>::first);
     return found == kOps.end() ? Op::None : found->second;
@@ -177,6 +180,53 @@ Parsed<std::size_t> limit_of(const core::json::Value& body) {
         return std::unexpected(kMalformed);
     }
     return static_cast<std::size_t>(*n);
+}
+
+// A seq field, absent or a whole number; anything else is malformed.
+Parsed<std::optional<std::uint64_t>> seq_of(const core::json::Value& body, std::string_view field) {
+    const core::json::Value* v = body.find(field);
+    if (v == nullptr) {
+        return std::nullopt;
+    }
+    const auto seq = v->as_u64();
+    if (!seq) {
+        return std::unexpected(kMalformed);
+    }
+    return *seq;
+}
+
+// A page of history as the backend reads it (ADR-0133): each message as the socket's `message`
+// frame names it, `quiet` always said, and the body, base64url, only when asked for.
+void write_page(std::string& out, const core::RoomId& room,
+                std::span<const core::ports::StoredMessage> page, bool bodies) {
+    out += R"({"type":"history","room":")";
+    out += room.to_string();
+    out += R"(","messages":[)";
+    bool first = true;
+    for (const core::ports::StoredMessage& m : page) {
+        out += first ? "{" : ",{";
+        first = false;
+        std::format_to(std::back_inserter(out), R"("seq":{},"sender":)", m.seq);
+        core::json::append_string(out, m.sender.view());
+        out += R"(,"id":)";
+        core::json::append_string(out, m.key);
+        // Unix milliseconds, floored, as the socket says it (ADR-0112).
+        std::format_to(
+            std::back_inserter(out), R"(,"at":{},"quiet":{})",
+            std::chrono::floor<std::chrono::milliseconds>(m.sent_at.time_since_epoch()).count(),
+            m.quiet);
+        if (bodies) {
+            out += R"(,"body":")";
+            // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
+            const std::span<const unsigned char> octets{
+                reinterpret_cast<const unsigned char*>(m.body.data()), m.body.size()};
+            // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
+            infra::auth::append_base64url(out, octets);
+            out += '"';
+        }
+        out += '}';
+    }
+    out += "]}";
 }
 
 // Each once, in byte order, without `creator`: what the store takes as a group's members.
@@ -578,6 +628,9 @@ private:
         case Op::DisconnectUser:
             started = disconnect_user(*json);
             break;
+        case Op::History:
+            started = history(*json);
+            break;
         case Op::None:
             started = std::unexpected(Refusal{.status = Status::NotFound, .reason = "not_found"});
             break;
@@ -603,7 +656,7 @@ private:
             }
             try {
                 answer(*c, *api, std::move(*result));
-            } catch (const std::bad_alloc&) {
+            } catch (const std::exception&) {
                 ++api->counters_.unavailable;
                 c->refused(Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
             }
@@ -1036,6 +1089,51 @@ private:
                               members.size() > limit);
                 c.answered(Status::Ok, out);
             }));
+        return {};
+    }
+
+    // A page of the room's stored messages, as the socket's `history` reads them, for any room
+    // (ADR-0133): what the backend checks a claim against, "seq N of room R was sent by X",
+    // and the bodies only when it asks for them. Without a cursor, or with `before`, newest
+    // first below it; with `after`, oldest first above it. An empty page is the end that way.
+    Parsed<void> history(const core::json::Value& body) {
+        if (!only(body, {"room", "before", "after", "limit", "bodies"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto room = room_of(body, "room");
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        const auto before = seq_of(body, "before");
+        const auto after = seq_of(body, "after");
+        if (!before || !after || (*before && *after)) {
+            return std::unexpected(kMalformed);
+        }
+        const auto limit = limit_of(body);
+        if (!limit) {
+            return std::unexpected(limit.error());
+        }
+        bool bodies = false;
+        if (const core::json::Value* field = body.find("bodies"); field != nullptr) {
+            const auto asked = field->as_bool();
+            if (!asked) {
+                return std::unexpected(kMalformed);
+            }
+            bodies = *asked;
+        }
+        auto answer = reply<std::vector<core::ports::StoredMessage>>(
+            [room = *room, bodies](Connection& c, ServiceApi& api,
+                                   const std::vector<core::ports::StoredMessage>& page) {
+                ++api.counters_.reads;
+                std::string out;
+                write_page(out, room, page, bodies);
+                c.answered(Status::Ok, out);
+            });
+        if (const std::optional<std::uint64_t> from = *after) {
+            api_.store_.history_after(*room, *from, *limit, std::move(answer));
+        } else {
+            api_.store_.history_before(*room, *before, *limit, std::move(answer));
+        }
         return {};
     }
 

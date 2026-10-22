@@ -54,6 +54,14 @@ public:
                          std::uint64_t seq) noexcept = 0;
 };
 
+// Told of each message this node sequenced as its room's owner, whoever sent it and from whichever
+// node (rt::IRouterEvents::on_sequenced, ADR-0133). The body is valid only during the call.
+class ISequenceWatcher {
+public:
+    virtual ~ISequenceWatcher() = default;
+    virtual void sequenced(const rt::Message& message) noexcept = 0;
+};
+
 // The room plane: rt::RoomRouter, or a fake in tests.
 class IRooms {
 public:

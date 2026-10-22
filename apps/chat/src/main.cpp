@@ -437,6 +437,7 @@ int run() {
             std::format("{:016x}", std::bit_cast<std::uint64_t>(tag)));
         chat::NotifyLimits notify_limits;
         notify_limits.message_present = notify->message_present;
+        notify_limits.sequenced = notify->sequenced;
         s.notifier = std::make_unique<chat::Notifier>(*s.reactor, *s.notify_store, *s.hook, s.clock,
                                                       s.random, std::bit_cast<std::uint64_t>(tag),
                                                       notify_limits);

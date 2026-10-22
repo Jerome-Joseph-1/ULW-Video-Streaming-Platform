@@ -67,6 +67,13 @@ void RoomLog::on_peer_refused(std::string_view why) noexcept {
     log_event(R"("level":"warn","msg":"node refused","node":"{}","why":"{}")", self_.view(), why);
 }
 
+// Not a log line: one a message would be too many. Only the notifier hears it.
+void RoomLog::on_sequenced(const rt::Message& message) noexcept {
+    if (sequenced_ != nullptr) {
+        sequenced_->sequenced(message);
+    }
+}
+
 void RoomLog::on_node_taken() noexcept {
     log_event(R"("level":"error","msg":"node name in use by another live process","node":"{}")",
               self_.view());
@@ -135,6 +142,9 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     chat_.also_tell(&calls_);
     chat_.also_tell(&presence_);
     if (deps_.notifier != nullptr) {
+        if (deps_.room_log != nullptr) {
+            deps_.room_log->tell_sequenced(deps_.notifier);
+        }
         service_api_.see_connections(&deps_.notifier->store());
         chat_.watch_messages(deps_.notifier);
         calls_.watch_rings(deps_.notifier);
@@ -148,6 +158,7 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
 ChatServer::~ChatServer() {
     if (deps_.room_log != nullptr) {
         deps_.room_log->tell_calls(nullptr);
+        deps_.room_log->tell_sequenced(nullptr);
     }
     // The message store is destroyed first (Services in main.cpp), and reap() below sweeps the
     // service, which would otherwise ask it what a resync still owes.

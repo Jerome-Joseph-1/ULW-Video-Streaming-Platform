@@ -46,6 +46,9 @@ struct NotifyLimits {
     // ULW_NOTIFY_MESSAGE_PRESENT (ADR-0126): `message` also names the members present, with
     // their devices, read with message_audience; otherwise only those away, with message_targets.
     bool message_present = false;
+    // ULW_NOTIFY_SEQUENCED (ADR-0133): every message this node sequences as its room's owner is
+    // also a `message_sequenced`, whoever is owed word of it.
+    bool sequenced = false;
 };
 
 struct NotifyCounters {
@@ -66,7 +69,10 @@ struct NotifyCounters {
     std::uint64_t allocation_failures = 0;
 };
 
-class Notifier final : public IRingWatcher, public IMessageWatcher, public net::ITimerHandler {
+class Notifier final : public IRingWatcher,
+                       public IMessageWatcher,
+                       public ISequenceWatcher,
+                       public net::ITimerHandler {
 public:
     // `node` is this run's tag in the registry: random, unique per run.
     Notifier(net::IReactor& reactor, core::ports::IConnectivityStore& store, IEventSink& sink,
@@ -91,6 +97,9 @@ public:
     // A message `sender` sent here was sequenced `seq` in the room.
     void message(const core::RoomId& room, const core::UserId& sender,
                  std::uint64_t seq) noexcept override;
+    // A message this node sequenced as its room's owner: `message_sequenced`, when
+    // NotifyLimits::sequenced, for a direct or group chat.
+    void sequenced(const rt::Message& message) noexcept override;
 
     void observed(const CallEvent& event) noexcept override;
     void on_timeout() noexcept override;

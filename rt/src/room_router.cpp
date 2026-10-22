@@ -1695,13 +1695,15 @@ private:
                  const Write& write) {
         recent_.remember(room, write.sender, write.key,
                          {.seq = seq, .digest = RecentKeys::digest(write.body)}, clock_.now());
-        deliver_here(Message{.room = room,
-                             .seq = seq,
-                             .sender = write.sender,
-                             .key = write.key,
-                             .sent_at = write.sent_at,
-                             .quiet = write.quiet,
-                             .body = write.body});
+        const Message message{.room = room,
+                              .seq = seq,
+                              .sender = write.sender,
+                              .key = write.key,
+                              .sent_at = write.sent_at,
+                              .quiet = write.quiet,
+                              .body = write.body};
+        events_.on_sequenced(message);
+        deliver_here(message);
         if (o.subscribers.empty()) {
             return;
         }

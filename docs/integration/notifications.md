@@ -1,6 +1,6 @@
 # Notifications
 
-<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), docs/adr/0130-a-hook-batch-says-what-was-lost.md, apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of, Session::set_visible), apps/chat/src/notify.cpp (Notifier::message_text), docs/adr/0126-a-message-names-who-is-present.md, apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0111-notification-events-for-members-not-connected.md, docs/adr/0120-video-events-on-the-notification-hook.md -->
+<!-- apps/chat/src/notify.hpp, apps/chat/src/notify.cpp (Notifier), apps/chat/src/notify_sender.cpp (HookSender, notify_signature), docs/adr/0130-a-hook-batch-says-what-was-lost.md, apps/chat/src/ring.cpp (Ringer::observe, Ringer::announce, Ringer::ringing), apps/chat/src/session.cpp (device_of, Session::set_visible), apps/chat/src/notify.cpp (Notifier::message_text), docs/adr/0126-a-message-names-who-is-present.md, apps/chat/src/service_api.cpp (decline_call, call_status), apps/chat/src/config.cpp (notify_config), infra/postgres/src/notify_store.cpp, migrations/0022_notify.sql, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0111-notification-events-for-members-not-connected.md, docs/adr/0120-video-events-on-the-notification-hook.md, apps/chat/src/notify.cpp (Notifier::sequenced), apps/chat/src/chat.cpp (RoomLog::on_sequenced), rt/src/room_router.cpp (fan_out), docs/adr/0133-the-backend-reads-and-hears-every-message.md -->
 
 Chat reaches a member only through the sockets they have open ([chat.md](chat.md),
 [calls.md](calls.md)). For a member with none (a closed tab, a phone in a pocket), the operator
@@ -21,14 +21,16 @@ socket hears.
 | `ULW_NOTIFY_SECRET` | At least 32 bytes; the key every request is signed with. Required with the URL. |
 | `ULW_NOTIFY_MESSAGE_INTERVAL_SECONDS` | 5 to 3600, default 30: how often one member may be told of one room's messages while they stay away |
 | `ULW_NOTIFY_MESSAGE_PRESENT` | `on` or `off` (the default): `message` also names the members with a socket in view, and their devices ([`message`](#message)) |
+| `ULW_NOTIFY_SEQUENCED` | `on` or `off` (the default): every message in a direct or group chat is also a [`message_sequenced`](#message_sequenced) |
 
 On Kubernetes, `components/notifications` sets all three from `config.env` (`NOTIFY_URL`,
 `NOTIFY_NAMESPACE`, `NOTIFY_PORT`, `NOTIFY_MESSAGE_INTERVAL_SECONDS`) and `NOTIFY_SECRET` in chat's
 Secret, and lets chat reach the receiver's port (RUNBOOK step 7, "Notifications"). Run the
 receiver behind a NetworkPolicy that admits chat alone: the events name users and devices.
 
-Every chat node sends events: a call's from the room's owner, a message's from the sender's node.
-The receiver sees one stream per node and merges them.
+Every chat node sends events: a call's from the room's owner, a message's from the sender's node,
+and `message_sequenced` from the room's owner. The receiver sees one stream per node and merges
+them.
 
 ## Devices
 
@@ -166,6 +168,29 @@ this on: a receiver that ignores it misses those members for the interval. An ev
 when either list has anyone; without the option, `present` is never there and nothing else
 changes. Chat's Deployment takes the variable with a patch in the overlay; the notifications
 component does not set it.
+
+### `message_sequenced`
+
+With `ULW_NOTIFY_SEQUENCED=on` (ADR-0133), from the room's owner, once for every message it
+sequences in a direct or group chat, quiet ones included, whoever is owed word of it:
+
+```json
+{"id":"...","type":"message_sequenced","at":1767225700,"room":"...","seq":118,"sender":"user-1","message_id":"m-7f3a","sent_at":1767225700123,"quiet":false}
+```
+
+| Field | |
+|---|---|
+| `room`, `seq`, `sender` | The message, as every socket hears it |
+| `message_id` | The `id` the sender sent it with ([chat.md](chat.md#messages)) |
+| `sent_at` | When the owner sequenced it, Unix milliseconds: the message's `at` on the socket |
+| `quiet` | Its sender sent it quiet (a reaction, an edit) |
+
+What a backend checks a claim against ("seq 118 of this room is user-1's") without reading the
+database. It is not throttled, not looked up and never carries the body. A stream's live chat
+makes none. Like every event it is at most once: a lost batch, or an owner that died between
+storing a message and telling it, leaves a gap in `seq`. Fill it with the service API's
+`history` and `after` ([chat.md](chat.md#the-service-api)), which also gives the bodies. It costs
+one event per message and nothing more.
 
 ### `video_ready` and `video_failed`
 

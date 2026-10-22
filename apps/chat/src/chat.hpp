@@ -206,14 +206,19 @@ public:
     void on_peer_lost(const core::NodeId& peer) noexcept override;
     void on_peer_refused(std::string_view why) noexcept override;
     void on_node_taken() noexcept override;
+    void on_sequenced(const rt::Message& message) noexcept override;
 
     // Who also hears that this node took a room: the call handler, which ends a ring the room's
     // previous owner left behind (ADR-0129). Set by the server, cleared before it goes.
     void tell_calls(CallHandler* calls) noexcept { calls_ = calls; }
+    // Who hears of every message this node sequences as its rooms' owner: the notifier, for
+    // `message_sequenced` (ADR-0133). Set by the server, cleared before it goes.
+    void tell_sequenced(ISequenceWatcher* watcher) noexcept { sequenced_ = watcher; }
 
 private:
     core::NodeId self_;
     CallHandler* calls_ = nullptr;
+    ISequenceWatcher* sequenced_ = nullptr;
 };
 
 // The chat service's view of this node's RoomRouter.
