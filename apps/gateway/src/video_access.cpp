@@ -7,6 +7,7 @@
 #include "core/ports/catalog.hpp"
 #include "core/util/json.hpp"
 #include "core/util/parse.hpp"
+#include "core/util/webvtt.hpp"
 
 #include <algorithm>
 #include <array>
@@ -361,6 +362,11 @@ std::string error_json(std::string_view code) {
     core::json::append_string(json, code);
     json += '}';
     return json;
+}
+
+std::string caption_error_json(const core::webvtt::Error& error) {
+    return std::format(R"({{"error":"bad_captions","reason":"{}","line":{}}})",
+                       core::webvtt::to_string(error.problem), error.line);
 }
 
 } // namespace gateway

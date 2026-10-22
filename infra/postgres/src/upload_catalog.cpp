@@ -206,6 +206,28 @@ SELECT g.user_id, (extract(epoch FROM g.granted_at) * 1000000)::bigint
  WHERE v.id = $1 AND v.deleted_at IS NULL
  ORDER BY g.user_id)sql";
 
+// A video's captions (ADR-0139). Each write answers whether the video exists, and lists or
+// unlists the language in the same statement, as kGrantAccess and kRevokeAccess do.
+constexpr Sql kPutCaption = R"sql(
+WITH video AS (SELECT id FROM videos WHERE id = $1 AND deleted_at IS NULL),
+listed AS (
+    INSERT INTO video_captions (video_id, language) SELECT id, $2 FROM video
+    ON CONFLICT (video_id, language) DO UPDATE SET updated_at = now())
+SELECT count(*) FROM video)sql";
+
+constexpr Sql kRemoveCaption = R"sql(
+WITH video AS (SELECT id FROM videos WHERE id = $1 AND deleted_at IS NULL),
+unlisted AS (DELETE FROM video_captions WHERE video_id = $1 AND language = $2)
+SELECT count(*) FROM video)sql";
+
+// No row: no such video. One row with a NULL language: a video without captions.
+constexpr Sql kListCaptions = R"sql(
+SELECT c.language
+  FROM videos v
+  LEFT JOIN video_captions c ON c.video_id = v.id
+ WHERE v.id = $1 AND v.deleted_at IS NULL
+ ORDER BY c.language)sql";
+
 // The video's first transition rides on the progress write, in the same statement.
 constexpr Sql kRecordProgress = R"sql(
 WITH progressed AS (
@@ -527,6 +549,28 @@ CatalogResult<core::ports::GrantPage> decode_grants(const Outcome& outcome, std:
         page.grants.push_back(core::ports::VideoGrant{.user = *user, .granted_at = *at});
     }
     return page;
+}
+
+CatalogResult<std::vector<core::CaptionLanguage>> decode_captions(const Outcome& outcome) {
+    if (!outcome) {
+        return failure<std::vector<core::CaptionLanguage>>(outcome.error());
+    }
+    if (outcome->rows() == 0) {
+        return std::unexpected(CatalogError::NotFound);
+    }
+    std::vector<core::CaptionLanguage> languages;
+    for (int i = 0; i < outcome->rows(); ++i) {
+        if (!outcome->get(i, 0)) {
+            // The one row of a video without captions.
+            break;
+        }
+        auto language = domain_at<core::CaptionLanguage>(*outcome, i, 0);
+        if (!language) {
+            return std::unexpected(CatalogError::Corrupt);
+        }
+        languages.push_back(std::move(*language));
+    }
+    return languages;
 }
 
 // What kDeleteVideo found: no row is no such video (or not the owner's); a row is deleted, by
@@ -1313,6 +1357,39 @@ void PgUploadCatalog::list_grants(const core::VideoId& id, std::optional<core::U
         kListGrants, id, cursor, as_int(limit) + 1,
         [done = std::move(done), limit](Outcome outcome) mutable noexcept {
             done(decode_grants(outcome, limit));
+        }));
+}
+
+void PgUploadCatalog::put_caption(const core::VideoId& id, const core::CaptionLanguage& language,
+                                  CatalogCallback<void> done) {
+    impl_->main_pool().submit(std::make_unique<VideoUserQuery>(
+        kPutCaption, id, language.view(), std::nullopt,
+        [done = std::move(done)](Outcome outcome) mutable noexcept {
+            // The foreign key refused the row: the video was deleted between the statement's
+            // look and its insert, which is a video that does not exist.
+            if (!outcome && outcome.error() == DbError::Constraint) {
+                done(std::unexpected(CatalogError::NotFound));
+                return;
+            }
+            done(decode_video_count(outcome));
+        }));
+}
+
+void PgUploadCatalog::remove_caption(const core::VideoId& id, const core::CaptionLanguage& language,
+                                     CatalogCallback<void> done) {
+    impl_->main_pool().submit(std::make_unique<VideoUserQuery>(
+        kRemoveCaption, id, language.view(), std::nullopt,
+        [done = std::move(done)](Outcome outcome) mutable noexcept {
+            done(decode_video_count(outcome));
+        }));
+}
+
+void PgUploadCatalog::list_captions(const core::VideoId& id,
+                                    CatalogCallback<std::vector<core::CaptionLanguage>> done) {
+    impl_->main_pool().submit(std::make_unique<Query>(
+        Statement{.sql = kListCaptions, .params = Params{}.add_uuid(id.uuid())},
+        [done = std::move(done)](Outcome outcome) mutable noexcept {
+            done(decode_captions(outcome));
         }));
 }
 

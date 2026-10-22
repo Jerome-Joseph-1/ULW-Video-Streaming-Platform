@@ -140,6 +140,8 @@ TEST(GatewayMetrics, EveryOperationsFamilyIsScrapedWithItsHelpAndType) {
         {"playlist_requests_total", "counter"},
         {"playlists_rejected_total", "counter"},
         {"presign_failures_total", "counter"},
+        {"caption_changes_total", "counter"},
+        {"captions_rejected_total", "counter"},
         {"live_playlist_cache_hits_total", "counter"},
         {"live_playlist_cache_misses_total", "counter"},
         {"live_playlist_fetches_total", "counter"},

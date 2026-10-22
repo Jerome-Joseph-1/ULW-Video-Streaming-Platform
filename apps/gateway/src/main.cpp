@@ -121,8 +121,9 @@ struct Services {
     std::unique_ptr<infra::curl::Multi> key_multi;
     std::unique_ptr<infra::s3util::EnvCredentialProvider> credentials;
     std::unique_ptr<core::ports::IIngestStore> store;
-    // The same object as `store`, seen as a reader.
+    // The same object as `store`, seen as a reader and as a writer of whole objects.
     core::ports::IObjectReader* reader = nullptr;
+    core::ports::IObjectAdmin* objects = nullptr;
     // The object store's count of failures that need an operator; none for the filesystem.
     std::function<std::uint64_t()> paging_errors;
     std::unique_ptr<infra::postgres::PgUploadCatalog> catalog;
@@ -189,6 +190,7 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
             infra::storage::FsStore::Deps{.clock = s.clock, .random = s.random},
             std::move(*writers), config.storage_location, config.chunk_size);
         s.reader = fs.get();
+        s.objects = fs.get();
         s.store = std::move(fs);
         return {};
     }
@@ -220,6 +222,7 @@ std::expected<void, std::string> make_store(const gateway::Config& config, Servi
     infra::storage::S3Store* s3 = store->get();
     s.paging_errors = [s3] { return s3->paging_errors(); };
     s.reader = s3;
+    s.objects = s3;
     s.store = std::move(*store);
     return {};
 }
@@ -439,6 +442,7 @@ int serve(const gateway::Config& config, const os::NofileLimits& limits, os::Uni
                                                                  .pool = *s.pool,
                                                                  .store = *s.store,
                                                                  .reader = *s.reader,
+                                                                 .objects = *s.objects,
                                                                  .catalog = *s.catalog,
                                                                  .views = *s.catalog,
                                                                  .verifier = *s.verifier,

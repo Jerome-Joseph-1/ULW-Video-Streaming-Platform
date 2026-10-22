@@ -1,3 +1,4 @@
+#include "core/models/caption_language.hpp"
 #include "core/models/ids.hpp"
 #include "core/models/video.hpp"
 #include "core/models/video_access.hpp"
@@ -20,6 +21,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 // The catalog's side of ADR-0097 on a real database: the one-statement access read, the owner's
 // visibility checked against chat_members, the service's grants, and migration 0016's schema.
@@ -374,6 +376,69 @@ TEST_P(VideoAccessTest, TheSchemaRefusesWhatTheApiNeverWrites) {
     ASSERT_TRUE(
         conn.exec("UPDATE videos SET visibility_room = gen_random_uuid() WHERE id = $1", video));
     EXPECT_EQ(view(id, "alice").error(), CatalogError::Corrupt);
+}
+
+// ADR-0139 and migration 0030: a video's caption languages, listed and unlisted in the statement
+// that looks the video up.
+TEST_P(VideoAccessTest, CaptionLanguagesAreListedOnceInOrderWhileTheVideoExists) {
+    const auto lang = [](std::string_view text) { return *core::CaptionLanguage::parse(text); };
+    const auto put = [&](const core::VideoId& id, std::string_view language) {
+        return call<void>(
+            [&](auto done) { catalog->put_caption(id, lang(language), std::move(done)); });
+    };
+    const auto remove = [&](const core::VideoId& id, std::string_view language) {
+        return call<void>(
+            [&](auto done) { catalog->remove_caption(id, lang(language), std::move(done)); });
+    };
+    const auto list = [&](const core::VideoId& id) {
+        return call<std::vector<core::CaptionLanguage>>(
+            [&](auto done) { catalog->list_captions(id, std::move(done)); });
+    };
+
+    const auto id = add_video();
+    const auto none = list(id);
+    ASSERT_TRUE(none) << core::ports::to_string(none.error());
+    EXPECT_TRUE(none->empty());
+    ASSERT_TRUE(put(id, "fr"));
+    ASSERT_TRUE(put(id, "en-us"));
+    // Again: still once.
+    ASSERT_TRUE(put(id, "en-us"));
+    const auto both = list(id);
+    ASSERT_TRUE(both);
+    EXPECT_EQ(*both, (std::vector{lang("en-us"), lang("fr")}));
+    ASSERT_TRUE(remove(id, "en-us"));
+    // A language not listed: nothing to do.
+    ASSERT_TRUE(remove(id, "de"));
+    EXPECT_EQ(*list(id), std::vector{lang("fr")});
+
+    const auto missing = core::VideoId::generate(clock, random);
+    EXPECT_EQ(put(missing, "en").error(), CatalogError::NotFound);
+    EXPECT_EQ(remove(missing, "en").error(), CatalogError::NotFound);
+    EXPECT_EQ(list(missing).error(), CatalogError::NotFound);
+
+    auto conn = db->session();
+    const Params video = Params{}.add_uuid(id.uuid());
+    // Only the tags core::CaptionLanguage keeps.
+    EXPECT_FALSE(
+        conn.exec("INSERT INTO video_captions (video_id, language) VALUES ($1, 'EN')", video));
+    EXPECT_FALSE(
+        conn.exec("INSERT INTO video_captions (video_id, language) VALUES ($1, 'e')", video));
+    EXPECT_FALSE(conn.exec("INSERT INTO video_captions (video_id, language) VALUES "
+                           "($1, 'en-us-x-abcdefgh-abcdefgh-abcdefgh-a')",
+                           video));
+    // A row the API could not have written reads as corrupt.
+    ASSERT_TRUE(conn.exec("ALTER TABLE video_captions DROP CONSTRAINT video_captions_language"));
+    ASSERT_TRUE(
+        conn.exec("INSERT INTO video_captions (video_id, language) VALUES ($1, 'e_n')", video));
+    EXPECT_EQ(list(id).error(), CatalogError::Corrupt);
+
+    // Deleted, the video has none; purged, its rows go with it.
+    ASSERT_TRUE(conn.exec("UPDATE videos SET deleted_at = now() WHERE id = $1", video));
+    EXPECT_EQ(put(id, "fr").error(), CatalogError::NotFound);
+    EXPECT_EQ(remove(id, "fr").error(), CatalogError::NotFound);
+    EXPECT_EQ(list(id).error(), CatalogError::NotFound);
+    ASSERT_TRUE(conn.exec("DELETE FROM videos WHERE id = $1", video));
+    EXPECT_EQ(scalar(conn, "SELECT count(*) FROM video_captions"), "0");
 }
 
 INSTANTIATE_TEST_SUITE_P(Reactors, VideoAccessTest,

@@ -20,6 +20,9 @@ enum class RouteId : std::uint8_t {
     DeleteVideo,
     MasterPlaylist,
     MediaPlaylist,
+    CaptionPlaylist,
+    PutCaption,
+    DeleteCaption,
     LivePlaylist,
     CreateStream,
     StreamStatus,
@@ -34,13 +37,15 @@ enum class RouteId : std::uint8_t {
     UpdateServiceVideo,
     UpdateServiceVideos,
     DeleteServiceVideo,
+    PutServiceCaption,
+    DeleteServiceCaption,
     UpdateServiceStream,
     Healthz,
     Readyz,
     Metrics,
 };
 
-inline constexpr std::array<http::Route<RouteId>, 31> kRoutes{{
+inline constexpr std::array<http::Route<RouteId>, 36> kRoutes{{
     {.method = http::Method::Post, .pattern = "/api/v1/uploads", .id = RouteId::CreateUpload},
     {.method = http::Method::Patch, .pattern = "/api/v1/uploads/{id}", .id = RouteId::AppendChunk},
     {.method = http::Method::Head, .pattern = "/api/v1/uploads/{id}", .id = RouteId::UploadOffset},
@@ -64,6 +69,17 @@ inline constexpr std::array<http::Route<RouteId>, 31> kRoutes{{
     {.method = http::Method::Get,
      .pattern = "/api/v1/videos/{id}/{rendition}/index.m3u8",
      .id = RouteId::MediaPlaylist},
+    // A video's captions (ADR-0139): one WebVTT file per language, which its owner puts and
+    // deletes, and the subtitles playlist the master lists for it.
+    {.method = http::Method::Get,
+     .pattern = "/api/v1/videos/{id}/captions/{language}/index.m3u8",
+     .id = RouteId::CaptionPlaylist},
+    {.method = http::Method::Put,
+     .pattern = "/api/v1/videos/{id}/captions/{language}",
+     .id = RouteId::PutCaption},
+    {.method = http::Method::Delete,
+     .pattern = "/api/v1/videos/{id}/captions/{language}",
+     .id = RouteId::DeleteCaption},
     {.method = http::Method::Get,
      .pattern = "/api/v1/live/{id}/index.m3u8",
      .id = RouteId::LivePlaylist},
@@ -103,6 +119,13 @@ inline constexpr std::array<http::Route<RouteId>, 31> kRoutes{{
     {.method = http::Method::Delete,
      .pattern = "/api/v1/service/videos/{id}",
      .id = RouteId::DeleteServiceVideo},
+    // The operator's backend puts and deletes any video's captions (ADR-0139).
+    {.method = http::Method::Put,
+     .pattern = "/api/v1/service/videos/{id}/captions/{language}",
+     .id = RouteId::PutServiceCaption},
+    {.method = http::Method::Delete,
+     .pattern = "/api/v1/service/videos/{id}/captions/{language}",
+     .id = RouteId::DeleteServiceCaption},
     // The operator's backend sets who may watch any stream (ADR-0105).
     {.method = http::Method::Patch,
      .pattern = "/api/v1/service/live/{id}",
@@ -142,6 +165,12 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "master_playlist";
     case RouteId::MediaPlaylist:
         return "media_playlist";
+    case RouteId::CaptionPlaylist:
+        return "caption_playlist";
+    case RouteId::PutCaption:
+        return "put_caption";
+    case RouteId::DeleteCaption:
+        return "delete_caption";
     case RouteId::LivePlaylist:
         return "live_playlist";
     case RouteId::CreateStream:
@@ -170,6 +199,10 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
         return "update_service_videos";
     case RouteId::DeleteServiceVideo:
         return "delete_service_video";
+    case RouteId::PutServiceCaption:
+        return "put_service_caption";
+    case RouteId::DeleteServiceCaption:
+        return "delete_service_caption";
     case RouteId::UpdateServiceStream:
         return "update_service_stream";
     case RouteId::Healthz:
@@ -199,6 +232,9 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::DeleteVideo:
     case RouteId::MasterPlaylist:
     case RouteId::MediaPlaylist:
+    case RouteId::CaptionPlaylist:
+    case RouteId::PutCaption:
+    case RouteId::DeleteCaption:
     case RouteId::LivePlaylist:
     case RouteId::CreateStream:
     case RouteId::StreamStatus:
@@ -213,6 +249,8 @@ inline constexpr http::Router<RouteId> kRouter{kRoutes};
     case RouteId::UpdateServiceVideo:
     case RouteId::UpdateServiceVideos:
     case RouteId::DeleteServiceVideo:
+    case RouteId::PutServiceCaption:
+    case RouteId::DeleteServiceCaption:
     case RouteId::UpdateServiceStream:
         return true;
     }

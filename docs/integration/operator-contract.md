@@ -292,7 +292,7 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `certificate_reloads_total`, `certificate_reload_failures_total` | counter | SIGHUP certificate reloads |
 | `auth_cache_drops_total` | counter | SIGHUPs that requested a drop of the cached JWKS keys and remembered verified tokens, each logged as `auth cache drop requested; completes on the next successful key fetch` (ADR-0082, [auth.md](auth.md#key-rotation)) |
 | `auth_cache_drop_pending` | gauge | `1` from a SIGHUP until a key fetch succeeds and completes the drop; the cached keys keep answering meanwhile. Stuck at `1` means the JWKS cannot be fetched |
-| `playlist_requests_total{kind="master"}`, `{kind="media"}`, `{kind="live"}` | counter | |
+| `playlist_requests_total{kind="master"}`, `{kind="media"}`, `{kind="live"}`, `{kind="captions"}` | counter | `captions`: a video's subtitles playlists (ADR-0139) |
 | `live_playlist_cache_hits_total` | counter | Live playlist requests answered from the cache: a fresh copy, or a stream remembered as absent for 1 s (ADR-0059) |
 | `live_playlist_cache_misses_total` | counter | Live playlist requests that found no fresh copy; each started a store read or joined one |
 | `live_playlist_fetches_total` | counter | Live playlists read from the store. At most one per stream per half target duration, whatever the audience |
@@ -311,6 +311,8 @@ Gateway metrics. All are counters (`_total`), gauges or histograms, per process:
 | `live_sweeps_total` | counter | Looks at the unfinished streams, every 10 s per replica |
 | `playlists_rejected_total` | counter | A stored playlist broke a rewriting rule (a worker bug); the viewer got `500` |
 | `presign_failures_total` | counter | A segment URL could not be signed; the viewer got `500` |
+| `caption_changes_total{op="stored"}`, `{op="removed"}` | counter | Caption files put (new or replacing one) and deleted, by owners and the service API (ADR-0139) |
+| `captions_rejected_total` | counter | Caption uploads answered `400` `bad_captions`: not WebVTT every player reads alike |
 | `view_events_recorded_total`, `view_events_dropped_total`, `view_batches_failed_total` | counter | Master-playlist fetches recorded as views |
 | `jobs_oldest_queued_seconds` | gauge | How long the oldest transcode job due to run has waited; `0` when none waits, `NaN` while the database does not answer |
 | `jwks_keys_expired` | gauge | `1` while every token is refused because the JWKS went unrefreshed for `ULW_JWKS_MAX_STALE_HOURS` ([auth.md](auth.md)) |

@@ -517,6 +517,8 @@ std::string Gateway::render_metrics() {
     e.sample("playlist_requests_total", {{.name = "kind", .value = "master"}}, c.playlists_master);
     e.sample("playlist_requests_total", {{.name = "kind", .value = "media"}}, c.playlists_media);
     e.sample("playlist_requests_total", {{.name = "kind", .value = "live"}}, c.playlists_live);
+    e.sample("playlist_requests_total", {{.name = "kind", .value = "captions"}},
+             c.playlists_captions);
     const LiveCacheCounters& lc = live_.counters();
     e.counter("live_playlist_cache_hits_total",
               "Live playlist requests answered from a fresh copy, or a remembered absence.",
@@ -543,6 +545,12 @@ std::string Gateway::render_metrics() {
               c.playlists_rejected);
     e.counter("presign_failures_total", "Segment URLs the store could not sign.",
               c.presign_failures);
+    e.family("caption_changes_total", "Caption files stored or deleted, by what was done.",
+             MetricType::Counter);
+    e.sample("caption_changes_total", {{.name = "op", .value = "stored"}}, c.captions_stored);
+    e.sample("caption_changes_total", {{.name = "op", .value = "removed"}}, c.captions_removed);
+    e.counter("captions_rejected_total", "Caption uploads refused as not well-formed WebVTT.",
+              c.captions_rejected);
     e.counter("view_events_recorded_total", "View events written.", v.recorded);
     e.counter("view_events_dropped_total", "View events refused or lost with a failed batch.",
               v.dropped);

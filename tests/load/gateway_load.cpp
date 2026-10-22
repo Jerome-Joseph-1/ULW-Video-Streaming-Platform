@@ -218,6 +218,7 @@ public:
 
     // Playback is not measured here; nothing is ever read.
     [[nodiscard]] core::ports::IObjectReader& reader() noexcept { return control_; }
+    [[nodiscard]] core::ports::IObjectAdmin& objects() noexcept { return control_; }
 
     void throttle() { timer_ = reactor_.arm_timer(kTick, *this); }
     [[nodiscard]] std::uint64_t taken() const noexcept { return taken_; }
@@ -374,6 +375,7 @@ int run(const Args& args) {
                                                                  .pool = *s.pool,
                                                                  .store = *s.store,
                                                                  .reader = s.store->reader(),
+                                                                 .objects = s.store->objects(),
                                                                  .catalog = *s.catalog,
                                                                  .views = *s.catalog,
                                                                  .verifier = s.verifier,

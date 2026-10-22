@@ -224,6 +224,7 @@ void GatewayUnderTest::run(const GatewayOptions& options, std::promise<void> rea
                                                                  .pool = *l.pool,
                                                                  .store = *l.store,
                                                                  .reader = *reader_,
+                                                                 .objects = *l.admin,
                                                                  .catalog = *l.catalog,
                                                                  .views = *l.catalog,
                                                                  .verifier = l.verifier,

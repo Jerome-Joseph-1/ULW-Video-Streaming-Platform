@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/models/caption_language.hpp"
 #include "core/models/ids.hpp"
 #include "core/ports/storage.hpp"
 #include "core/util/time.hpp"
@@ -9,6 +10,7 @@
 #include <expected>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace gateway {
 
@@ -17,10 +19,12 @@ namespace gateway {
 // 346 KB; anything past 512 KiB is not a playlist the worker wrote.
 inline constexpr std::size_t kMaxStoredPlaylist = std::size_t{512} * 1024;
 
-enum class PlaylistKind : std::uint8_t { Master, Media };
+// Captions: the subtitles playlist of one of the video's caption files (ADR-0139).
+enum class PlaylistKind : std::uint8_t { Master, Media, Captions };
 
 enum class PlaylistFailure : std::uint8_t {
-    // The master does not list the rendition asked for.
+    // The master does not list the rendition asked for, or the video has no captions in the
+    // language asked for.
     NoSuchRendition,
     // The store is throttling or unreachable; the viewer may retry.
     Unavailable,
@@ -37,13 +41,25 @@ enum class PlaylistFailure : std::uint8_t {
 struct PlaylistRequest {
     PlaylistKind kind = PlaylistKind::Master;
     core::VideoId video;
-    // Media playlists only.
+    // Media playlists only: the rendition; for captions, the language as the path gave it.
     std::string rendition;
     core::Seconds ttl{};
+    // The master and captions only: the video's caption languages, as the catalog lists them
+    // at this request. A captions playlist is only built for one of them.
+    std::vector<core::CaptionLanguage> captions;
+    // Captions only: the video's length, which its one WebVTT segment spans.
+    core::Millis duration{};
 };
 
+// Where a video's captions in `language` are stored: next to its renditions, under
+// videos/<id>/hls/captions/, which the reaper's purge of videos/<id>/ removes with the rest.
+[[nodiscard]] std::string caption_key(const core::VideoId& video,
+                                      const core::CaptionLanguage& language);
+
 // Fetches the stored playlist, and for a media playlist the master it must be listed in, and
-// rewrites it for the viewer. Blocks on the object store: offload pool only.
+// rewrites it for the viewer; the master then lists the video's captions. A captions playlist is
+// built here, not fetched: one segment, the signed URL of the WebVTT file. Blocks on the object
+// store: offload pool only.
 //
 // `local_read_url` is where a development server publishes the filesystem backend's objects,
 // or "" for none. That backend's read grants are file paths, which no browser can fetch.

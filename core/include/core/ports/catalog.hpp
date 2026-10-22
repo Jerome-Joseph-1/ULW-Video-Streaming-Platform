@@ -1,5 +1,6 @@
 #pragma once
 
+#include "core/models/caption_language.hpp"
 #include "core/models/ids.hpp"
 #include "core/models/storage_key.hpp"
 #include "core/models/upload.hpp"
@@ -208,6 +209,22 @@ public:
     // without one). NotFound when no video has that id.
     virtual void list_grants(const VideoId& id, std::optional<UserId> after, std::size_t limit,
                              CatalogCallback<GrantPage> done) = 0;
+
+    // A video's captions (ADR-0139): one WebVTT file per language, stored next to its
+    // renditions, and the languages here, which are what its master playlist lists. The file is
+    // written before put_caption and removed after remove_caption, so a language listed always
+    // has its file. A deleted video's go with its row at the reaper's purge.
+
+    // Lists `language` among the video's captions; listed already, it stays so. NotFound when no
+    // video has that id, a deleted one included.
+    virtual void put_caption(const VideoId& id, const CaptionLanguage& language,
+                             CatalogCallback<void> done) = 0;
+    // Idempotent: a language not listed changes nothing. NotFound when no video has that id.
+    virtual void remove_caption(const VideoId& id, const CaptionLanguage& language,
+                                CatalogCallback<void> done) = 0;
+    // The video's caption languages in bytewise order. NotFound when no video has that id.
+    virtual void list_captions(const VideoId& id,
+                               CatalogCallback<std::vector<CaptionLanguage>> done) = 0;
 };
 
 } // namespace core::ports
