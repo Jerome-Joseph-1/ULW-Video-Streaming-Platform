@@ -2,8 +2,9 @@
 // different node of a two-node cluster; Alice opens their direct chat over chat (open_direct,
 // ADR-0096) and Bob hears he was listed. Both join the room, ask for the call, and take the
 // ticket chat answers to LiveKit with the pinned livekit-client SDK, publishing the fake camera
-// and microphone. Each must decode the other's audio and video. A second device of Alice's is
-// refused by LiveKit (the call holds two), Carol is refused by chat (not a member); when Bob
+// and microphone. Each must decode the other's audio and video. A second device of Alice's joins
+// beside her first and is seen and heard by the others, a third is refused by chat (a call takes
+// two devices of each member, ADR-0131), and Carol is refused by chat (not a member); when Bob
 // leaves Alice sees him go, and Bob, back on a new socket, gets a fresh ticket and the call
 // resumes. Every ticket comes from chat_server; LiveKit's key is only in chat's environment
 // (docs/integration/calls.md, ADR-0087).
@@ -154,21 +155,33 @@ test('a direct chat call, asked for on chat and connected in the browser', async
       await expectDecoding(bob.page, alice.identity);
     });
 
-    await test.step("alice's second device and carol are refused", async () => {
-      // Chat gives Alice's second device a ticket of its own; LiveKit keeps the call to two.
+    await test.step("alice's second device joins, her third and carol are refused", async () => {
+      // A member's second device is let in beside the first (ADR-0131): chat tickets it, LiveKit
+      // admits it, and everyone in the call decodes it, as it decodes them.
       const second = await client('alice', nodeB);
       expect(await join(second)).toMatchObject({ type: 'joined', room });
       const secondTicket = await call(second);
-      expect(secondTicket).toMatchObject({ type: 'ticket', room });
-      const refused = await second.page.evaluate((t) => window.tryCall(t), secondTicket);
-      expect(refused.admitted, 'LiveKit admitted a third participant').toBe(false);
-      // The SDK reports only that its signal connection was refused; what LiveKit holds shows
-      // why: the call's two, and not the second device.
+      expect(secondTicket).toMatchObject({ type: 'ticket', room, call: aliceTicket.call });
+      second.identity = await second.page.evaluate((t) => window.connectCall(t), secondTicket);
+      expect(second.identity).toBe(`alice/${second.device}`);
+      await expectDecoding(bob.page, second.identity);
+      await expectDecoding(alice.page, second.identity);
+      await expectDecoding(second.page, bob.identity);
       const identities = (await participants(`${room}:1`)).map((p) => p.identity).sort();
-      expect(identities).toEqual([alice.identity, bob.identity].sort());
-      const secondIdentity = `alice/${second.device}`;
+      expect(identities).toEqual([alice.identity, bob.identity, second.identity].sort());
       for (const c of [alice, bob]) {
-        expect(await events(c.page, 'participant-connected', secondIdentity)).toHaveLength(0);
+        expect(await events(c.page, 'participant-connected', second.identity)).toHaveLength(1);
+      }
+      // A third is one more than a member brings: chat counts hers in the room and refuses it
+      // before LiveKit has to.
+      expect(await call(second, randomUUID()))
+        .toMatchObject({ type: 'error', reason: 'call_full', room });
+      expect((await participants(`${room}:1`)).map((p) => p.identity).sort()).toEqual(identities);
+      // The second device hangs up; the call goes on for the first two.
+      await second.page.evaluate(() => window.leaveCall());
+      for (const c of [alice, bob]) {
+        await expect.poll(() => events(c.page, 'participant-disconnected', second.identity),
+          { timeout: 10_000 }).toHaveLength(1);
       }
       await second.context.close();
 
