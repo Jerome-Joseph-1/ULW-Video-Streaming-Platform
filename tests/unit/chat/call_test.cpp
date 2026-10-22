@@ -1606,6 +1606,75 @@ TEST_F(GroupCallHandlerTest, WhoWasPutOutMayComeToTheNextCallOnceThisOneEnds) {
     EXPECT_NE(next, call);
 }
 
+// The generation a call moves to holds nobody until those who stay come back to it: the first of
+// them back, however long after the call's last ticket, finds the call it left, not an empty one
+// to end and start again (ADR-0113).
+TEST_F(GroupCallHandlerTest, TheFirstOneBackAfterAMoveFindsTheCallItLeft) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    ASSERT_EQ(ticket("carol"), call);
+    sfu_.connected = {in_call("alice", kDevice), in_call("bob", kDevice),
+                      in_call("carol", kDevice)};
+    clock_.advance(chat::RingLimits{}.caller_grace);
+    move("alice", chat::CallSignal::Expel, call, kRoom, "bob");
+    ASSERT_EQ(heard(chat::RingEvent::Moved), 4U);
+    // LiveKit closed generation 1 under everyone; nobody is in generation 2 yet.
+    sfu_.connected.clear();
+    clock_.advance(core::Millis{1'000});
+    handler_->sweep();
+    ask("carol");
+    ASSERT_EQ(sfu_.opens.size(), 1U);
+    EXPECT_EQ(sfu_.opens[0].generation, core::ports::MediaGeneration{2});
+    sfu_.open();
+    ASSERT_EQ(sfu_.joins.size(), 1U);
+    sfu_.issue();
+    EXPECT_EQ(answers_.back().outcome, CallOutcome::Ticket);
+    EXPECT_EQ(answers_.back().call, call);
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 0U);
+    EXPECT_EQ(handler_->ring_counters().stale, 0U);
+    EXPECT_EQ(handler_->calls(), 1U);
+}
+
+// The last one the owner admitted leaving, LiveKit is asked at once, and nobody there ends the
+// call then, though that last ticket is fresh: everyone it was given to has said they left.
+TEST_F(GroupCallHandlerTest, TheLastOneOutEndsTheCallAtOnceThoughTheirTicketIsFresh) {
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(ticket("bob"), call);
+    // Each hangs up the media first, then tells chat.
+    sfu_.connected.clear();
+    move("alice", chat::CallSignal::Leave, call);
+    move("bob", chat::CallSignal::Leave, call);
+    handler_->sweep();
+    EXPECT_EQ(handler_->calls(), 0U);
+    EXPECT_EQ(heard(chat::RingEvent::Ended), 4U);
+}
+
+// ADR-0129: a group call's ring is kept while it rings anyone, and goes once the last member it
+// rang has answered: the call is on from then, and the room's next owner must not end it.
+TEST_F(GroupCallHandlerTest, AGroupRingIsKeptUntilEveryoneItRangAnswered) {
+    handler_ = make(chat::CallLimits{.group_participants = 4});
+    FakeRingStore rings;
+    handler_->keep_rings(&rings);
+    const chat::CallId call = ticket("alice");
+    ASSERT_EQ(rings.puts.size(), 1U);
+    EXPECT_TRUE(rings.puts[0].group);
+    ASSERT_EQ(ticket("bob"), call);
+    ASSERT_EQ(ticket("carol"), call);
+    EXPECT_EQ(rings.rows.size(), 1U);
+    EXPECT_TRUE(rings.ends.empty());
+    ASSERT_EQ(ticket("dave"), call);
+    EXPECT_EQ(rings.ends, std::vector{call.uuid()});
+    EXPECT_TRUE(rings.rows.empty());
+    // The room's next owner finds nothing to end.
+    handler_ = make(chat::CallLimits{.group_participants = 4});
+    handler_->keep_rings(&rings);
+    plane_.sent.clear();
+    handler_->took_room(room_id());
+    EXPECT_TRUE(plane_.sent.empty());
+    EXPECT_EQ(handler_->ring_counters().moved, 0U);
+    handler_->keep_rings(nullptr);
+}
+
 TEST_F(GroupCallHandlerTest, ACallEndingWithNobodyPutOutWritesNothing) {
     const chat::CallId call = ticket("alice");
     const auto writes = plane_.steps.size();

@@ -663,14 +663,8 @@ TEST_F(GroupRingerTest, AMembersLeavingIsHeardAndTheLastOneOutEndsTheCall) {
     ASSERT_EQ(checks.size(), 1U);
     EXPECT_EQ(checks[0].second, call);
     EXPECT_FALSE(ringer_.idle(room_id()));
-    // Nobody listed right after a ticket may be someone still connecting: it says nothing yet.
-    ringer_.occupied(room_id(), call, false);
-    EXPECT_FALSE(ringer_.idle(room_id()));
-    clock_.advance(chat::RingLimits{}.occupancy_check);
-    ringer_.tick();
-    // Carol and dave are still rung meanwhile.
-    plane_.take();
-    ASSERT_EQ(ringer_.take_checks().size(), 1U);
+    // Nobody listed, right after the tickets though it is: everyone given one has left, so
+    // nobody is still connecting with one, and the call ends (calls.md).
     ringer_.occupied(room_id(), call, false);
     EXPECT_EQ(plane_.take(), all(RingEvent::Ended));
     EXPECT_TRUE(ringer_.idle(room_id()));

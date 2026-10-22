@@ -892,7 +892,7 @@ void Ringer::moved(const core::RoomId& room, const CallId& call,
     if (it == calls_.end() || it->second.id != call) {
         return;
     }
-    const Call& c = it->second;
+    Call& c = it->second;
     log_call(room, c.id, c.kind, c.caller, RingEvent::Moved, by, std::nullopt,
              std::span(&subject, 1));
     if (!everyone) {
@@ -900,6 +900,10 @@ void Ringer::moved(const core::RoomId& room, const CallId& call,
         tell(room, c, subject, RingEvent::Moved, by, subject);
         return;
     }
+    // The next generation holds nobody until those who stay come back to it with fresh tickets,
+    // which they ask for as they hear this: nobody listed there within caller_grace says nothing
+    // of the call, to a check or to the first of them back.
+    c.last_ticket = clock_.now();
     try {
         for (const core::UserId& to : members(c)) {
             tell(room, c, to, RingEvent::Moved, by, subject);
@@ -924,8 +928,11 @@ void Ringer::occupied(const core::RoomId& room, const CallId& call, std::optiona
     }
     Call& c = it->second;
     c.checking = false;
-    // A device given a ticket lately may be connecting still: nobody listed says nothing yet.
-    if (anyone == false && clock_.now() < c.last_ticket + limits_.caller_grace) {
+    // A device given a ticket lately may be connecting still: nobody listed says nothing yet,
+    // unless everyone given one has left a group call since, the last of them just now: whoever
+    // the SFU lists then is connected already (ADR-0113).
+    const bool all_left = c.kind == CallKind::Group && c.joined.empty();
+    if (anyone == false && !all_left && clock_.now() < c.last_ticket + limits_.caller_grace) {
         anyone = std::nullopt;
         asked = false;
     }
@@ -1210,7 +1217,8 @@ void Ringer::observe(const core::RoomId& room, const Call& call, RingEvent event
                                  .by = by,
                                  .expires_at = call.expires_at,
                                  .reason = reason,
-                                 .text = std::string(text)});
+                                 .text = std::string(text),
+                                 .rings = !call.answered || !call.ringing.empty()});
 }
 
 void Ringer::announce(const core::RoomId& room, const Call& call, RingEvent event,
