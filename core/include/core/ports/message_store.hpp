@@ -175,6 +175,14 @@ struct MemberEntry {
     friend bool operator==(const MemberEntry&, const MemberEntry&) = default;
 };
 
+// How far a member has read a room (ADR-0138): the newest seq they said they read.
+struct ReadMark {
+    UserId user;
+    std::uint64_t seq = 0;
+
+    friend bool operator==(const ReadMark&, const ReadMark&) = default;
+};
+
 // A page of a room's members, read for one of them. `asker_listed` false: the asker is not on the
 // list, and `members` is empty, whatever the list holds.
 struct Roster {
@@ -424,6 +432,15 @@ public:
     // (which reads as listed).
     virtual void roster(const RoomId& room, const Actor& asker, std::optional<UserId> after,
                         std::size_t limit, MessageCallback<Roster> done) = 0;
+    // Moves `user`'s read mark in the room forward to `seq` (ADR-0138), or to the room's latest
+    // seq when `seq` is past it. Answers the mark it moved to; nullopt when it did not move: the
+    // user is not listed, the mark is there already or further, or the room has no message yet.
+    // A member taken off the list loses their mark.
+    virtual void mark_read(const RoomId& room, const UserId& user, std::uint64_t seq,
+                           MessageCallback<std::optional<std::uint64_t>> done) = 0;
+    // The room's read marks, of those listed who have one, in byte order of their ids: at most
+    // kMaxMembersPage.
+    virtual void read_marks(const RoomId& room, MessageCallback<std::vector<ReadMark>> done) = 0;
     // Which of `others` (at most kMaxSharedAsked) share a direct or group chat with `user` now,
     // each once and in byte order of their ids: whose presence `user` may see (ADR-0056 as
     // amended by ADR-0096). A stream's live chat lists nobody and shares nothing; `user` is never

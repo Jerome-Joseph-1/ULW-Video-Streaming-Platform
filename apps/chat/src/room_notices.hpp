@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <optional>
 #include <span>
+#include <variant>
 #include <vector>
 
 // What the chat service hands the room plane as unsequenced notices (rt::RoomRouter::notify), as
@@ -35,5 +36,25 @@ struct ActivityNotice {
 [[nodiscard]] std::optional<ActivityNotice> decode_activity(std::span<const std::byte> bytes);
 // Whether the notice is in the activity layout, by its first byte alone.
 [[nodiscard]] bool is_activity(std::span<const std::byte> bytes) noexcept;
+
+// Told to the room itself, so that it reaches the room's joined sockets on every node that has
+// some (ADR-0138): a member is typing, never stored; or a member's read mark moved, once stored.
+struct TypingNotice {
+    core::RoomId room;
+    core::UserId user;
+};
+
+struct ReadNotice {
+    core::RoomId room;
+    core::UserId user;
+    std::uint64_t seq = 0;
+};
+
+using RoomNotice = std::variant<TypingNotice, ReadNotice>;
+
+[[nodiscard]] std::vector<std::byte> encode_typing(const TypingNotice& notice);
+[[nodiscard]] std::vector<std::byte> encode_read(const ReadNotice& notice);
+// Either, or nullopt for any other layout, or one that does not read whole.
+[[nodiscard]] std::optional<RoomNotice> decode_room_notice(std::span<const std::byte> bytes);
 
 } // namespace chat

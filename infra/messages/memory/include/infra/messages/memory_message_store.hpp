@@ -89,6 +89,10 @@ public:
                 core::ports::MessageCallback<core::ports::Roster> done) override;
     void shared_with(const core::UserId& user, std::vector<core::UserId> others,
                      core::ports::MessageCallback<std::vector<core::UserId>> done) override;
+    void mark_read(const core::RoomId& room, const core::UserId& user, std::uint64_t seq,
+                   core::ports::MessageCallback<std::optional<std::uint64_t>> done) override;
+    void read_marks(const core::RoomId& room,
+                    core::ports::MessageCallback<std::vector<core::ports::ReadMark>> done) override;
 
     void on_timeout() noexcept override;
 
@@ -128,6 +132,9 @@ private:
     std::unordered_map<core::RoomId, Members> members_;
     // As recorded by each room's first join or member, or by record_live.
     std::unordered_map<core::RoomId, core::ports::RoomKind> kinds_;
+    // Each member's read mark (ADR-0138), in byte order of their ids; a member taken off a list
+    // is taken off here too.
+    std::unordered_map<core::RoomId, std::map<core::UserId, std::uint64_t, ByteOrder>> marks_;
 };
 
 } // namespace infra::messages

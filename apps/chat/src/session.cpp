@@ -691,6 +691,18 @@ void Session::command(const codec::ws::Frame& frame) {
         chat.list_members(*client_, *m);
         return;
     }
+    if (const auto* t = std::get_if<Typing>(&*parsed)) {
+        chat.typing(*client_, *t);
+        return;
+    }
+    if (const auto* r = std::get_if<MarkRead>(&*parsed)) {
+        chat.mark_read(*client_, *r);
+        return;
+    }
+    if (const auto* r = std::get_if<ListReads>(&*parsed)) {
+        chat.list_reads(*client_, *r);
+        return;
+    }
     server_.presence().unwatch(*presence_, std::get<Unwatch>(*parsed).user);
 }
 

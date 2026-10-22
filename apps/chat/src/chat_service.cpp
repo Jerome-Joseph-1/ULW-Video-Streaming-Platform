@@ -1207,6 +1207,52 @@ void ChatService::delivered(Room& room, const rt::Message& message) noexcept {
     }
 }
 
+void ChatService::on_notice(const core::RoomId& room, std::span<const std::byte> body) noexcept {
+    const auto notice = decode_room_notice(body);
+    if (!notice) {
+        ++counters_.room_notices_malformed;
+        return;
+    }
+    Room* r = find(room);
+    if (r == nullptr) {
+        return;
+    }
+    std::string& text = delivery_text_;
+    text.clear();
+    try {
+        if (const auto* typing = std::get_if<TypingNotice>(&*notice)) {
+            if (typing->room != room) {
+                ++counters_.room_notices_malformed;
+                return;
+            }
+            write_typing(text, room, typing->user);
+            // The typist's own clients know.
+            for (const Room::Subscriber& s : r->subscribers) {
+                const Client* c = find(s.id);
+                if (c != nullptr && c->user != typing->user && s.client->push(text)) {
+                    ++counters_.typing_pushed;
+                }
+            }
+            return;
+        }
+        const auto* read_notice = std::get_if<ReadNotice>(&*notice);
+        if (read_notice == nullptr || read_notice->room != room) {
+            ++counters_.room_notices_malformed;
+            return;
+        }
+        const ReadNotice& read = *read_notice;
+        write_read(text, room, read.user, read.seq);
+        for (const Room::Subscriber& s : r->subscribers) {
+            if (s.client->push(text)) {
+                ++counters_.read_events;
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        // Nobody here is told; a read mark is still stored, and reads says it.
+        ++counters_.allocation_failures;
+    }
+}
+
 void ChatService::fell_behind(ClientId id, const core::RoomId& room) noexcept {
     Client* c = find(id);
     if (c == nullptr) {
@@ -1387,6 +1433,7 @@ void ChatService::sweep() noexcept {
     // A full bucket is the same as none.
     std::erase_if(joins_, [now](const auto& entry) { return entry.second.full(now); });
     std::erase_if(sends_, [now](const auto& entry) { return entry.second.full(now); });
+    std::erase_if(reads_, [now](const auto& entry) { return entry.second.full(now); });
     std::erase_if(refusals_, [now](const auto& entry) { return entry.second.full(now); });
     std::erase_if(memberships_, [now](const auto& entry) { return entry.second.full(now); });
 }
@@ -1394,6 +1441,7 @@ void ChatService::sweep() noexcept {
 void ChatService::leave(ClientId id, Client& c, const core::RoomId& room) noexcept {
     std::erase(c.rooms, room);
     std::erase(c.behind, room);
+    std::erase_if(c.marked, [&](const auto& mark) { return mark.first == room; });
     Room* r = find(room);
     if (r == nullptr) {
         return;

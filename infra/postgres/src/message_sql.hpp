@@ -327,6 +327,26 @@ SELECT m.room_id, r.kind, m.role,
  ORDER BY m.room_id
  LIMIT $2)sql";
 
+// $2's read mark in room $1 moved forward to $3, or to the room's latest seq when $3 is past it
+// (ADR-0138): only while $2 is listed (the foreign key takes the mark with the member), and only
+// forward, so a repeat, or a mark from a device that read less, writes nothing. Answers the mark
+// it moved to, or no row.
+inline constexpr Sql kMarkRead = R"sql(
+WITH mark AS (
+    SELECT least($3::bigint,
+                 coalesce((SELECT last_seq FROM room_state WHERE room_id = $1), 0)) AS seq)
+INSERT INTO chat_read_marks AS r (room_id, user_id, seq)
+SELECT $1, $2, mark.seq FROM mark
+ WHERE mark.seq > 0
+   AND EXISTS (SELECT 1 FROM chat_members WHERE room_id = $1 AND user_id = $2)
+ON CONFLICT (room_id, user_id) DO UPDATE SET seq = EXCLUDED.seq, read_at = now()
+ WHERE r.seq < EXCLUDED.seq
+RETURNING seq)sql";
+
+// The room's read marks by member id, by its primary key. $2 the row limit.
+inline constexpr Sql kReadMarks = R"sql(
+SELECT user_id, seq FROM chat_read_marks WHERE room_id = $1 ORDER BY user_id LIMIT $2)sql";
+
 // A page of the room's members and roles, for $2 only while listed, or for the operator's
 // service ($5, with $2 empty), which reads as listed. Always one row at least: the first column
 // says whether $2 is listed, and a page with nobody (past the end, or for someone not listed) is

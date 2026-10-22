@@ -64,6 +64,7 @@ enum class Op : std::uint8_t {
     Presence,
     DisconnectUser,
     History,
+    Reads,
 };
 
 Op op_of(std::string_view target) noexcept {
@@ -71,7 +72,7 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 16> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 17> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
@@ -88,6 +89,7 @@ Op op_of(std::string_view target) noexcept {
         {"presence", Op::Presence},
         {"disconnect_user", Op::DisconnectUser},
         {"history", Op::History},
+        {"reads", Op::Reads},
     }};
     const auto* found = std::ranges::find(kOps, name, &std::pair<std::string_view, Op>::first);
     return found == kOps.end() ? Op::None : found->second;
@@ -631,6 +633,9 @@ private:
         case Op::History:
             started = history(*json);
             break;
+        case Op::Reads:
+            started = reads(*json);
+            break;
         case Op::None:
             started = std::unexpected(Refusal{.status = Status::NotFound, .reason = "not_found"});
             break;
@@ -1054,6 +1059,27 @@ private:
                                          rooms.size() > limit);
                                      c.answered(Status::Ok, out);
                                  }));
+        return {};
+    }
+
+    // Every member's read mark in the room (ADR-0138), as the socket's reads answers.
+    Parsed<void> reads(const core::json::Value& body) {
+        if (!only(body, {"room"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto room = room_of(body, "room");
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        api_.store_.read_marks(*room,
+                               reply<std::vector<core::ports::ReadMark>>(
+                                   [room = *room](Connection& c, ServiceApi& api,
+                                                  const std::vector<core::ports::ReadMark>& marks) {
+                                       ++api.counters_.reads;
+                                       std::string out;
+                                       write_reads(out, room, marks);
+                                       c.answered(Status::Ok, out);
+                                   }));
         return {};
     }
 

@@ -39,6 +39,11 @@
 //       "before":<seq>       optional: those below it, newest first (the default: the newest)
 //       "after":<seq>        optional, instead of before: those above it, oldest first
 //       "limit":<n>          optional: 1 to 100, 50 when absent
+//   {"type":"typing","room":"<uuid>"}   this user is typing in a room this connection joined:
+//       lossy, never stored, at most one a second from each connection (ADR-0138)
+//   {"type":"read","room":"<uuid>","seq":<seq>}   this user read the room up to seq: stored,
+//       only ever moving forward, and told to the room's joined connections
+//   {"type":"reads","room":"<uuid>"}   every member's read mark in a room this connection joined
 //   {"type":"watch","user":"<sub>"}     hear when the user comes online or goes offline
 //   {"type":"unwatch","user":"<sub>"}   stop; unanswered
 //   {"type":"call","room":"<uuid>","device":"<uuid>"}   a ticket to the room's call, for this
@@ -83,6 +88,12 @@
 //    "body":"<base64url>"}
 //   {"type":"history","room":"<uuid>","count":<n>}   ends a history answer, after its n
 //                                                   messages; 0 when there are no more
+//   {"type":"typing","room":"<uuid>","user":"<sub>"}   unasked, to the room's joined connections
+//       of other users: that member is typing
+//   {"type":"read","room":"<uuid>","user":"<sub>","seq":<integer>}   unasked, to the room's joined
+//       connections, the reader's own included: that member's read mark moved to seq
+//   {"type":"reads","room":"<uuid>","reads":[{"user":"<sub>","seq":<integer>}]}   the answer to
+//       reads: each member with a mark
 //   {"type":"watching","user":"<sub>","status":"online"|"offline"}   the answer to watch: what
 //                                                                   this node knows now
 //   {"type":"presence","user":"<sub>","status":"online"|"offline"}   each change after that
@@ -246,6 +257,22 @@ struct Part {
     core::RoomId room;
 };
 
+// typing: lossy, never stored, for a room the connection joined (ADR-0138).
+struct Typing {
+    core::RoomId room;
+};
+
+// read: the user read the room up to `seq` (ADR-0138).
+struct MarkRead {
+    core::RoomId room;
+    std::uint64_t seq = 0;
+};
+
+// reads: the room's read marks.
+struct ListReads {
+    core::RoomId room;
+};
+
 // ping: answered pong at once, with `rid` echoed, so a browser, which cannot see WebSocket pings,
 // can time its own liveness check (ADR-0122).
 struct Ping {
@@ -316,7 +343,7 @@ using DirectoryCommand =
 using Command =
     std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery, Part, Ping,
                  SocketState, IceServersRequest, OpenDirect, CreateGroup, AddMembers, RemoveMember,
-                 LeaveRoom, ListRooms, ListMembers, DirectoryCommand>;
+                 LeaveRoom, ListRooms, ListMembers, DirectoryCommand, Typing, MarkRead, ListReads>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -375,6 +402,14 @@ void write_ice_servers(std::string& out, const core::RoomId& room,
 void write_ticket(std::string& out, const core::RoomId& room,
                   const core::ports::MediaTicket& ticket,
                   const std::optional<CallId>& call = std::nullopt);
+// Unasked, to a room's joined connections (ADR-0138): {"type":"typing","room":..,"user":..} and
+// {"type":"read","room":..,"user":..,"seq":..}. {"type":"reads","room":..,"reads":[..]}: the
+// answer to reads.
+void write_typing(std::string& out, const core::RoomId& room, const core::UserId& user);
+void write_read(std::string& out, const core::RoomId& room, const core::UserId& user,
+                std::uint64_t seq);
+void write_reads(std::string& out, const core::RoomId& room,
+                 std::span<const core::ports::ReadMark> marks);
 // {"type":"activity","room":..,"seq":..,"sender":..,"at":..,"quiet":..}: unasked, to every
 // socket of a member, joined or not, as a room they are on moves on (ADR-0137).
 void write_activity(std::string& out, const ActivityNotice& notice);

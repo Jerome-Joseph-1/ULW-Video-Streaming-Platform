@@ -50,6 +50,9 @@ public:
     [[nodiscard]] BellId attach(IClient& client, const core::UserId& user);
     // Where the rooms' rings are read; nullptr: nowhere. Must outlive the bell.
     void replay_from(core::ports::IRingStore* store) noexcept { store_ = store; }
+    // Who hears the notices of rooms that are not presence rooms (typing and read marks,
+    // ADR-0138): the chat service; nullptr, the start, counts them as malformed.
+    void hear_rooms(rt::INoticeListener* rooms) noexcept { rooms_ = rooms; }
     void detach(BellId id) noexcept;
 
     void on_notice(const core::RoomId& room, std::span<const std::byte> body) noexcept override;
@@ -75,6 +78,7 @@ private:
     // The event's text, kept between notices.
     std::string text_;
     core::ports::IRingStore* store_ = nullptr;
+    rt::INoticeListener* rooms_ = nullptr;
     // The store's answers may come after the bell is gone.
     std::shared_ptr<int> alive_ = std::make_shared<int>(0);
 };

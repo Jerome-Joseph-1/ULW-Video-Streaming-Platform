@@ -868,6 +868,43 @@ TEST_F(MessageStoreTest, AUsersRoomsSayTheirLatestSeqAndWhenItWasSequenced) {
     EXPECT_EQ(bare->last_at, std::nullopt);
 }
 
+// ADR-0138: a read mark is a row of its own, written only when it moves forward, gone with its
+// member by the foreign key, and read back by the room's key; a row no writer here produces is
+// Corrupt.
+TEST_F(MessageStoreTest, AReadMarkIsARowThatMovesForwardAndGoesWithItsMember) {
+    const core::RoomId room = new_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(room, alice_, std::move(done)); }));
+    const auto mark = [&](std::uint64_t seq) {
+        return ask<std::optional<std::uint64_t>>(
+            [&](auto done) { store_->mark_read(room, alice_, seq, std::move(done)); });
+    };
+    const auto marks = [&]() {
+        return ask<std::vector<core::ports::ReadMark>>(
+            [&](auto done) { store_->read_marks(room, std::move(done)); });
+    };
+    EXPECT_EQ(mark(1), MessageResult<std::optional<std::uint64_t>>{std::nullopt});
+    const std::uint64_t generation = own(room);
+    ASSERT_TRUE(write(room, generation, bytes("one")));
+    ASSERT_TRUE(write(room, generation, bytes("two")));
+    EXPECT_EQ(mark(5), (MessageResult<std::optional<std::uint64_t>>{2U}));
+    EXPECT_EQ(mark(2), MessageResult<std::optional<std::uint64_t>>{std::nullopt});
+    EXPECT_EQ(scalar(*conn_, "SELECT seq FROM chat_read_marks WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "2");
+    EXPECT_EQ(marks(), (std::vector<core::ports::ReadMark>{{.user = alice_, .seq = 2}}));
+    ASSERT_TRUE(
+        conn_->exec("ALTER TABLE chat_read_marks DROP CONSTRAINT chat_read_marks_seq_check"));
+    ASSERT_TRUE(conn_->exec("UPDATE chat_read_marks SET seq = -1 WHERE room_id = $1",
+                            Params{}.add_uuid(room.uuid())));
+    EXPECT_EQ(marks(), std::unexpected(core::ports::MessageStoreError::Corrupt));
+    ASSERT_TRUE(
+        ask<void>([&](auto done) { store_->remove_member(room, alice_, std::move(done)); }));
+    EXPECT_EQ(scalar(*conn_, "SELECT count(*) FROM chat_read_marks WHERE room_id = $1",
+                     Params{}.add_uuid(room.uuid())),
+              "0");
+    EXPECT_EQ(marks(), std::vector<core::ports::ReadMark>{});
+}
+
 // Who shares a chat with whom is read from the asker's rooms by their index, each probed for the
 // others by primary key: never a scan of every list, however many there are.
 TEST_F(MessageStoreTest, WhoSharesAChatIsReadThroughTheIndexesAlone) {

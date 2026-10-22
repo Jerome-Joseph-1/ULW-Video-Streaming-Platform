@@ -1442,6 +1442,35 @@ TEST_P(ChatClusterTest, ADirectChatOpenedOnOneNodeIsTheSameRoomOnEveryOtherAndTh
               "not_group");
 }
 
+// ADR-0138: typing on one node reaches the other member's joined socket on another, and a read
+// mark, stored once, reaches every joined socket and is read back on any node.
+TEST_P(ChatClusterTest, TypingAndReadMarksCrossNodes) {
+    auto alice = connect(nodes_[0], 0);
+    auto bob = connect(nodes_[1], 1);
+    ASSERT_TRUE(alice && bob);
+    const std::string room = open_direct(*alice, "bob");
+    ASSERT_EQ(room.find("error"), std::string::npos) << room;
+    EXPECT_EQ(join_again(*alice, room), "joined");
+    EXPECT_EQ(join_again(*bob, room), "joined");
+
+    ASSERT_TRUE(alice->send(R"({"type":"typing","room":")" + room + R"("})"));
+    const auto typing = bob->wait_for(
+        [&](const Seen& s) { return s.type == "typing" && s.room == room && s.user == "alice"; });
+    ASSERT_TRUE(typing);
+
+    ASSERT_TRUE(bob->send(send_command(room, "seen?", "r1")));
+    ASSERT_TRUE(alice->message("seen?"));
+    ASSERT_TRUE(alice->send(R"({"type":"read","room":")" + room + R"(","seq":1})"));
+    const auto read = bob->wait_for(
+        [&](const Seen& s) { return s.type == "read" && s.room == room && s.user == "alice"; });
+    ASSERT_TRUE(read);
+    EXPECT_EQ(read->seq, 1U);
+    const auto reads = ask(*bob, R"({"type":"reads","room":")" + room + R"("})", "reads");
+    ASSERT_TRUE(reads);
+    EXPECT_NE(reads->raw.find(R"("reads":[{"user":"alice","seq":1}])"), std::string::npos)
+        << reads->raw;
+}
+
 // A group made on one node, changed by its admin on another: each change reaches the user it
 // names and everyone in the room, whichever node they are on, and a removed member is out of the
 // room at once.

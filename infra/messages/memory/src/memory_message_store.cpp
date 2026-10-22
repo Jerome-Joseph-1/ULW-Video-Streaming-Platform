@@ -164,6 +164,9 @@ void MemoryMessageStore::remove_member(const core::RoomId& room, const core::Use
     if (const auto it = members_.find(room); it != members_.end()) {
         removed = it->second.erase(user) != 0;
     }
+    if (const auto marks = marks_.find(room); marks != marks_.end()) {
+        marks->second.erase(user);
+    }
     defer([this, done = std::move(done), removed, room, user]() mutable noexcept {
         done({});
         if (removed && listener_ != nullptr) {
@@ -276,6 +279,12 @@ namespace {
 void MemoryMessageStore::answer_change(MembershipChange change, bool added,
                                        const core::RoomId& room,
                                        MessageCallback<MembershipChange> done) {
+    // A member taken off a list loses their read mark, as the durable store's foreign key does.
+    if (const auto marks = marks_.find(room); !added && marks != marks_.end()) {
+        for (const core::UserId& user : change.changed) {
+            marks->second.erase(user);
+        }
+    }
     defer(
         [this, change = std::move(change), added, room, done = std::move(done)]() mutable noexcept {
             // The listener hears of the change after its answer, as the durable store's
@@ -557,6 +566,45 @@ void MemoryMessageStore::roster(const core::RoomId& room, const core::ports::Act
              from != members.end() && out.members.size() < rows; ++from) {
             out.members.push_back(
                 core::ports::MemberEntry{.user = from->first, .role = from->second});
+        }
+    }
+    defer([done = std::move(done), out = std::move(out)]() mutable noexcept {
+        done(std::move(out));
+    });
+}
+
+void MemoryMessageStore::mark_read(const core::RoomId& room, const core::UserId& user,
+                                   std::uint64_t seq,
+                                   MessageCallback<std::optional<std::uint64_t>> done) {
+    std::uint64_t latest = 0;
+    if (const auto it = rooms_.find(room); it != rooms_.end()) {
+        latest = it->second.last;
+        if (!it->second.messages.empty()) {
+            latest = std::max(latest, it->second.messages.rbegin()->first);
+        }
+    }
+    const std::uint64_t to = std::min(seq, latest);
+    std::optional<std::uint64_t> moved;
+    const auto listed = members_.find(room);
+    if (to > 0 && listed != members_.end() && listed->second.contains(user)) {
+        std::uint64_t& mark = marks_[room][user];
+        if (mark < to) {
+            mark = to;
+            moved = to;
+        }
+    }
+    defer([done = std::move(done), moved]() mutable noexcept { done(moved); });
+}
+
+void MemoryMessageStore::read_marks(const core::RoomId& room,
+                                    MessageCallback<std::vector<core::ports::ReadMark>> done) {
+    std::vector<core::ports::ReadMark> out;
+    if (const auto it = marks_.find(room); it != marks_.end()) {
+        for (const auto& [user, seq] : it->second) {
+            if (out.size() == core::ports::kMaxMembersPage) {
+                break;
+            }
+            out.push_back(core::ports::ReadMark{.user = user, .seq = seq});
         }
     }
     defer([done = std::move(done), out = std::move(out)]() mutable noexcept {

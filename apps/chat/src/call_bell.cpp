@@ -113,6 +113,10 @@ void CallBell::activity(const core::RoomId& room, std::span<const std::byte> bod
 }
 
 void CallBell::on_notice(const core::RoomId& room, std::span<const std::byte> body) noexcept {
+    if (rooms_ != nullptr && !is_presence_room(room)) {
+        rooms_->on_notice(room, body);
+        return;
+    }
     try {
         if (is_activity(body)) {
             activity(room, body);

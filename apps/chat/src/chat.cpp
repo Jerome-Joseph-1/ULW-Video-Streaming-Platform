@@ -139,6 +139,7 @@ ChatServer::ChatServer(Deps deps, Access access, Limits limits)
     }
     deps_.router.serve(&calls_);
     deps_.router.hear(&bell_);
+    bell_.hear_rooms(&chat_);
     chat_.also_tell(&calls_);
     chat_.also_tell(&presence_);
     if (deps_.notifier != nullptr) {
@@ -168,6 +169,7 @@ ChatServer::~ChatServer() {
     calls_.watch_rings(nullptr);
     deps_.router.serve(nullptr);
     deps_.router.hear(nullptr);
+    bell_.hear_rooms(nullptr);
     deps_.reactor.cancel_timer(drain_timer_);
     sessions_.for_each_live([](Session& s) { s.close(); });
     reap();
@@ -584,6 +586,20 @@ std::string ChatServer::render_metrics() const {
                        "activity_rooms {}\n",
                        chat.activity_notices, chat.activity_folded, chat.activity_failures,
                        bell.activity, chat_.activity_rooms()) +
+           // Typing and read marks (ADR-0138).
+           std::format("typing_total{{outcome=\"sent\"}} {}\n"
+                       "typing_total{{outcome=\"dropped\"}} {}\n"
+                       "typing_pushed_total {}\n"
+                       "read_marks_total{{outcome=\"moved\"}} {}\n"
+                       "read_marks_total{{outcome=\"unmoved\"}} {}\n"
+                       "read_marks_total{{outcome=\"failed\"}} {}\n"
+                       "read_marks_total{{outcome=\"rate_limited\"}} {}\n"
+                       "read_events_total {}\n"
+                       "read_listings_total {}\n"
+                       "room_notices_malformed_total {}\n",
+                       chat.typing_sent, chat.typing_dropped, chat.typing_pushed, chat.reads_marked,
+                       chat.reads_unmoved, chat.reads_failed, chat.reads_rate_limited,
+                       chat.read_events, chat.reads_listed, chat.room_notices_malformed) +
            // Member lists changed by their users (ADR-0096).
            std::format("directs_opened_total {}\n"
                        "groups_created_total {}\n"

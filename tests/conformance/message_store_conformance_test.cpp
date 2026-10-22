@@ -1111,6 +1111,42 @@ TEST_P(MembershipConformance, AMembersOwnRoomsPageInIdOrderWithTheirKindRoleAndP
     EXPECT_EQ(rooms_of(dave_, std::nullopt, 10), std::vector<RoomEntry>{});
 }
 
+// ADR-0138: a member's read mark moves only forward, never past the room's latest seq, only while
+// they are listed, and goes with them when they are taken off.
+TEST_P(MembershipConformance, AReadMarkMovesOnlyForwardAndGoesWithItsMember) {
+    const core::RoomId room = group();
+    const auto mark = [&](const core::UserId& user, std::uint64_t seq) {
+        return ask<std::optional<std::uint64_t>>(
+            [&](auto done) { store().mark_read(room, user, seq, std::move(done)); });
+    };
+    const auto marks = [&]() {
+        return ask<std::vector<core::ports::ReadMark>>(
+            [&](auto done) { store().read_marks(room, std::move(done)); });
+    };
+    const MessageResult<std::optional<std::uint64_t>> unmoved{std::nullopt};
+    // Nothing to read yet.
+    EXPECT_EQ(mark(bob_, 1), unmoved);
+    backend_->open(room);
+    for (int i = 0; i < 3; ++i) {
+        ASSERT_TRUE(write(room, alice_, bytes("m")));
+    }
+    EXPECT_EQ(mark(bob_, 2), (MessageResult<std::optional<std::uint64_t>>{2U}));
+    EXPECT_EQ(mark(bob_, 2), unmoved);
+    EXPECT_EQ(mark(bob_, 1), unmoved);
+    EXPECT_EQ(mark(bob_, 99), (MessageResult<std::optional<std::uint64_t>>{3U}));
+    EXPECT_EQ(mark(carol_, 1), (MessageResult<std::optional<std::uint64_t>>{1U}));
+    EXPECT_EQ(mark(dave_, 1), unmoved);
+    EXPECT_EQ(marks(), (std::vector<core::ports::ReadMark>{{.user = bob_, .seq = 3},
+                                                           {.user = carol_, .seq = 1}}));
+    // Off the list, the mark goes; listed again, it starts afresh.
+    ASSERT_EQ(expel(room, alice_, bob_), done({bob_}));
+    EXPECT_EQ(marks(), (std::vector<core::ports::ReadMark>{{.user = carol_, .seq = 1}}));
+    ASSERT_EQ(add(room, alice_, {bob_}), done({bob_}));
+    EXPECT_EQ(mark(bob_, 1), (MessageResult<std::optional<std::uint64_t>>{1U}));
+    ASSERT_TRUE(ask<void>([&](auto d) { store().remove_member(room, carol_, std::move(d)); }));
+    EXPECT_EQ(marks(), (std::vector<core::ports::ReadMark>{{.user = bob_, .seq = 1}}));
+}
+
 // ADR-0137: each of a member's rooms says its latest seq and when its newest message was
 // sequenced; a room with none says seq 0 and no time.
 TEST_P(MembershipConformance, AMembersRoomsSayTheirLatestSeqAndWhen) {

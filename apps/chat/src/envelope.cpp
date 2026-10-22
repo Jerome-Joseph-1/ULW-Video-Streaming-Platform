@@ -850,6 +850,32 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     if (name == "rooms") {
         return rooms_of(*message);
     }
+    if (name == "typing" || name == "reads") {
+        if (!only(*message, {"type", "room"})) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        auto room = room_of(*message);
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        if (name == "typing") {
+            return Typing{.room = *room};
+        }
+        return ListReads{.room = *room};
+    }
+    if (name == "read") {
+        const core::json::Value* seq = message->find("seq");
+        // A seq is 1 or more: 0, or no whole number at all, marks nothing.
+        const std::uint64_t value = seq != nullptr ? seq->as_u64().value_or(0) : 0;
+        if (!only(*message, {"type", "room", "seq"}) || value == 0) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        auto room = room_of(*message);
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        return MarkRead{.room = *room, .seq = value};
+    }
     if (name == "members") {
         return members_of(*message);
     }
@@ -1033,6 +1059,36 @@ void write_ticket(std::string& out, const core::RoomId& room,
         infra::turn::append_ice_servers(out, ticket.ice_servers);
     }
     out += '}';
+}
+
+void write_typing(std::string& out, const core::RoomId& room, const core::UserId& user) {
+    out += R"({"type":"typing",)";
+    append_room(out, room);
+    append_user(out, "user", user);
+    out += '}';
+}
+
+void write_read(std::string& out, const core::RoomId& room, const core::UserId& user,
+                std::uint64_t seq) {
+    out += R"({"type":"read",)";
+    append_room(out, room);
+    append_user(out, "user", user);
+    std::format_to(std::back_inserter(out), R"(,"seq":{}}})", seq);
+}
+
+void write_reads(std::string& out, const core::RoomId& room,
+                 std::span<const core::ports::ReadMark> marks) {
+    out += R"({"type":"reads",)";
+    append_room(out, room);
+    out += R"(,"reads":[)";
+    bool first = true;
+    for (const core::ports::ReadMark& mark : marks) {
+        out += first ? R"({"user":)" : R"(,{"user":)";
+        first = false;
+        core::json::append_string(out, mark.user.view());
+        std::format_to(std::back_inserter(out), R"(,"seq":{}}})", mark.seq);
+    }
+    out += "]}";
 }
 
 void write_activity(std::string& out, const ActivityNotice& notice) {
