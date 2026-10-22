@@ -65,6 +65,16 @@ public:
                          core::ports::MessageCallback<void> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
     }
+    void mark_read(const core::RoomId& /*room*/, const core::UserId& /*user*/,
+                   std::uint64_t /*seq*/,
+                   core::ports::MessageCallback<std::optional<std::uint64_t>> done) override {
+        done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
+    void
+    read_marks(const core::RoomId& /*room*/,
+               core::ports::MessageCallback<std::vector<core::ports::ReadMark>> done) override {
+        done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
 };
 
 } // namespace ulw::test

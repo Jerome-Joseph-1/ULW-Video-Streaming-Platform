@@ -179,6 +179,16 @@ struct ServiceLimits {
     // the next notice. A second is as soon as a room list needs to move, and holds a group of 100
     // members to 100 notices a second whatever its senders here send.
     core::Millis activity_interval{1'000};
+    // ADR-0138. A client says typing every few seconds while its user types, and again in each
+    // room it switches to: three at once and one a second after that, from each connection, is
+    // that with room to spare, and each is a notice to every node in the room. More are dropped.
+    std::uint32_t typing_burst = 3;
+    core::Millis typing_interval{1'000};
+    // Read marks per user, across all their connections on this node: each that moves is a
+    // write. A client marks as it shows messages, at most as fast as they come, and only a mark
+    // past what its connection already marked is written: as many as sends, and the same rate.
+    std::uint32_t read_burst = 10;
+    std::uint32_t reads_per_second = 2;
     // How long a room stays joined, and its messages kept, after its last client here left:
     // a page reload, a network switch, or a slow reader's reconnect take seconds; a client's
     // backoff reaches half a minute after a few failures.
@@ -233,6 +243,22 @@ struct ServiceCounters {
     std::uint64_t activity_notices = 0;
     std::uint64_t activity_folded = 0;
     std::uint64_t activity_failures = 0;
+    // Typing (ADR-0138): notices sent for clients here, those dropped past a connection's
+    // allowance, and typing frames pushed to clients here.
+    std::uint64_t typing_sent = 0;
+    std::uint64_t typing_dropped = 0;
+    std::uint64_t typing_pushed = 0;
+    // Read marks (ADR-0138): marks the store moved, marks it left where they were (not forward,
+    // or the user not listed), writes that failed, marks refused past the user's allowance, read
+    // frames pushed to clients here, and reads answered.
+    std::uint64_t reads_marked = 0;
+    std::uint64_t reads_unmoved = 0;
+    std::uint64_t reads_failed = 0;
+    std::uint64_t reads_rate_limited = 0;
+    std::uint64_t read_events = 0;
+    std::uint64_t reads_listed = 0;
+    // Notices for a room here that did not decode, or named another room.
+    std::uint64_t room_notices_malformed = 0;
 };
 
 // Identifies an attached client; never reused while the service lives.
@@ -247,7 +273,7 @@ struct ClientId {
 // room's latest messages, and hands each message to every client in the room. Bodies are
 // opaque bytes here: carried, kept and passed on, never read. Everything runs on the reactor
 // thread.
-class ChatService final : public core::ports::IMemberListener {
+class ChatService final : public core::ports::IMemberListener, public rt::INoticeListener {
 public:
     // `messages` answers whether a room admits a user, and tells the service of removals from
     // member lists from construction on. Neither its answers nor its removals may reach a
@@ -304,6 +330,16 @@ public:
     void leave_room(ClientId id, const LeaveRoom& leave);
     void list_rooms(ClientId id, const ListRooms& list);
     void list_members(ClientId id, const ListMembers& list);
+    // Read receipts and typing (ADR-0138, receipts.cpp), for a direct or group chat the client
+    // joined. Typing is told to the room's joined clients of other users, on every node, and
+    // never stored; past the connection's allowance it is dropped, unanswered. A read mark is
+    // stored, only ever forward, and told to the room's joined clients, the reader's own
+    // included; `reads` answers every member's mark, charged as a join.
+    void typing(ClientId id, const Typing& typing);
+    void mark_read(ClientId id, const MarkRead& read);
+    void list_reads(ClientId id, const ListReads& reads);
+    // Typing and read marks for a room with clients here, from the room plane, pushed to them.
+    void on_notice(const core::RoomId& room, std::span<const std::byte> body) noexcept override;
     // The client's connection has sent everything it had queued: a lossy client that fell
     // behind is sent what it is still owed.
     void drained(ClientId id) noexcept;
@@ -398,6 +434,11 @@ private:
         // What resumes queued since the window started.
         std::size_t replayed_bytes = 0;
         core::MonoTime replay_window_start;
+        // Typing this connection may still tell (ServiceLimits::typing_burst).
+        std::optional<PacedBucket> typing = std::nullopt;
+        // Of `rooms`, the read marks this connection moved, and where to: a mark at or below
+        // these is not written again.
+        std::vector<std::pair<core::RoomId, std::uint64_t>> marked = {};
     };
 
     [[nodiscard]] Client* find(ClientId id) noexcept;
@@ -427,6 +468,12 @@ private:
     void sweep_activity(core::MonoTime now, bool full) noexcept;
     // The room's member list changed: what activity kept of it is read again.
     void forget_members(const core::RoomId& room) noexcept;
+    // The client, when it joined the room and the room is not a stream's live chat; told why not
+    // and nullptr otherwise.
+    [[nodiscard]] Client* in_room(ClientId id, const core::RoomId& room) noexcept;
+    void
+    read_marked(ClientId id, const core::RoomId& room, const core::UserId& user,
+                const core::ports::MessageResult<std::optional<std::uint64_t>>& result) noexcept;
     void
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
@@ -503,6 +550,7 @@ private:
     std::unordered_map<core::RoomId, std::unique_ptr<Room>> rooms_;
     std::unordered_map<core::UserId, TokenBucket> joins_;
     std::unordered_map<core::UserId, TokenBucket> sends_;
+    std::unordered_map<core::UserId, TokenBucket> reads_;
     // Refused joins, which may each have recorded a room.
     std::unordered_map<core::UserId, PacedBucket> refusals_;
     // Member-list changes (ServiceLimits::membership_burst).

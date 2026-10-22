@@ -1109,4 +1109,49 @@ TEST(Envelope, TheDirectorysAnswersAreWrittenAsDocumented) {
                        R"(","retry_after_ms":3000})");
 }
 
+// ADR-0138: typing and reads name a room alone; read names a seq of 1 or more.
+TEST(Envelope, TypingReadAndReadsNameTheirRoomAndReadASeq) {
+    const std::string room = R"("room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd")";
+    const auto id = *core::RoomId::parse("01a0eb86-6cca-7dce-84cc-3bb47615f9fd");
+    const auto typing = chat::parse_command(R"({"type":"typing",)" + room + "}");
+    ASSERT_TRUE(typing);
+    EXPECT_EQ(std::get<chat::Typing>(*typing).room, id);
+    const auto reads = chat::parse_command(R"({"type":"reads",)" + room + "}");
+    ASSERT_TRUE(reads);
+    EXPECT_EQ(std::get<chat::ListReads>(*reads).room, id);
+    const auto read = chat::parse_command(R"({"type":"read",)" + room + R"(,"seq":42})");
+    ASSERT_TRUE(read);
+    EXPECT_EQ(std::get<chat::MarkRead>(*read).room, id);
+    EXPECT_EQ(std::get<chat::MarkRead>(*read).seq, 42U);
+    for (const std::string& text :
+         {R"({"type":"typing",)" + room + R"(,"seq":1})", std::string(R"({"type":"reads"})"),
+          R"({"type":"read",)" + room + "}", R"({"type":"read",)" + room + R"(,"seq":0})",
+          R"({"type":"read",)" + room + R"(,"seq":-1})",
+          R"({"type":"read",)" + room + R"(,"seq":"7"})",
+          R"({"type":"read",)" + room + R"(,"seq":7,"user":"bob"})"}) {
+        EXPECT_EQ(chat::parse_command(text), std::unexpected(EnvelopeError::Malformed)) << text;
+    }
+    EXPECT_EQ(chat::parse_command(R"({"type":"typing","room":"nope"})"),
+              std::unexpected(EnvelopeError::BadRoom));
+    EXPECT_EQ(chat::parse_command(R"({"type":"read","room":"nope","seq":1})"),
+              std::unexpected(EnvelopeError::BadRoom));
+
+    std::string out;
+    const auto bob = *core::UserId::parse("bob");
+    chat::write_typing(out, id, bob);
+    EXPECT_EQ(out, "{\"type\":\"typing\"," + room + R"(,"user":"bob"})");
+    out.clear();
+    chat::write_read(out, id, bob, 7);
+    EXPECT_EQ(out, "{\"type\":\"read\"," + room + R"(,"user":"bob","seq":7})");
+    out.clear();
+    chat::write_reads(out, id, {});
+    EXPECT_EQ(out, "{\"type\":\"reads\"," + room + R"(,"reads":[]})");
+    out.clear();
+    const std::vector<core::ports::ReadMark> marks{
+        {.user = *core::UserId::parse("alice"), .seq = 3}, {.user = bob, .seq = 7}};
+    chat::write_reads(out, id, marks);
+    EXPECT_EQ(out, "{\"type\":\"reads\"," + room +
+                       R"(,"reads":[{"user":"alice","seq":3},{"user":"bob","seq":7}]})");
+}
+
 } // namespace

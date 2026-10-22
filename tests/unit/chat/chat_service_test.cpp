@@ -174,6 +174,25 @@ public:
     std::vector<core::UserId> listed;
     int member_reads = 0;
     bool members_fail = false;
+    void mark_read(const core::RoomId& /*room*/, const core::UserId& /*user*/, std::uint64_t seq,
+                   core::ports::MessageCallback<std::optional<std::uint64_t>> done) override {
+        marks_asked.push_back(seq);
+        done(mark_answer.value_or(std::optional(seq)));
+    }
+    void
+    read_marks(const core::RoomId& /*room*/,
+               core::ports::MessageCallback<std::vector<core::ports::ReadMark>> done) override {
+        if (marks_fail) {
+            done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+            return;
+        }
+        done(marks);
+    }
+    // The seqs mark_read was asked for; what it answers instead of moving to each.
+    std::vector<std::uint64_t> marks_asked;
+    std::optional<core::ports::MessageResult<std::optional<std::uint64_t>>> mark_answer;
+    std::vector<core::ports::ReadMark> marks;
+    bool marks_fail = false;
     using core::ports::IMessageStore::admits;
     void admits(const core::RoomId& room, const core::UserId& user, core::ports::RoomKind asked,
                 core::ports::Recording recording,
@@ -2556,6 +2575,157 @@ TEST_F(ChatServiceTest, AResyncRereadsTheListsActivityKept) {
     rooms_.sends.back().done(2);
     EXPECT_EQ(rooms_.notices.size(), 2U);
     EXPECT_EQ(messages_.member_reads, 2);
+}
+
+// ADR-0138: typing goes to the room as a notice, at most typing_burst at once from a connection,
+// and only for a direct or group chat it joined; heard back, it reaches the room's clients here
+// of other users.
+TEST_F(ChatServiceTest, TypingIsToldToTheRoomAndPushedToItsOtherMembersHere) {
+    FakeClient alice;
+    FakeClient alices_tab;
+    FakeClient bob;
+    const auto a = attach(alice);
+    const auto t = attach(alices_tab);
+    const auto b = attach(bob, "bob");
+    // Not joined yet.
+    service_->typing(a, {.room = room_id()});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
+    join(a);
+    join(t);
+    join(b);
+    rooms_.admit();
+    alice.take();
+    alices_tab.take();
+    bob.take();
+    for (int i = 0; i < 4; ++i) {
+        service_->typing(a, {.room = room_id()});
+    }
+    ASSERT_EQ(rooms_.notices.size(), 3U);
+    EXPECT_EQ(service_->counters().typing_sent, 3U);
+    EXPECT_EQ(service_->counters().typing_dropped, 1U);
+    EXPECT_TRUE(alice.take().empty());
+    const auto decoded = chat::decode_room_notice(rooms_.notices[0].body);
+    ASSERT_TRUE(decoded);
+    const auto* typing = std::get_if<chat::TypingNotice>(&*decoded);
+    ASSERT_NE(typing, nullptr);
+    EXPECT_EQ(typing->user.view(), "alice");
+    EXPECT_EQ(rooms_.notices[0].room, room_id());
+    // A second on, another.
+    clock_.advance(std::chrono::seconds(1));
+    service_->typing(a, {.room = room_id()});
+    EXPECT_EQ(rooms_.notices.size(), 4U);
+
+    service_->on_notice(room_id(), rooms_.notices[0].body);
+    EXPECT_TRUE(alice.take().empty());
+    EXPECT_TRUE(alices_tab.take().empty());
+    EXPECT_EQ(bob.take(), std::vector<std::string>{R"({"type":"typing","room":")" +
+                                                   std::string(kRoom) + R"(","user":"alice"})"});
+    EXPECT_EQ(service_->counters().typing_pushed, 1U);
+
+    // Junk, a notice naming another room, and a room with nobody here.
+    service_->on_notice(room_id(), bytes("junk"));
+    service_->on_notice(room_id(kOtherRoom), rooms_.notices[0].body);
+    const auto elsewhere =
+        chat::encode_typing({.room = room_id(kOtherRoom), .user = *core::UserId::parse("bob")});
+    service_->on_notice(room_id(), elsewhere);
+    EXPECT_EQ(service_->counters().room_notices_malformed, 2U);
+    EXPECT_TRUE(bob.take().empty());
+}
+
+// A stream's live chat takes neither typing nor read marks.
+TEST_F(ChatServiceTest, ALiveChatTakesNoTypingAndNoReadMarks) {
+    FakeClient viewer;
+    const auto v = attach(viewer);
+    join(v, std::nullopt, chat::Delivery::Lossy, kLiveRoom);
+    rooms_.admit();
+    viewer.take();
+    service_->typing(v, {.room = room_id(kLiveRoom)});
+    service_->mark_read(v, {.room = room_id(kLiveRoom), .seq = 1});
+    service_->list_reads(v, {.room = room_id(kLiveRoom)});
+    const auto refused = viewer.take();
+    ASSERT_EQ(refused.size(), 3U);
+    for (const std::string& r : refused) {
+        EXPECT_EQ(seen(r).reason, "not_allowed");
+    }
+    EXPECT_TRUE(rooms_.notices.empty());
+}
+
+// ADR-0138: a read mark is written once it moves past what the connection marked, told to the
+// room once the store moved it, and pushed to every client here in the room, the reader's own
+// included; reads answers every member's mark.
+TEST_F(ChatServiceTest, AReadMarkIsStoredOnlyForwardAndToldToTheRoom) {
+    FakeClient alice;
+    FakeClient bob;
+    const auto a = attach(alice);
+    const auto b = attach(bob, "bob");
+    service_->mark_read(a, {.room = room_id(), .seq = 3});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
+    join(a);
+    join(b);
+    rooms_.admit(9);
+    alice.take();
+    bob.take();
+
+    service_->mark_read(a, {.room = room_id(), .seq = 5});
+    ASSERT_EQ(messages_.marks_asked.size(), 1U);
+    EXPECT_EQ(messages_.marks_asked[0], 5U);
+    ASSERT_EQ(rooms_.notices.size(), 1U);
+    EXPECT_EQ(service_->counters().reads_marked, 1U);
+    // At or below what this connection marked: nothing written.
+    service_->mark_read(a, {.room = room_id(), .seq = 4});
+    service_->mark_read(a, {.room = room_id(), .seq = 5});
+    EXPECT_EQ(messages_.marks_asked.size(), 1U);
+    // The store left it where it was (another device read further): nobody is told.
+    messages_.mark_answer =
+        core::ports::MessageResult<std::optional<std::uint64_t>>{std::in_place, std::nullopt};
+    service_->mark_read(a, {.room = room_id(), .seq = 6});
+    EXPECT_EQ(rooms_.notices.size(), 1U);
+    EXPECT_EQ(service_->counters().reads_unmoved, 1U);
+    // A store that cannot be reached is unavailable.
+    messages_.mark_answer = std::unexpected(core::ports::MessageStoreError::Unavailable);
+    service_->mark_read(a, {.room = room_id(), .seq = 7});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
+    EXPECT_EQ(service_->counters().reads_failed, 1U);
+
+    service_->on_notice(room_id(), rooms_.notices[0].body);
+    const std::string read =
+        R"({"type":"read","room":")" + std::string(kRoom) + R"(","user":"alice","seq":5})";
+    EXPECT_EQ(alice.take(), std::vector<std::string>{read});
+    EXPECT_EQ(bob.take(), std::vector<std::string>{read});
+    EXPECT_EQ(service_->counters().read_events, 2U);
+
+    // Past the user's allowance: rate_limited, with when to retry.
+    messages_.mark_answer.reset();
+    std::uint64_t seq = 10;
+    for (int i = 0; i < 12; ++i) {
+        service_->mark_read(b, {.room = room_id(), .seq = seq++});
+    }
+    const auto limited = bob.take();
+    ASSERT_FALSE(limited.empty());
+    EXPECT_EQ(seen(limited.back()).reason, "rate_limited");
+    EXPECT_TRUE(seen(limited.back()).retry_after_ms);
+    EXPECT_GE(service_->counters().reads_rate_limited, 1U);
+
+    // Every member's mark, charged as a join.
+    messages_.marks = {{.user = *core::UserId::parse("alice"), .seq = 5},
+                       {.user = *core::UserId::parse("bob"), .seq = 9}};
+    service_->list_reads(a, {.room = room_id()});
+    EXPECT_EQ(alice.take(), std::vector<std::string>{
+                                R"({"type":"reads","room":")" + std::string(kRoom) +
+                                R"(","reads":[{"user":"alice","seq":5},{"user":"bob","seq":9}]})"});
+    EXPECT_EQ(service_->counters().reads_listed, 1U);
+    messages_.marks_fail = true;
+    service_->list_reads(a, {.room = room_id()});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
+    // Leaving the room forgets what the connection marked: a mark is written again.
+    service_->part(a, {.room = room_id()});
+    alice.take();
+    join(a);
+    alice.take();
+    const std::size_t asked = messages_.marks_asked.size();
+    clock_.advance(std::chrono::seconds(10));
+    service_->mark_read(a, {.room = room_id(), .seq = 5});
+    EXPECT_EQ(messages_.marks_asked.size(), asked + 1);
 }
 
 } // namespace

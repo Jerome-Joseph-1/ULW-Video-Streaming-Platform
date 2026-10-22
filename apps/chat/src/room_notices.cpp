@@ -10,6 +10,8 @@ namespace {
 
 // After the ring's notice layout (1).
 constexpr std::uint8_t kActivityLayout = 2;
+constexpr std::uint8_t kTypingLayout = 3;
+constexpr std::uint8_t kReadLayout = 4;
 
 std::uint64_t unix_millis(core::WallTime at) noexcept {
     const auto ms = std::chrono::floor<core::Millis>(at.time_since_epoch()).count();
@@ -58,6 +60,47 @@ std::optional<ActivityNotice> decode_activity(std::span<const std::byte> bytes) 
 
 bool is_activity(std::span<const std::byte> bytes) noexcept {
     return !bytes.empty() && std::to_integer<std::uint8_t>(bytes.front()) == kActivityLayout;
+}
+
+std::vector<std::byte> encode_typing(const TypingNotice& notice) {
+    std::vector<std::byte> out;
+    layout::put_u8(out, kTypingLayout);
+    layout::put_uuid(out, notice.room);
+    layout::put_short(out, notice.user.view());
+    return out;
+}
+
+std::vector<std::byte> encode_read(const ReadNotice& notice) {
+    std::vector<std::byte> out;
+    layout::put_u8(out, kReadLayout);
+    layout::put_uuid(out, notice.room);
+    layout::put_short(out, notice.user.view());
+    layout::put_u64(out, notice.seq);
+    return out;
+}
+
+std::optional<RoomNotice> decode_room_notice(std::span<const std::byte> bytes) {
+    layout::Reader in{bytes};
+    const auto kind = in.u8();
+    if (kind != kTypingLayout && kind != kReadLayout) {
+        return std::nullopt;
+    }
+    const auto room = in.uuid<core::RoomId>();
+    auto user = in.user();
+    if (!room || !user) {
+        return std::nullopt;
+    }
+    if (kind == kTypingLayout) {
+        if (!in.empty()) {
+            return std::nullopt;
+        }
+        return TypingNotice{.room = *room, .user = std::move(*user)};
+    }
+    const auto seq = in.u64();
+    if (!seq || !in.empty()) {
+        return std::nullopt;
+    }
+    return ReadNotice{.room = *room, .user = std::move(*user), .seq = *seq};
 }
 
 } // namespace chat

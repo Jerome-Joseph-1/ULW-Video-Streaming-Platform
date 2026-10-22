@@ -1184,4 +1184,33 @@ TEST_F(ServiceApiTest, AConnectionClosedBeforeTheOwnerAnswersLeavesTheRoom) {
     EXPECT_TRUE(peer_closed(fd));
 }
 
+// ADR-0138: reads answers every member's read mark in a room, as the socket's reads does; a
+// store that cannot be reached is 503.
+TEST_F(ServiceApiTest, ReadsAnswersEveryMembersReadMark) {
+    ASSERT_EQ(ask("create_group", R"({"creator":"alice","id":"seen","users":["bob"]})").status,
+              200);
+    const core::RoomId room = chat::group_room(user("alice"), *rt::MessageKey::parse("seen"));
+    const std::string r = room.to_string();
+    EXPECT_EQ(ask("reads", R"({"room":")" + r + R"("})").body,
+              std::format(R"({{"type":"reads","room":"{}","reads":[]}})", r));
+    auto& memory = dynamic_cast<infra::messages::MemoryMessageStore&>(*store_);
+    memory.append(room, 1, user("alice"), "k1", {std::byte{1}}, clock_.wall_now(),
+                  [](core::ports::MessageResult<std::uint64_t> /*stored*/) noexcept {});
+    std::optional<std::uint64_t> moved;
+    memory.mark_read(room, user("bob"), 4,
+                     [&](core::ports::MessageResult<std::optional<std::uint64_t>> m) noexcept {
+                         moved = m.value_or(std::nullopt);
+                     });
+    const Answer reads = ask("reads", R"({"room":")" + r + R"("})");
+    EXPECT_EQ(moved, 1U);
+    EXPECT_EQ(reads.status, 200);
+    EXPECT_EQ(reads.body, std::format(R"({{"type":"reads","room":"{}","reads":[)"
+                                      R"({{"user":"bob","seq":1}}]}})",
+                                      r));
+    EXPECT_EQ(ask("reads", R"({"room":")" + r + R"(","user":"bob"})").status, 400);
+    EXPECT_EQ(ask("reads", R"({"room":"nope"})").status, 400);
+    start(roomy(), true);
+    EXPECT_EQ(ask("reads", R"({"room":")" + r + R"("})").status, 503);
+}
+
 } // namespace

@@ -936,6 +936,62 @@ private:
     return rooms;
 }
 
+// Binds the user, which must outlive the statement.
+class MarkRead final : public Operation {
+public:
+    MarkRead(const core::RoomId& room, const core::UserId& user, std::uint64_t seq,
+             MessageCallback<std::optional<std::uint64_t>> done)
+        : room_(room), user_(user), seq_(seq), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{
+            .sql = message_sql::kMarkRead,
+            .params = Params{}.add_uuid(room_.uuid()).add_text(user_.view()).add_int(as_int(seq_))};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+            return std::nullopt;
+        }
+        if (outcome->rows() == 0) {
+            done_(std::optional<std::uint64_t>{});
+            return std::nullopt;
+        }
+        const auto seq = outcome->get(0, 0).and_then(parse_uint64);
+        if (!seq) {
+            done_(std::unexpected(MessageStoreError::Corrupt));
+        } else {
+            done_(seq);
+        }
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(MessageStoreError::Unavailable));
+    }
+
+private:
+    core::RoomId room_;
+    core::UserId user_;
+    std::uint64_t seq_;
+    MessageCallback<std::optional<std::uint64_t>> done_;
+};
+
+[[nodiscard]] MessageResult<std::vector<core::ports::ReadMark>> decode_read_marks(const Result& r) {
+    std::vector<core::ports::ReadMark> marks;
+    marks.reserve(static_cast<std::size_t>(r.rows()));
+    for (int row = 0; row < r.rows(); ++row) {
+        const auto user = domain_at<core::UserId>(r, row, 0);
+        const auto seq = r.get(row, 1).and_then(parse_uint64);
+        if (!user || !seq) {
+            return std::unexpected(MessageStoreError::Corrupt);
+        }
+        marks.push_back(core::ports::ReadMark{.user = *user, .seq = *seq});
+    }
+    return marks;
+}
+
 // Binds the user and the cursor, which must outlive the statement.
 class RoomsOf final : public Operation {
 public:
@@ -1365,6 +1421,20 @@ void PgMessageStore::roster(const core::RoomId& room, const core::ports::Actor& 
                             std::optional<core::UserId> after, std::size_t limit,
                             MessageCallback<core::ports::Roster> done) {
     impl_->pool().submit(std::make_unique<RosterRead>(room, asker, after, limit, std::move(done)));
+}
+
+void PgMessageStore::mark_read(const core::RoomId& room, const core::UserId& user,
+                               std::uint64_t seq,
+                               MessageCallback<std::optional<std::uint64_t>> done) {
+    impl_->pool().submit(std::make_unique<MarkRead>(room, user, seq, std::move(done)));
+}
+
+void PgMessageStore::read_marks(const core::RoomId& room,
+                                MessageCallback<std::vector<core::ports::ReadMark>> done) {
+    impl_->pool().submit(std::make_unique<Single<std::vector<core::ports::ReadMark>>>(
+        Statement{.sql = message_sql::kReadMarks,
+                  .params = Params{}.add_uuid(room.uuid()).add_int(as_int(kMaxMembersPage))},
+        &decode_read_marks, std::move(done)));
 }
 
 void PgMessageStore::shared_with(const core::UserId& user, std::vector<core::UserId> others,

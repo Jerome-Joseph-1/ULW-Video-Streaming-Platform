@@ -460,6 +460,12 @@ presence rooms, one per member), `activity_folded_total` (messages folded into a
 the one-second interval), `activity_failures_total` (messages whose member list could not be read,
 which told nobody: alert if it rises while the database is healthy) and `activity_rooms`; on the
 members' nodes, `activity_pushed_total` (`activity` frames written to sockets).
+Typing and read marks (ADR-0138): `typing_total{outcome="sent"|"dropped"}` (notices a node's
+sockets sent, and those past a connection's allowance), `typing_pushed_total`,
+`read_marks_total{outcome="moved"|"unmoved"|"failed"|"rate_limited"}` (`failed`: the database did
+not answer; alert if it rises while it is healthy), `read_events_total` (`read` frames written to
+sockets), `read_listings_total`, and `room_notices_malformed_total` (a room's notices that did not
+decode: a node of another release in the cluster).
 The key directory (ADR-0103), counted on the node the asking client is on:
 `e2ee_devices_registered_total`, `e2ee_devices_retired_total`,
 `e2ee_key_packages_published_total{kind="single_use"}` and `{kind="last_resort"}`,

@@ -784,6 +784,30 @@ TEST_P(ChatSessionTest, AMembersSocketThatDidNotJoinHearsTheRoomsActivity) {
                                         R"(","seq":1,"sender":"alice","quiet":true})");
 }
 
+// ADR-0138: typing reaches the room's other joined sockets through the room plane, and never the
+// typist's; a read mark of a room with nothing stored moves nothing, and reads says so.
+TEST_P(ChatSessionTest, TypingReachesTheRoomsOtherJoinedSocketsAndReadsAreReadBack) {
+    auto alice = open_as("alice");
+    auto bob = open_as("bob");
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    const std::string room(kRoom);
+    const std::string join = R"({"type":"join","room":")" + room + R"("})";
+    ASSERT_TRUE(alice->send_text(join));
+    EXPECT_EQ(next_but_activity(*alice, seconds(10)),
+              R"({"type":"joined","room":")" + room + R"(","seq":0,"loud_seq":0})");
+    ASSERT_TRUE(bob->send_text(join));
+    EXPECT_EQ(next_but_activity(*bob, seconds(10)),
+              R"({"type":"joined","room":")" + room + R"(","seq":0,"loud_seq":0})");
+    ASSERT_TRUE(alice->send_text(R"({"type":"typing","room":")" + room + R"("})"));
+    EXPECT_EQ(next_but_activity(*bob, seconds(10)),
+              R"({"type":"typing","room":")" + room + R"(","user":"alice"})");
+    ASSERT_TRUE(alice->send_text(R"({"type":"read","room":")" + room + R"(","seq":9})"));
+    ASSERT_TRUE(alice->send_text(R"({"type":"reads","room":")" + room + R"("})"));
+    EXPECT_EQ(next_but_activity(*alice, seconds(10)),
+              R"({"type":"reads","room":")" + room + R"(","reads":[]})");
+}
+
 TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {
     auto alice = open_as("alice");
     ASSERT_TRUE(alice);

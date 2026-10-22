@@ -247,3 +247,58 @@ TEST_F(CallBellTest, ARoomsActivityReachesEverySocketOfTheMemberItNames) {
 }
 
 } // namespace
+
+namespace {
+
+// ADR-0138: a notice of a room that is not a presence room goes to whoever hears the rooms, as it
+// came; typing and read marks read back as they were written, and nothing else does.
+TEST_F(CallBellTest, ARoomsOwnNoticesGoToTheRoomsListenerAndReadBackWhole) {
+    struct Rooms final : rt::INoticeListener {
+        void on_notice(const core::RoomId& room,
+                       std::span<const std::byte> body) noexcept override {
+            heard.emplace_back(room, std::vector<std::byte>{body.begin(), body.end()});
+        }
+        std::vector<std::pair<core::RoomId, std::vector<std::byte>>> heard;
+    } rooms;
+    bell_.hear_rooms(&rooms);
+    const auto typing = chat::encode_typing({.room = room_, .user = user("alice")});
+    const auto read = chat::encode_read({.room = room_, .user = user("bob"), .seq = 9});
+    bell_.on_notice(room_, typing);
+    bell_.on_notice(room_, read);
+    ASSERT_EQ(rooms.heard.size(), 2U);
+    EXPECT_EQ(rooms.heard[0].first, room_);
+    EXPECT_EQ(rooms.heard[1].second, read);
+    // A presence room's notices are still the bell's.
+    bell_.on_notice(chat::presence_room(user("bob")), typing);
+    EXPECT_EQ(rooms.heard.size(), 2U);
+    EXPECT_EQ(bell_.counters().malformed, 1U);
+    bell_.hear_rooms(nullptr);
+
+    const auto t = chat::decode_room_notice(typing);
+    ASSERT_TRUE(t);
+    EXPECT_EQ(std::get<chat::TypingNotice>(*t).user, user("alice"));
+    EXPECT_EQ(std::get<chat::TypingNotice>(*t).room, room_);
+    const auto r = chat::decode_room_notice(read);
+    ASSERT_TRUE(r);
+    EXPECT_EQ(std::get<chat::ReadNotice>(*r).seq, 9U);
+    EXPECT_EQ(std::get<chat::ReadNotice>(*r).user, user("bob"));
+    for (auto bad : {typing, read}) {
+        auto longer = bad;
+        longer.push_back(std::byte{0});
+        EXPECT_FALSE(chat::decode_room_notice(longer));
+        bad.pop_back();
+        EXPECT_FALSE(chat::decode_room_notice(bad));
+    }
+    auto no_user = typing;
+    no_user.resize(1 + core::Uuid::kTextLength);
+    EXPECT_FALSE(chat::decode_room_notice(no_user));
+    EXPECT_FALSE(chat::decode_room_notice({}));
+    EXPECT_FALSE(chat::decode_room_notice(chat::encode_activity({.to = user("bob"),
+                                                                 .room = room_,
+                                                                 .seq = 1,
+                                                                 .sender = user("alice"),
+                                                                 .at = clock_.wall_now(),
+                                                                 .quiet = false})));
+}
+
+} // namespace

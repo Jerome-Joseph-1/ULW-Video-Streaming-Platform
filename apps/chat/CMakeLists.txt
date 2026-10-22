@@ -15,6 +15,7 @@ ulw_add_library(chat_lib
     src/notify.cpp
     src/presence.cpp
     src/presence_room.cpp
+    src/receipts.cpp
     src/ring.cpp
     src/room_notices.cpp
     src/service_api.cpp

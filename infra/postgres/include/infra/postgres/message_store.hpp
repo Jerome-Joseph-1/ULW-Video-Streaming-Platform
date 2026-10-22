@@ -100,6 +100,10 @@ public:
                 core::ports::MessageCallback<core::ports::Roster> done) override;
     void shared_with(const core::UserId& user, std::vector<core::UserId> others,
                      core::ports::MessageCallback<std::vector<core::UserId>> done) override;
+    void mark_read(const core::RoomId& room, const core::UserId& user, std::uint64_t seq,
+                   core::ports::MessageCallback<std::optional<std::uint64_t>> done) override;
+    void read_marks(const core::RoomId& room,
+                    core::ports::MessageCallback<std::vector<core::ports::ReadMark>> done) override;
 
 private:
     std::unique_ptr<Impl> impl_;
