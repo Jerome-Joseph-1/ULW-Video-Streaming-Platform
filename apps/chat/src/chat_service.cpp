@@ -71,6 +71,7 @@ struct ChatService::Room final : rt::IMember {
         bool quiet = false;
         // Blanked since it was kept (ADR-0135): its body is empty.
         bool redacted = false;
+        std::optional<core::ports::Relation> rel;
         std::vector<std::byte> body;
     };
 
@@ -458,6 +459,7 @@ std::uint64_t ChatService::replay(const Room& room, Client& c, std::uint64_t aft
                                   .key = it->key,
                                   .sent_at = it->sent_at,
                                   .quiet = it->quiet,
+                                  .rel = it->rel,
                                   .body = it->body},
                       it->redacted);
         c.client->push(out);
@@ -547,6 +549,13 @@ void ChatService::send(ClientId id, Send send) {
         answer(*c->client, "too_large", send.room, send.id);
         return;
     }
+    // A relation is to an earlier message (ADR-0136): one this node has heard of, or its own
+    // message's seq could not be past it.
+    if (send.rel && send.rel->seq > r->head) {
+        ++counters_.bad_relations;
+        answer(*c->client, "bad_rel", send.room, send.id);
+        return;
+    }
     const core::MonoTime now = clock_.now();
     const auto bucket =
         sends_.try_emplace(c->user, limits_.send_burst, limits_.sends_per_second, now).first;
@@ -574,7 +583,7 @@ void ChatService::send(ClientId id, Send send) {
     if (message_watcher_ != nullptr && !send.quiet && !live) {
         preview = message_preview(send.body, message_watcher_->preview_chars());
     }
-    rooms_plane_.send(send.room, *r, c->user, send.id, std::move(send.body), send.quiet,
+    rooms_plane_.send(send.room, *r, c->user, send.id, std::move(send.body), send.quiet, send.rel,
                       [this, id, room = send.room, key = send.id, bytes, quiet = send.quiet,
                        preview = std::move(preview)](
                           std::expected<std::uint64_t, rt::RouteError> result) noexcept {
@@ -600,6 +609,20 @@ void ChatService::history(ClientId id, const History& history) {
     }
     if (history.around) {
         around(id, history);
+        return;
+    }
+    if (history.rel_to) {
+        messages_.relating(
+            history.room,
+            {.to = *history.rel_to,
+             .type = history.rel_type,
+             .before = history.before,
+             .after = history.after},
+            history.limit,
+            [this, id, room = history.room, to = *history.rel_to](
+                core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept {
+                page_read(id, room, std::move(page), to);
+            });
         return;
     }
     auto done =
@@ -748,6 +771,7 @@ void ChatService::on_redaction(const core::RoomId& room, std::uint64_t seq) noex
         buffered_bytes_ -= it->body.size();
         std::vector<std::byte>{}.swap(it->body);
         it->redacted = true;
+        it->rel.reset();
     }
     try {
         std::string out;
@@ -772,6 +796,40 @@ void ChatService::refuse_redact(IClient& client, std::string_view reason, const 
         ++counters_.allocation_failures;
         client.allocation_failed();
     }
+}
+
+void ChatService::rel_counts(ClientId id, const RelCounts& counts) {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    // Joined, and a store read charged as a history page is.
+    Room* r = calling_room(*c, id, counts.room);
+    if (r == nullptr) {
+        return;
+    }
+    messages_.rel_counts(
+        counts.room, counts.seqs, counts.type,
+        [this, id, room = counts.room, type = counts.type](
+            core::ports::MessageResult<std::vector<core::ports::RelCount>> result) noexcept {
+            Client* asker = find(id);
+            if (asker == nullptr) {
+                return;
+            }
+            if (!result) {
+                answer(*asker->client, reason(rt::RouteError::Unavailable), room);
+                return;
+            }
+            try {
+                ++counters_.rel_counts;
+                std::string out;
+                write_rel_counts(out, room, type, *result);
+                asker->client->push(out);
+            } catch (const std::bad_alloc&) {
+                ++counters_.allocation_failures;
+                asker->client->allocation_failed();
+            }
+        });
 }
 
 ChatService::Room* ChatService::calling_room(Client& c, ClientId id, const core::RoomId& room) {
@@ -1168,7 +1226,8 @@ void ChatService::called(ClientId id, const core::RoomId& room,
 // would read as the end of the room.
 void ChatService::page_read(
     ClientId id, const core::RoomId& room,
-    core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept {
+    core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page,
+    std::optional<std::uint64_t> rel_to) noexcept {
     Client* c = find(id);
     // Gone from the room meanwhile, taken out by a removal from its member list.
     if (c == nullptr || std::ranges::find(c->rooms, room) == c->rooms.end()) {
@@ -1207,6 +1266,7 @@ void ChatService::page_read(
                                       .key = *key,
                                       .sent_at = m.sent_at,
                                       .quiet = m.quiet,
+                                      .rel = m.rel,
                                       .body = m.body},
                           m.redacted);
             c->client->push(out);
@@ -1218,7 +1278,7 @@ void ChatService::page_read(
         }
         counters_.history_messages += count;
         out.clear();
-        write_history(out, room, count);
+        write_history(out, room, count, rel_to);
         c->client->push(out);
     } catch (const std::bad_alloc&) {
         ++counters_.allocation_failures;
@@ -1447,6 +1507,7 @@ void ChatService::catch_up(Room& room, ClientId id, Client& c) {
                                   .key = it->key,
                                   .sent_at = it->sent_at,
                                   .quiet = it->quiet,
+                                  .rel = it->rel,
                                   .body = it->body},
                       it->redacted);
         if (!c.client->push(out)) {
@@ -1471,6 +1532,8 @@ void ChatService::keep(Room& room, const rt::Message& message) {
                          .key = message.key,
                          .sent_at = message.sent_at,
                          .quiet = message.quiet,
+                         .redacted = false,
+                         .rel = message.rel,
                          .body = {message.body.begin(), message.body.end()}});
     room.kept_bytes += cost;
     buffered_bytes_ += cost;

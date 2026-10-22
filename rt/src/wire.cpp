@@ -48,6 +48,16 @@ void put_short(std::vector<std::byte>& out, std::string_view text) {
     put_text(out, text);
 }
 
+// A message's flags, and its relation when it has one (ADR-0128, ADR-0136).
+void put_flags(std::vector<std::byte>& out, bool quiet,
+               const std::optional<core::ports::Relation>& rel) {
+    put_u8(out, static_cast<std::uint8_t>((quiet ? kQuiet : 0) | (rel ? kRelated : 0)));
+    if (rel) {
+        put_u8(out, static_cast<std::uint8_t>(rel->type));
+        put_u64(out, rel->seq);
+    }
+}
+
 // Reserves the length, writes the type, and returns where the length goes once the frame is
 // complete.
 std::size_t begin(std::vector<std::byte>& out, Type type) {
@@ -156,6 +166,33 @@ private:
     std::span<const std::byte> rest_;
 };
 
+struct Flags {
+    bool quiet = false;
+    std::optional<core::ports::Relation> rel;
+};
+
+// What put_flags wrote; nullopt for an unknown bit, a type that is none, or a seq that is no
+// room's (0, or past what the store's bigint holds).
+std::optional<Flags> flags_of(Cursor& in) noexcept {
+    const auto flags = in.u8();
+    if (!flags || (*flags & ~(kQuiet | kRelated)) != 0) {
+        return std::nullopt;
+    }
+    Flags out{.quiet = (*flags & kQuiet) != 0, .rel = std::nullopt};
+    if ((*flags & kRelated) == 0) {
+        return out;
+    }
+    const auto type = in.u8();
+    const auto seq = in.u64();
+    if (!type || *type < static_cast<std::uint8_t>(core::ports::RelType::Reply) ||
+        *type > static_cast<std::uint8_t>(core::ports::RelType::React) || !seq || *seq == 0 ||
+        *seq > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+        return std::nullopt;
+    }
+    out.rel = core::ports::Relation{.type = static_cast<core::ports::RelType>(*type), .seq = *seq};
+    return out;
+}
+
 std::optional<Frame> ask_of(Cursor& in) noexcept {
     const auto request = in.u64();
     const auto room = in.room();
@@ -234,12 +271,11 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto room = in.room();
         const auto sender = in.sender();
         const auto key = in.key();
-        const auto flags = in.u8();
+        const auto flags = flags_of(in);
         const auto body = in.rest();
         // A frame may be a little longer than the largest body, for the other fields; a body
         // past kMaxBody is one no client could have sent, and nothing downstream takes it.
-        if (!request || !room || !sender || !key || !flags || (*flags & ~kQuiet) != 0 ||
-            body.size() > kMaxBody) {
+        if (!request || !room || !sender || !key || !flags || body.size() > kMaxBody) {
             return std::nullopt;
         }
         Send send{.request = *request,
@@ -247,7 +283,8 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
                   .sender = *sender,
                   .key = *key,
                   .body = body,
-                  .quiet = (*flags & kQuiet) != 0};
+                  .quiet = flags->quiet,
+                  .rel = flags->rel};
         return send;
     }
     case Type::Reply: {
@@ -265,12 +302,12 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
         const auto sender = in.sender();
         const auto key = in.key();
         const auto micros = in.u64();
-        const auto flags = in.u8();
+        const auto flags = flags_of(in);
         const auto body = in.rest();
         // A time past what a signed count of microseconds holds is no clock's.
         if (!room || !seq || !sender || !key || !micros ||
             *micros > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) ||
-            !flags || (*flags & ~kQuiet) != 0 || body.size() > kMaxBody) {
+            !flags || body.size() > kMaxBody) {
             return std::nullopt;
         }
         Deliver deliver{.room = *room,
@@ -280,7 +317,8 @@ std::optional<Frame> fields_of(Type type, Cursor& in) noexcept {
                         .sent_at = core::WallTime{std::chrono::microseconds{
                             static_cast<std::int64_t>(*micros)}},
                         .body = body,
-                        .quiet = (*flags & kQuiet) != 0};
+                        .quiet = flags->quiet,
+                        .rel = flags->rel};
         return deliver;
     }
     case Type::Ask:
@@ -352,13 +390,13 @@ void encode_unsubscribe(std::vector<std::byte>& out, const core::RoomId& room) {
 
 void encode_send(std::vector<std::byte>& out, std::uint64_t request, const core::RoomId& room,
                  const core::UserId& sender, const MessageKey& key, bool quiet,
-                 std::span<const std::byte> body) {
+                 const std::optional<core::ports::Relation>& rel, std::span<const std::byte> body) {
     const std::size_t at = begin(out, Type::Send);
     put_u64(out, request);
     put_room(out, room);
     put_short(out, sender.view());
     put_short(out, key.view());
-    put_u8(out, quiet ? kQuiet : 0);
+    put_flags(out, quiet, rel);
     out.insert(out.end(), body.begin(), body.end());
     end(out, at);
 }
@@ -374,7 +412,8 @@ void encode_reply(std::vector<std::byte>& out, std::uint64_t request, Status sta
 
 void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::uint64_t seq,
                     const core::UserId& sender, const MessageKey& key, core::WallTime sent_at,
-                    bool quiet, std::span<const std::byte> body) {
+                    bool quiet, const std::optional<core::ports::Relation>& rel,
+                    std::span<const std::byte> body) {
     const auto micros =
         std::chrono::duration_cast<std::chrono::microseconds>(sent_at.time_since_epoch()).count();
     const std::size_t at = begin(out, Type::Deliver);
@@ -383,7 +422,7 @@ void encode_deliver(std::vector<std::byte>& out, const core::RoomId& room, std::
     put_short(out, sender.view());
     put_short(out, key.view());
     put_u64(out, static_cast<std::uint64_t>(std::max<std::int64_t>(micros, 0)));
-    put_u8(out, quiet ? kQuiet : 0);
+    put_flags(out, quiet, rel);
     out.insert(out.end(), body.begin(), body.end());
     end(out, at);
 }

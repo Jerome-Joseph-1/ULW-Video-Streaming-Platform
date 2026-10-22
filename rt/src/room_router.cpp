@@ -340,7 +340,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
             }
             if (const auto* f = std::get_if<wire::Send>(&frame)) {
                 router_.on_forwarded(handle_, f->request, f->room, f->sender, f->key, f->quiet,
-                                     f->body);
+                                     f->rel, f->body);
                 return true;
             }
             if (const auto* f = std::get_if<wire::Ask>(&frame)) {
@@ -608,6 +608,7 @@ class RoomRouter::Impl final : public IRegistryObserver,
                                            .key = f->key,
                                            .sent_at = f->sent_at,
                                            .quiet = f->quiet,
+                                           .rel = f->rel,
                                            .body = f->body});
                 return true;
             }
@@ -746,7 +747,8 @@ public:
     }
 
     void send(const core::RoomId& room, IMember& from, const core::UserId& sender,
-              const MessageKey& key, std::vector<std::byte> body, SendCallback done, bool quiet) {
+              const MessageKey& key, std::vector<std::byte> body, SendCallback done, bool quiet,
+              const std::optional<core::ports::Relation>& rel) {
         const auto it = local_.find(room);
         if (it == local_.end() ||
             std::ranges::find(it->second.members, &from) == it->second.members.end()) {
@@ -770,6 +772,7 @@ public:
             enqueue(room, Write{.sender = sender,
                                 .key = key,
                                 .quiet = quiet,
+                                .rel = rel,
                                 .body = std::move(body),
                                 .local = pending(room, from, std::move(done)),
                                 .peer = std::nullopt,
@@ -786,7 +789,7 @@ public:
         }
         std::vector<std::byte> frame;
         const std::uint64_t request = next_request_++;
-        wire::encode_send(frame, request, room, sender, key, quiet, body);
+        wire::encode_send(frame, request, room, sender, key, quiet, rel, body);
         ++counters_.forwarded;
         link(owner->node)
             .request(request, frame,
@@ -1261,6 +1264,7 @@ private:
         core::UserId sender;
         MessageKey key;
         bool quiet = false;
+        std::optional<core::ports::Relation> rel;
         std::vector<std::byte> body;
         // Set as its append starts (pump).
         core::WallTime sent_at{};
@@ -1650,6 +1654,7 @@ private:
                                       .key = next.key,
                                       .sent_at = next.sent_at,
                                       .quiet = next.quiet,
+                                      .rel = next.rel,
                                       .body = next.body},
                              [this, room](std::expected<std::uint64_t, AppendError> seq) noexcept {
                                  appended(room, seq);
@@ -1701,6 +1706,7 @@ private:
                               .key = write.key,
                               .sent_at = write.sent_at,
                               .quiet = write.quiet,
+                              .rel = write.rel,
                               .body = write.body};
         events_.on_sequenced(message);
         deliver_here(message);
@@ -1709,7 +1715,7 @@ private:
         }
         std::vector<std::byte> frame;
         wire::encode_deliver(frame, room, seq, write.sender, write.key, write.sent_at, write.quiet,
-                             write.body);
+                             write.rel, write.body);
         std::erase_if(o.subscribers, [&](const net::Slab<Inbound>::Handle& h) {
             Inbound* in = inbound_.get(h);
             if (in == nullptr) {
@@ -1823,10 +1829,12 @@ private:
 
     void on_forwarded(net::Slab<Inbound>::Handle peer, std::uint64_t request,
                       const core::RoomId& room, const core::UserId& sender, const MessageKey& key,
-                      bool quiet, std::span<const std::byte> body) {
+                      bool quiet, const std::optional<core::ports::Relation>& rel,
+                      std::span<const std::byte> body) {
         Write write{.sender = sender,
                     .key = key,
                     .quiet = quiet,
+                    .rel = rel,
                     .body = {body.begin(), body.end()},
                     .local = {},
                     .peer = peer,
@@ -2058,8 +2066,8 @@ void RoomRouter::leave(const core::RoomId& room, IMember& member) noexcept {
 
 void RoomRouter::send(const core::RoomId& room, IMember& from, const core::UserId& sender,
                       const MessageKey& key, std::vector<std::byte> body, SendCallback done,
-                      bool quiet) {
-    impl_->send(room, from, sender, key, std::move(body), std::move(done), quiet);
+                      bool quiet, std::optional<core::ports::Relation> rel) {
+    impl_->send(room, from, sender, key, std::move(body), std::move(done), quiet, rel);
 }
 
 void RoomRouter::ask_owner(const core::RoomId& room, IMember& from,

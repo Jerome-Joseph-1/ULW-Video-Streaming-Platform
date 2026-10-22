@@ -40,7 +40,7 @@ public:
     void leave(const core::RoomId& /*room*/, rt::IMember& /*member*/) noexcept override {}
     void send(const core::RoomId& /*room*/, rt::IMember& /*from*/, const core::UserId& /*sender*/,
               const rt::MessageKey& /*key*/, std::vector<std::byte> /*body*/, bool /*quiet*/,
-              rt::SendCallback done) override {
+              std::optional<core::ports::Relation> /*rel*/, rt::SendCallback done) override {
         done(std::unexpected(rt::RouteError::Unavailable));
     }
     void notify(const core::RoomId& /*room*/,

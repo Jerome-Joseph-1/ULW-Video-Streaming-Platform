@@ -65,7 +65,8 @@ public:
     // Stores a message under the room's next seq, at `sent_at`, and answers that seq.
     virtual void write(const core::RoomId& room, const core::UserId& sender, std::string key,
                        std::vector<std::byte> body, core::WallTime sent_at, bool quiet,
-                       MessageCallback<std::uint64_t> done) = 0;
+                       MessageCallback<std::uint64_t> done,
+                       std::optional<core::ports::Relation> rel = std::nullopt) = 0;
 
 protected:
     [[nodiscard]] bool make_reactor() {
@@ -93,7 +94,8 @@ public:
 
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
                std::vector<std::byte> body, core::WallTime sent_at, bool quiet,
-               MessageCallback<std::uint64_t> done) override {
+               MessageCallback<std::uint64_t> done,
+               std::optional<core::ports::Relation> rel) override {
         const std::uint64_t seq = next_[room] + 1;
         store_->append(
             room, seq, sender, std::move(key), std::move(body), sent_at,
@@ -105,7 +107,7 @@ public:
                 }
                 done(r);
             },
-            quiet);
+            quiet, rel);
     }
 
 private:
@@ -173,9 +175,10 @@ public:
 
     void write(const core::RoomId& room, const core::UserId& sender, std::string key,
                std::vector<std::byte> body, core::WallTime sent_at, bool quiet,
-               MessageCallback<std::uint64_t> done) override {
+               MessageCallback<std::uint64_t> done,
+               std::optional<core::ports::Relation> rel) override {
         rooms_->append(room, generations_.at(room),
-                       ulw::test::outgoing(sender, key, body, sent_at, quiet),
+                       ulw::test::outgoing(sender, key, body, sent_at, quiet, rel),
                        [done = std::move(done)](
                            rt::StoreResult<std::optional<std::uint64_t>> r) mutable noexcept {
                            if (!r) {
@@ -247,6 +250,13 @@ protected:
         return ask<std::uint64_t>([&](auto done) {
             backend_->write(room, sender, std::format("m{}", ++keys_), std::move(body),
                             sent_at.value_or(now()), quiet, std::move(done));
+        });
+    }
+    MessageResult<std::uint64_t> relate(const core::RoomId& room, const core::UserId& sender,
+                                        core::ports::Relation rel) {
+        return ask<std::uint64_t>([&](auto done) {
+            backend_->write(room, sender, std::format("m{}", ++keys_), bytes("related"), now(),
+                            false, std::move(done), rel);
         });
     }
     MessageResult<std::uint64_t> last_loud_seq(const core::RoomId& room) {
@@ -398,6 +408,59 @@ TEST_P(MessageStoreConformance, ARedactedMessageKeepsItsPlaceAndLosesItsBody) {
     EXPECT_TRUE((*page)[0].redacted);
     EXPECT_TRUE((*page)[1].redacted);
     EXPECT_EQ(last_seq(room), 2U);
+}
+
+// ADR-0136: a message's relation is kept with it, comes back in history, lists the messages that
+// relate to one by their own seqs, counts them, and goes with a redaction.
+TEST_P(MessageStoreConformance, ARelationIsKeptListedCountedAndRedactedAway) {
+    using core::ports::Relation;
+    using core::ports::RelType;
+    const core::RoomId room = new_room();
+    ASSERT_EQ(write(room, alice_, bytes("question")), 1U);
+    ASSERT_EQ(relate(room, bob_, {.type = RelType::Reply, .seq = 1}), 2U);
+    ASSERT_EQ(relate(room, alice_, {.type = RelType::React, .seq = 1}), 3U);
+    ASSERT_EQ(relate(room, bob_, {.type = RelType::Reply, .seq = 1}), 4U);
+    ASSERT_EQ(relate(room, bob_, {.type = RelType::Edit, .seq = 2}), 5U);
+    const auto page = after(room, 0, 10);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 5U);
+    EXPECT_FALSE((*page)[0].rel);
+    EXPECT_EQ((*page)[1].rel, (Relation{.type = RelType::Reply, .seq = 1}));
+    EXPECT_EQ((*page)[4].rel, (Relation{.type = RelType::Edit, .seq = 2}));
+    const auto relating = [&](core::ports::RelatingPage query, std::size_t limit = 10) {
+        return ask<Page>([&](auto done) { store().relating(room, query, limit, std::move(done)); });
+    };
+    const auto any =
+        relating({.to = 1, .type = std::nullopt, .before = std::nullopt, .after = std::nullopt});
+    ASSERT_TRUE(any);
+    EXPECT_EQ(seqs(*any), (std::vector<std::uint64_t>{4, 3, 2}));
+    EXPECT_EQ(any->front().body, bytes("related"));
+    const auto replies =
+        relating({.to = 1, .type = RelType::Reply, .before = std::nullopt, .after = 2});
+    ASSERT_TRUE(replies);
+    EXPECT_EQ(seqs(*replies), (std::vector<std::uint64_t>{4}));
+    const auto first =
+        relating({.to = 1, .type = std::nullopt, .before = 4, .after = std::nullopt}, 1);
+    ASSERT_TRUE(first);
+    EXPECT_EQ(seqs(*first), (std::vector<std::uint64_t>{3}));
+    const auto counts = [&](std::vector<std::uint64_t> asked, RelType type) {
+        return ask<std::vector<core::ports::RelCount>>(
+            [&](auto done) { store().rel_counts(room, std::move(asked), type, std::move(done)); });
+    };
+    EXPECT_EQ(counts({2, 1, 7, 1}, RelType::Reply),
+              (std::vector<core::ports::RelCount>{{.seq = 1, .count = 2, .latest = 4},
+                                                  {.seq = 2, .count = 0, .latest = 0},
+                                                  {.seq = 7, .count = 0, .latest = 0}}));
+    EXPECT_EQ(counts({2}, RelType::Edit),
+              (std::vector<core::ports::RelCount>{{.seq = 2, .count = 1, .latest = 5}}));
+    ASSERT_EQ(ask<core::ports::RedactOutcome>(
+                  [&](auto done) { store().redact(room, 4, bob_, std::move(done)); }),
+              core::ports::RedactOutcome::Done);
+    EXPECT_EQ(counts({1}, RelType::Reply),
+              (std::vector<core::ports::RelCount>{{.seq = 1, .count = 1, .latest = 2}}));
+    const auto redacted = after(room, 3, 1);
+    ASSERT_TRUE(redacted);
+    EXPECT_FALSE(redacted->front().rel);
 }
 
 TEST_P(MessageStoreConformance, SentAtIsTheTimeTheWriterGaveIt) {

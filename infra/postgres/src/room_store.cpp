@@ -131,7 +131,9 @@ RETURNING room_assignments.room_id)sql";
 // primary key write, so a live room's rows stay about 2 MiB however long the stream (ADR-0070).
 // sent_at is the owner's time for the message, in microseconds since the epoch (ADR-0112); $7
 // whether it is quiet (ADR-0128). A redacted message's body is gone (ADR-0135): a repeat of its
-// send is answered with its seq, whatever the body, and restores nothing.
+// send is answered with its seq, whatever the body, and restores nothing. $8 and $9 are what it
+// relates to (ADR-0136), its type ('' for none) and seq: a row of chat_message_relations beside
+// the message's, for an earlier message only, pruned with it from a lossy room.
 constexpr Sql kAppendMessage = R"sql(
 WITH prior AS (
     SELECT seq, body = $5 OR redacted AS same
@@ -147,8 +149,16 @@ stored AS (
       FROM next
      WHERE NOT EXISTS (SELECT 1 FROM prior)
     RETURNING seq),
+related AS (
+    INSERT INTO chat_message_relations (room_id, seq, rel_type, rel_seq)
+    SELECT $1, seq, $8, $9 FROM stored WHERE $8 <> '' AND $9 < seq),
 pruned AS (
     DELETE FROM chat_messages
+     WHERE room_id = $1
+       AND seq = (SELECT last_seq - 1000 FROM next WHERE delivery = 'lossy')
+       AND EXISTS (SELECT 1 FROM stored)),
+unrelated AS (
+    DELETE FROM chat_message_relations
      WHERE room_id = $1
        AND seq = (SELECT last_seq - 1000 FROM next WHERE delivery = 'lossy')
        AND EXISTS (SELECT 1 FROM stored))
@@ -522,8 +532,11 @@ public:
           sent_at_(std::chrono::duration_cast<std::chrono::microseconds>(
                        message.sent_at.time_since_epoch())
                        .count()),
-          quiet_(message.quiet), body_(message.body.begin(), message.body.end()),
-          done_(std::move(done)) {}
+          quiet_(message.quiet),
+          rel_type_(message.rel ? core::ports::rel_type_name(message.rel->type)
+                                : std::string_view{}),
+          rel_seq_(message.rel ? message.rel->seq : 0),
+          body_(message.body.begin(), message.body.end()), done_(std::move(done)) {}
 
     [[nodiscard]] Statement start() noexcept override {
         if (rt::is_ephemeral_room(room_)) {
@@ -539,7 +552,9 @@ public:
                                        .add_text(key_)
                                        .add_bytea(body_)
                                        .add_int(sent_at_)
-                                       .add_bool(quiet_)};
+                                       .add_bool(quiet_)
+                                       .add_text(rel_type_)
+                                       .add_int(as_int(rel_seq_))};
     }
 
     [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
@@ -568,6 +583,9 @@ private:
     std::string key_;
     std::int64_t sent_at_;
     bool quiet_ = false;
+    // A name of static storage (rel_type_name), empty for none.
+    std::string_view rel_type_;
+    std::uint64_t rel_seq_ = 0;
     std::vector<std::byte> body_;
     bool reran_ = false;
     StoreCallback<std::optional<std::uint64_t>> done_;

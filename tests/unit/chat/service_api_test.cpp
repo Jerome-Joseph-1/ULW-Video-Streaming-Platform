@@ -133,7 +133,7 @@ public:
     }
     void send(const core::RoomId& /*room*/, rt::IMember& /*from*/, const core::UserId& /*sender*/,
               const rt::MessageKey& /*key*/, std::vector<std::byte> /*body*/, bool /*quiet*/,
-              rt::SendCallback done) override {
+              std::optional<core::ports::Relation> /*rel*/, rt::SendCallback done) override {
         done(std::unexpected(rt::RouteError::Unavailable));
     }
     void ask_owner(const core::RoomId& /*room*/, rt::IMember& /*from*/,
@@ -600,6 +600,48 @@ TEST_F(ServiceApiTest, RedactMessageBlanksAStoredMessageAndTellsTheRoom) {
     // Without a room plane, the store's answer alone.
     start(roomy(), false, false);
     EXPECT_EQ(ask("redact_message", body).status, 404);
+}
+
+// ADR-0136: how many messages relate to each of some seqs, as the socket's rel_counts answers.
+TEST_F(ServiceApiTest, RelCountsSaysHowManyMessagesRelateToEachSeq) {
+    constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
+    const core::RoomId room = *core::RoomId::parse(kRoom);
+    auto& memory = dynamic_cast<infra::messages::MemoryMessageStore&>(*store_);
+    int stored = 0;
+    for (std::uint64_t seq = 1; seq <= 3; ++seq) {
+        memory.append(
+            room, seq, user("bob"), "k" + std::to_string(seq), {std::byte{1}}, clock_.wall_now(),
+            [&](core::ports::MessageResult<std::uint64_t> r) noexcept { stored += r ? 1 : 0; },
+            false,
+            seq == 1
+                ? std::nullopt
+                : std::optional(core::ports::Relation{
+                      .type = seq == 2 ? core::ports::RelType::Thread : core::ports::RelType::Reply,
+                      .seq = 1}));
+    }
+    const std::string at = std::string(R"({"room":")") + std::string(kRoom) + '"';
+    const Answer a = ask("rel_counts", at + R"(,"seqs":[1,2],"rel_type":"thread"})");
+    EXPECT_EQ(a.status, 200) << a.body;
+    EXPECT_EQ(a.body, std::string(R"({"type":"rel_counts","room":")") + std::string(kRoom) +
+                          R"(","rel_type":"thread","counts":[{"seq":1,"count":1,"latest":2},)"
+                          R"({"seq":2,"count":0}]})");
+    EXPECT_EQ(stored, 3);
+    // The backend's history has each message's relation too (ADR-0133).
+    const Answer read = ask("history", at + R"(,"after":1})");
+    EXPECT_NE(read.body.find(R"("quiet":false,"rel":{"type":"thread","seq":1}})"),
+              std::string::npos)
+        << read.body;
+    const Answer replies = ask("rel_counts", at + R"(,"seqs":[1]})");
+    EXPECT_NE(replies.body.find(R"({"seq":1,"count":1,"latest":3})"), std::string::npos)
+        << replies.body;
+    for (const std::string& bad :
+         {at + "}", at + R"(,"seqs":[]})", at + R"(,"seqs":["1"]})",
+          at + R"(,"seqs":[1],"rel_type":"like"})", at + R"(,"seqs":[1],"x":1})"}) {
+        const Answer refused = ask("rel_counts", bad);
+        EXPECT_EQ(refused.status, 400) << bad;
+        EXPECT_EQ(refused.field("reason"), "malformed") << bad;
+    }
+    EXPECT_EQ(ask("rel_counts", R"({"room":"x","seqs":[1]})").field("reason"), "bad_room");
 }
 
 TEST_F(ServiceApiTest, PresenceSaysWhoIsConnectedAndOnWhichDevices) {

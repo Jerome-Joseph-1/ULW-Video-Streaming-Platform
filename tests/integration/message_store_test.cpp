@@ -1142,6 +1142,8 @@ TEST_F(MessageStoreTest, HistoryOfATenThousandMessageRoomWalksThePrimaryKey) {
         EXPECT_EQ(plan.find("Sort"), std::string::npos) << plan;
         // The scan stops at the page: 100 rows plus the one the window reads ahead.
         EXPECT_NE(plan.find("rows=101 "), std::string::npos) << plan;
+        // Each message's relation is a probe of its primary key (ADR-0136).
+        EXPECT_NE(plan.find("using chat_message_relations_pkey"), std::string::npos) << plan;
     }
 
     // The whole room, page by page, through the adapter: what a client scrolling to the top
@@ -1432,6 +1434,90 @@ TEST_F(MessageStoreTest, AMessageIsRedactedInPlaceByItsSenderAnAdminOrTheService
     EXPECT_TRUE(repeat && *repeat == 1U);
     const auto fourth = append(bob, "b4", "new");
     EXPECT_TRUE(fourth && *fourth == 4U);
+}
+
+// ADR-0136 on Postgres alone: the owner's write keeps a relation to an earlier message only; a
+// stream's live chat prunes a relation with its message; listing and counting read the index.
+TEST_F(MessageStoreTest, AnOwnersWriteKeepsARelationToAnEarlierMessageAndPrunesItWithIt) {
+    using core::ports::Relation;
+    using core::ports::RelType;
+    const core::RoomId room = new_room();
+    const std::uint64_t generation = own(room);
+    const auto append = [&](std::string_view key, std::optional<Relation> rel) {
+        return ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
+            const auto body = bytes("b");
+            rooms_->append(room, generation,
+                           ulw::test::outgoing(alice_, key, body,
+                                               std::chrono::floor<std::chrono::microseconds>(
+                                                   std::chrono::system_clock::now()),
+                                               false, rel),
+                           std::move(done));
+        });
+    };
+    ASSERT_TRUE(append("r1", std::nullopt));
+    ASSERT_TRUE(append("r2", Relation{.type = RelType::Thread, .seq = 1}));
+    // Past the message's own seq: kept as a message, related to nothing.
+    ASSERT_TRUE(append("r3", Relation{.type = RelType::Thread, .seq = 3}));
+    const auto page = before(room, std::nullopt, 10);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 3U);
+    EXPECT_FALSE(page->at(0).rel);
+    EXPECT_EQ(page->at(1).rel, (Relation{.type = RelType::Thread, .seq = 1}));
+    const auto thread = ask<Page>([&](auto done) {
+        store_->relating(
+            room, {.to = 1, .type = RelType::Thread, .before = std::nullopt, .after = std::nullopt},
+            10, std::move(done));
+    });
+    ASSERT_TRUE(thread);
+    ASSERT_EQ(thread->size(), 1U);
+    EXPECT_EQ(thread->front().seq, 2U);
+    const auto after_page = ask<Page>([&](auto done) {
+        store_->relating(room, {.to = 1, .type = std::nullopt, .before = std::nullopt, .after = 0},
+                         10, std::move(done));
+    });
+    ASSERT_TRUE(after_page);
+    ASSERT_EQ(after_page->size(), 1U);
+    const auto counted = ask<std::vector<core::ports::RelCount>>([&](auto done) {
+        store_->rel_counts(room, {3, 1, 1, std::uint64_t{1} << 63U}, RelType::Thread,
+                           std::move(done));
+    });
+    ASSERT_TRUE(counted);
+    EXPECT_EQ(*counted, (std::vector<core::ports::RelCount>{{.seq = 1, .count = 1, .latest = 2},
+                                                            {.seq = 3, .count = 0, .latest = 0}}));
+    EXPECT_EQ(ask<core::ports::RedactOutcome>(
+                  [&](auto done) { store_->redact(room, 2, alice_, std::move(done)); }),
+              core::ports::RedactOutcome::Done);
+    const auto left = conn_->exec("SELECT count(*) FROM chat_message_relations WHERE room_id = $1",
+                                  Params{}.add_uuid(room.uuid()));
+    ASSERT_TRUE(left);
+    EXPECT_EQ(left->get(0, 0), "0");
+
+    // A stream's live chat keeps its newest 1000 messages, and their relations alone.
+    const core::RoomId live = stream_room();
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->record_live(live, std::move(done)); }));
+    const std::uint64_t live_generation = own(live);
+    for (int i = 1; i <= 1002; ++i) {
+        const auto stored =
+            ulw::test::ask_store<std::optional<std::uint64_t>>(*reactor_, [&](auto done) {
+                const auto body = bytes("l");
+                rooms_->append(live, live_generation,
+                               ulw::test::outgoing(alice_, std::format("l{}", i), body,
+                                                   std::chrono::floor<std::chrono::microseconds>(
+                                                       std::chrono::system_clock::now()),
+                                                   false,
+                                                   i == 1 ? std::nullopt
+                                                          : std::optional(Relation{
+                                                                .type = RelType::React, .seq = 1})),
+                               std::move(done));
+            });
+        ASSERT_TRUE(stored && *stored);
+    }
+    const auto kept =
+        conn_->exec("SELECT count(*), min(seq) FROM chat_message_relations WHERE room_id = $1",
+                    Params{}.add_uuid(live.uuid()));
+    ASSERT_TRUE(kept);
+    EXPECT_EQ(kept->get(0, 0), "1000");
+    EXPECT_EQ(kept->get(0, 1), "3");
 }
 
 } // namespace

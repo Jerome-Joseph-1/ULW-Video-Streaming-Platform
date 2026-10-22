@@ -234,8 +234,8 @@ public:
     }
     void send(const core::RoomId& room, rt::IMember& from, const core::UserId& sender,
               const rt::MessageKey& key, std::vector<std::byte> body, bool quiet,
-              rt::SendCallback done) override {
-        router_.send(room, from, sender, key, std::move(body), std::move(done), quiet);
+              std::optional<core::ports::Relation> rel, rt::SendCallback done) override {
+        router_.send(room, from, sender, key, std::move(body), std::move(done), quiet, rel);
     }
     void ask_owner(const core::RoomId& room, rt::IMember& from, std::span<const std::byte> request,
                    rt::OwnerAnswer done) override {

@@ -81,10 +81,11 @@ public:
     virtual ~IRooms() = default;
     virtual void join(const core::RoomId& room, rt::IMember& member, rt::JoinCallback done) = 0;
     virtual void leave(const core::RoomId& room, rt::IMember& member) noexcept = 0;
-    // `quiet`: the message notifies nobody (ADR-0128).
+    // `quiet`: the message notifies nobody (ADR-0128). `rel`: what it is to an earlier message
+    // (ADR-0136).
     virtual void send(const core::RoomId& room, rt::IMember& from, const core::UserId& sender,
                       const rt::MessageKey& key, std::vector<std::byte> body, bool quiet,
-                      rt::SendCallback done) = 0;
+                      std::optional<core::ports::Relation> rel, rt::SendCallback done) = 0;
     // An unsequenced, unstored notice to the room's members on every node
     // (rt::RoomRouter::notify): best effort, at most rt::kMaxOwnerMessage bytes.
     virtual void notify(const core::RoomId& room, std::span<const std::byte> notice) noexcept = 0;
@@ -213,6 +214,10 @@ struct ServiceCounters {
     // Joins of a room with no kind recorded that recorded nothing, the user having used up
     // ServiceLimits::record_burst.
     std::uint64_t unrecorded_joins = 0;
+    // Sends refused because their relation named no earlier message (ADR-0136), and rel_counts
+    // answered.
+    std::uint64_t bad_relations = 0;
+    std::uint64_t rel_counts = 0;
     // Clients closed because the service cut their user off (ADR-0132).
     std::uint64_t disconnects = 0;
     // Member lists their users changed (ADR-0096): direct chats that listed their pair, group
@@ -313,6 +318,9 @@ public:
     void call_status(ClientId id, const CallStatusQuery& query);
     // A history page around a seq (ADR-0118).
     void around(ClientId id, const History& history);
+    // How many messages relate to each of some seqs, for a client in the room (ADR-0136);
+    // charged as a history page.
+    void rel_counts(ClientId id, const RelCounts& counts);
     // Blanks a stored message, for its sender or an admin of the room, in a room the client
     // joined (ADR-0135); charged as a send. Once the store has, every node with members in the
     // room hears it (on_redaction), this one included, and the client is answered `redacted`.
@@ -490,9 +498,10 @@ private:
                 const core::ports::MessageResult<std::optional<std::uint64_t>>& result) noexcept;
     void redact_answered(ClientId id, const Redact& redact,
                          core::ports::MessageResult<core::ports::RedactOutcome> result) noexcept;
-    void
-    page_read(ClientId id, const core::RoomId& room,
-              core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
+    // `rel_to`: the message whose relations the page lists (ADR-0136), repeated in its end.
+    void page_read(ClientId id, const core::RoomId& room,
+                   core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page,
+                   std::optional<std::uint64_t> rel_to = std::nullopt) noexcept;
     void subscribe(Room& room, ClientId id, const Join& join);
     void called(ClientId id, const core::RoomId& room, const std::optional<CallId>& answering,
                 const std::optional<rt::MessageKey>& rid,

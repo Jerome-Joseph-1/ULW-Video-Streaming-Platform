@@ -115,9 +115,30 @@ std::expected<Command, EnvelopeError> join_of(const core::json::Value& message) 
     return join;
 }
 
+// "rel": {"type": one of RelType's names, "seq": an earlier message's}, and nothing else.
+std::optional<core::ports::Relation> rel_of(const core::json::Value& value) {
+    if (value.as_object() == nullptr || !only(value, {"type", "seq"})) {
+        return std::nullopt;
+    }
+    const auto type = string_of(value, "type").and_then(core::ports::rel_type_of);
+    const core::json::Value* seq = value.find("seq");
+    const auto n = seq == nullptr ? std::nullopt : seq->as_u64();
+    if (!type || !n || *n == 0) {
+        return std::nullopt;
+    }
+    return core::ports::Relation{.type = *type, .seq = *n};
+}
+
 std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "id", "body", "quiet"})) {
+    if (!only(message, {"type", "room", "id", "body", "quiet", "rel"})) {
         return std::unexpected(EnvelopeError::Malformed);
+    }
+    std::optional<core::ports::Relation> rel;
+    if (const core::json::Value* r = message.find("rel")) {
+        rel = rel_of(*r);
+        if (!rel) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
     }
     bool quiet = false;
     if (const core::json::Value* q = message.find("quiet")) {
@@ -145,7 +166,39 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
     if (!body) {
         return std::unexpected(EnvelopeError::BadBody);
     }
-    return Send{.room = *room, .id = *id, .body = std::move(*body), .quiet = quiet};
+    return Send{.room = *room, .id = *id, .body = std::move(*body), .quiet = quiet, .rel = rel};
+}
+
+std::expected<Command, EnvelopeError> rel_counts_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "seqs", "rel_type"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    RelCounts counts{.room = *room, .seqs = {}, .type = core::ports::RelType::Reply};
+    if (message.find("rel_type") != nullptr) {
+        const auto type = string_of(message, "rel_type").and_then(core::ports::rel_type_of);
+        if (!type) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        counts.type = *type;
+    }
+    const core::json::Value* list = message.find("seqs");
+    const auto* items = list == nullptr ? nullptr : list->as_array();
+    if (items == nullptr || items->empty() || items->size() > core::ports::kMaxRelCounts) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    counts.seqs.reserve(items->size());
+    for (const core::json::Value& item : *items) {
+        const auto seq = item.as_u64();
+        if (!seq) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
+        counts.seqs.push_back(*seq);
+    }
+    return counts;
 }
 
 std::expected<Command, EnvelopeError> redact_of(const core::json::Value& message) {
@@ -166,7 +219,8 @@ std::expected<Command, EnvelopeError> redact_of(const core::json::Value& message
 }
 
 [[nodiscard]] std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
-    if (!only(message, {"type", "room", "before", "after", "around", "limit"})) {
+    if (!only(message,
+              {"type", "room", "before", "after", "around", "limit", "rel_to", "rel_type"})) {
         return std::unexpected(EnvelopeError::Malformed);
     }
     auto room = room_of(message);
@@ -183,9 +237,17 @@ std::expected<Command, EnvelopeError> redact_of(const core::json::Value& message
         return into.has_value();
     };
     if (!seq_at("before", history.before) || !seq_at("after", history.after) ||
-        !seq_at("around", history.around) || (history.before && history.after) ||
-        (history.around && (history.before || history.after))) {
+        !seq_at("around", history.around) || !seq_at("rel_to", history.rel_to) ||
+        (history.before && history.after) ||
+        (history.around && (history.before || history.after || history.rel_to))) {
         return std::unexpected(EnvelopeError::Malformed);
+    }
+    // A type only names which relations of the message rel_to names.
+    if (message.find("rel_type") != nullptr) {
+        history.rel_type = string_of(message, "rel_type").and_then(core::ports::rel_type_of);
+        if (!history.rel_type || !history.rel_to) {
+            return std::unexpected(EnvelopeError::Malformed);
+        }
     }
     if (const core::json::Value* limit = message.find("limit")) {
         const auto n = limit->as_u64();
@@ -807,6 +869,9 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     if (name == "redact") {
         return redact_of(*message);
     }
+    if (name == "rel_counts") {
+        return rel_counts_of(*message);
+    }
     if (name == "call") {
         return call_of(*message);
     }
@@ -983,6 +1048,11 @@ void write_message(std::string& out, const rt::Message& message, bool redacted) 
     if (redacted) {
         out += R"(,"redacted":true)";
     }
+    if (message.rel) {
+        out += R"(,"rel":{"type":")";
+        out += core::ports::rel_type_name(message.rel->type);
+        std::format_to(std::back_inserter(out), R"(","seq":{}}})", message.rel->seq);
+    }
     out += R"(,"body":")";
     // The body's bytes, whatever they are; the encoding reads them as octets.
     // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -1010,10 +1080,37 @@ void write_redact_error(std::string& out, std::string_view reason, const core::R
     out += '}';
 }
 
-void write_history(std::string& out, const core::RoomId& room, std::size_t count) {
+void write_history(std::string& out, const core::RoomId& room, std::size_t count,
+                   std::optional<std::uint64_t> rel_to) {
     out += R"({"type":"history",)";
     append_room(out, room);
-    std::format_to(std::back_inserter(out), R"(,"count":{}}})", count);
+    std::format_to(std::back_inserter(out), R"(,"count":{})", count);
+    if (rel_to) {
+        std::format_to(std::back_inserter(out), R"(,"rel_to":{})", *rel_to);
+    }
+    out += '}';
+}
+
+void write_rel_counts(std::string& out, const core::RoomId& room, core::ports::RelType type,
+                      std::span<const core::ports::RelCount> counts) {
+    out += R"({"type":"rel_counts",)";
+    append_room(out, room);
+    out += R"(,"rel_type":")";
+    out += core::ports::rel_type_name(type);
+    out += R"(","counts":[)";
+    bool first = true;
+    for (const core::ports::RelCount& c : counts) {
+        if (!first) {
+            out += ',';
+        }
+        first = false;
+        std::format_to(std::back_inserter(out), R"({{"seq":{},"count":{})", c.seq, c.count);
+        if (c.count > 0) {
+            std::format_to(std::back_inserter(out), R"(,"latest":{})", c.latest);
+        }
+        out += '}';
+    }
+    out += "]}";
 }
 
 void write_error(std::string& out, std::string_view reason, const std::optional<core::RoomId>& room,
@@ -1032,10 +1129,11 @@ void write_error(std::string& out, std::string_view reason, const std::optional<
 
 // base64url without padding is four characters per three bytes and two or three for a partial
 // group. Around it, {"type":"message", the room (45), the seq (27), the sender (at most 140),
-// the id (at most 72), the time (at most 20), "quiet":true (13), "redacted":true (16) and
-// "body":"" (11) come to 362 bytes, and the WebSocket header of a frame under 64 KiB to 4 more.
+// the id (at most 72), the time (at most 20), "quiet":true (13), "redacted":true (16), the
+// relation (at most 51) and "body":"" (11) come to 413 bytes, and the WebSocket header of a frame
+// under 64 KiB to 4 more.
 std::size_t message_wire_size(std::size_t body) noexcept {
-    constexpr std::size_t kAround = 369;
+    constexpr std::size_t kAround = 420;
     return (((body * 4) + 2) / 3) + kAround;
 }
 

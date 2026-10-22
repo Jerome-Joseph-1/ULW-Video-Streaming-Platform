@@ -36,7 +36,8 @@ public:
     // (rt::is_ephemeral_room) message is not kept: only its seq counts, for last_seq.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
                 std::string key, std::vector<std::byte> body, core::WallTime sent_at,
-                core::ports::MessageCallback<std::uint64_t> done, bool quiet = false);
+                core::ports::MessageCallback<std::uint64_t> done, bool quiet = false,
+                std::optional<core::ports::Relation> rel = std::nullopt);
     void history_before(
         const core::RoomId& room, std::optional<std::uint64_t> before, std::size_t limit,
         core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override;
@@ -49,6 +50,12 @@ public:
                        core::ports::MessageCallback<std::uint64_t> done) override;
     void redact(const core::RoomId& room, std::uint64_t seq, const core::ports::Actor& actor,
                 core::ports::MessageCallback<core::ports::RedactOutcome> done) override;
+    void
+    relating(const core::RoomId& room, const core::ports::RelatingPage& query, std::size_t limit,
+             core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override;
+    void rel_counts(const core::RoomId& room, std::vector<std::uint64_t> seqs,
+                    core::ports::RelType type,
+                    core::ports::MessageCallback<std::vector<core::ports::RelCount>> done) override;
     void add_member(const core::RoomId& room, const core::UserId& user,
                     core::ports::MessageCallback<void> done) override;
     void remove_member(const core::RoomId& room, const core::UserId& user,

@@ -59,6 +59,7 @@ public:
         std::vector<std::byte> body;
         rt::SendCallback done;
         bool quiet = false;
+        std::optional<core::ports::Relation> rel = std::nullopt;
     };
 
     void join(const core::RoomId& room, rt::IMember& member, rt::JoinCallback done) override {
@@ -69,13 +70,14 @@ public:
     }
     void send(const core::RoomId& room, rt::IMember& /*from*/, const core::UserId& sender,
               const rt::MessageKey& key, std::vector<std::byte> body, bool quiet,
-              rt::SendCallback done) override {
+              std::optional<core::ports::Relation> rel, rt::SendCallback done) override {
         sends.push_back({.room = room,
                          .sender = sender,
                          .key = key,
                          .body = std::move(body),
                          .done = std::move(done),
-                         .quiet = quiet});
+                         .quiet = quiet,
+                         .rel = rel});
     }
 
     void notify(const core::RoomId& room, std::span<const std::byte> notice) noexcept override {
@@ -170,6 +172,24 @@ public:
         done(result);
     }
     std::vector<Redacting> redacts;
+    void
+    relating(const core::RoomId& /*room*/, const core::ports::RelatingPage& page, std::size_t limit,
+             core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override {
+        directions.emplace_back("relating");
+        relatings.push_back(page);
+        cursors.emplace_back(page.to, limit);
+        pages.push_back(std::move(done));
+    }
+    std::vector<core::ports::RelatingPage> relatings;
+    void
+    rel_counts(const core::RoomId& /*room*/, std::vector<std::uint64_t> seqs,
+               core::ports::RelType type,
+               core::ports::MessageCallback<std::vector<core::ports::RelCount>> done) override {
+        counted.emplace_back(std::move(seqs), type);
+        counts.push_back(std::move(done));
+    }
+    std::vector<std::pair<std::vector<std::uint64_t>, core::ports::RelType>> counted;
+    std::vector<core::ports::MessageCallback<std::vector<core::ports::RelCount>>> counts;
     void add_member(const core::RoomId& /*room*/, const core::UserId& /*user*/,
                     core::ports::MessageCallback<void> done) override {
         done({});
@@ -1160,6 +1180,100 @@ TEST_F(ChatServiceTest, ARedactBlanksTheMessageInTheStoreAndWhatThisNodeKeepsAnd
     longer.push_back(std::byte{0});
     EXPECT_FALSE(chat::decode_room_notice(longer));
     EXPECT_FALSE(chat::decode_room_notice(std::vector{std::byte{5}}));
+}
+
+// ADR-0136: a send's relation goes to the room plane with it, and only to a message this node
+// has heard of; a delivered message's relation is on its frame, live and resumed; a history may
+// list what relates to a message, and rel_counts counts it.
+TEST_F(ChatServiceTest, ARelationTravelsWithItsMessageAndIsListedAndCounted) {
+    using core::ports::Relation;
+    using core::ports::RelType;
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rt::IMember& member = rooms_.admit(1);
+    alice.take();
+    const Relation reply{.type = RelType::Reply, .seq = 1};
+    service_->send(a, {.room = room_id(), .id = key("r1"), .body = bytes("yes"), .rel = reply});
+    ASSERT_EQ(rooms_.sends.size(), 1U);
+    EXPECT_EQ(rooms_.sends[0].rel, reply);
+    // Seq 2 is not a message this node has heard of yet.
+    service_->send(a, {.room = room_id(),
+                       .id = key("r2"),
+                       .body = bytes("?"),
+                       .rel = Relation{.type = RelType::Reply, .seq = 2}});
+    EXPECT_EQ(rooms_.sends.size(), 1U);
+    const Seen refused = seen(alice.take().at(0));
+    EXPECT_EQ(refused.reason, "bad_rel");
+    EXPECT_EQ(refused.id, "r2");
+    EXPECT_EQ(service_->counters().bad_relations, 1U);
+
+    const auto body = std::as_bytes(std::span{std::string_view{"yes"}});
+    member.deliver({.room = room_id(),
+                    .seq = 2,
+                    .sender = *core::UserId::parse("alice"),
+                    .key = key("r1"),
+                    .sent_at = {},
+                    .rel = reply,
+                    .body = body});
+    const std::string_view on_frame = R"("rel":{"type":"reply","seq":1})";
+    EXPECT_NE(alice.take().at(0).find(on_frame), std::string::npos);
+    FakeClient bob;
+    const auto b = attach(bob, "bob");
+    join(b, 1);
+    const auto resumed = bob.take();
+    ASSERT_EQ(resumed.size(), 2U);
+    EXPECT_NE(resumed[1].find(on_frame), std::string::npos) << resumed[1];
+    // Redacted, it relates to nothing any more.
+    service_->on_redaction(room_id(), 2);
+    alice.take();
+    bob.take();
+    FakeClient carol;
+    const auto c = attach(carol, "carol");
+    join(c, 1);
+    const auto blanked = carol.take();
+    ASSERT_EQ(blanked.size(), 2U);
+    EXPECT_EQ(blanked[1].find("rel"), std::string::npos) << blanked[1];
+
+    // What relates to seq 1, in its own history page.
+    service_->history(a, {.room = room_id(),
+                          .before = std::nullopt,
+                          .after = 1,
+                          .rel_to = 1,
+                          .rel_type = RelType::Reply});
+    ASSERT_EQ(messages_.relatings.size(), 1U);
+    EXPECT_EQ(messages_.relatings[0].to, 1U);
+    EXPECT_EQ(messages_.relatings[0].type, RelType::Reply);
+    EXPECT_EQ(messages_.relatings[0].after, 1U);
+    auto related = stored(2, "yes");
+    related.rel = reply;
+    messages_.pages.back()(std::vector{related});
+    const auto page = alice.take();
+    ASSERT_EQ(page.size(), 2U);
+    EXPECT_NE(page[0].find(on_frame), std::string::npos);
+    EXPECT_EQ(page[1], std::string(R"({"type":"history","room":")") + std::string(kRoom) +
+                           R"(","count":1,"rel_to":1})");
+
+    service_->rel_counts(a, {.room = room_id(), .seqs = {1, 5}, .type = RelType::Reply});
+    ASSERT_EQ(messages_.counted.size(), 1U);
+    EXPECT_EQ(messages_.counted[0].first, (std::vector<std::uint64_t>{1, 5}));
+    messages_.counts[0](std::vector<core::ports::RelCount>{{.seq = 1, .count = 1, .latest = 2},
+                                                           {.seq = 5, .count = 0, .latest = 0}});
+    EXPECT_EQ(alice.take().at(0),
+              std::string(R"({"type":"rel_counts","room":")") + std::string(kRoom) +
+                  R"(","rel_type":"reply","counts":[{"seq":1,"count":1,"latest":2},)"
+                  R"({"seq":5,"count":0}]})");
+    EXPECT_EQ(service_->counters().rel_counts, 1U);
+    service_->rel_counts(a, {.room = room_id(), .seqs = {1}, .type = RelType::React});
+    messages_.counts[1](std::unexpected(core::ports::MessageStoreError::Unavailable));
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "unavailable");
+    // Only in a room the client joined; answered nowhere once it has gone.
+    service_->rel_counts(a, {.room = room_id(kOtherRoom), .seqs = {1}, .type = RelType::Reply});
+    EXPECT_EQ(seen(alice.take().at(0)).reason, "not_joined");
+    service_->rel_counts(a, {.room = room_id(), .seqs = {1}, .type = RelType::Reply});
+    service_->detach(a);
+    messages_.counts[2](std::vector<core::ports::RelCount>{});
+    EXPECT_TRUE(alice.take().empty());
 }
 
 // A redaction's notice reaches on_redaction through the service's room notices (layout 5), and

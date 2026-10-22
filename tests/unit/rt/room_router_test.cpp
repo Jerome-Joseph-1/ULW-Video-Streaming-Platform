@@ -55,8 +55,11 @@ public:
                        .sender = std::string(m.sender.view()),
                        .body = ulw::test::as_text(m.body)});
         sent_at.push_back(m.sent_at);
+        rels.push_back(m.rel);
     }
     std::vector<Received> got;
+    // Each delivered message's relation (ADR-0136), in the order of got.
+    std::vector<std::optional<core::ports::Relation>> rels;
     // Each delivered message's time, in the order of got.
     std::vector<core::WallTime> sent_at;
 };
@@ -794,6 +797,37 @@ TEST_P(RoomRouterTest, AMemberToldTheHeadAtItsJoinIsDeliveredNothingAtOrBelowIt)
     EXPECT_EQ(db_.rooms.at(room_).last_seq, 3U);
 }
 
+// ADR-0136: what a message relates to travels with it, to its owner and from there to every
+// member, sent on the owner's node or forwarded to it.
+TEST_P(RoomRouterTest, AMessagesRelationReachesEveryMemberWithIt) {
+    Node& a = start("chat-a");
+    Node& b = start("chat-b");
+    Member alice;
+    Member bob;
+    ASSERT_TRUE(join(a, alice));
+    ASSERT_TRUE(join(b, bob));
+    ASSERT_EQ(send(a, alice, "alice", "question"), 1U);
+    const core::ports::Relation reply{.type = core::ports::RelType::Reply, .seq = 1};
+    const core::ports::Relation react{.type = core::ports::RelType::React, .seq = 1};
+    std::vector<std::expected<std::uint64_t, RouteError>> answers;
+    for (Node* node : {&b, &a}) {
+        Member& from = node == &b ? bob : alice;
+        const auto body = std::as_bytes(std::span{std::string_view{"related"}});
+        node->router->send(
+            room_, from, *core::UserId::parse(node == &b ? "bob" : "alice"), next_key(),
+            {body.begin(), body.end()}, [&](auto r) noexcept { answers.push_back(r); },
+            /*quiet=*/false, node == &b ? reply : react);
+        const std::size_t sent = node == &b ? 1 : 2;
+        ASSERT_TRUE(pump([&] {
+            return answers.size() == sent && alice.got.size() == sent + 1 &&
+                   bob.got.size() == sent + 1;
+        }));
+    }
+    const std::vector<std::optional<core::ports::Relation>> expected{std::nullopt, reply, react};
+    EXPECT_EQ(alice.rels, expected);
+    EXPECT_EQ(bob.rels, expected);
+}
+
 TEST_P(RoomRouterTest, ARetryQueuedBehindItsFirstTryIsAnsweredByTheOwnerWithTheFirstSeq) {
     Node& a = start("chat-a");
     Node& b = start("chat-b");
@@ -1198,7 +1232,7 @@ TEST_P(RoomRouterTest, APeerThatSkipsTheHandshakeIsCutOffBeforeAnythingHappens) 
     wire::encode_subscribe(frames, 1, room_);
     const auto body = std::as_bytes(std::span{std::string_view{"forged"}});
     wire::encode_send(frames, 2, room_, *core::UserId::parse("alice"), *rt::MessageKey::parse("k"),
-                      false, body);
+                      false, std::nullopt, body);
     peer.send(frames);
     EXPECT_TRUE(peer.hung_up());
     // No room was made for it, and nothing was sequenced.
@@ -1211,13 +1245,13 @@ TEST_P(RoomRouterTest, AHelloOfAnotherVersionIsRefusedAsSuch) {
     RawPeer peer(*reactor_, a.port);
     std::vector<std::byte> hello;
     wire::encode_hello(hello, *core::NodeId::parse("chat-x"), wire::Nonce{});
-    // After the length (4 bytes) and the type (1), the version: 6 was the last before
-    // messages carried their flags (ADR-0128).
-    hello.at(5) = std::byte{6};
+    // After the length (4 bytes) and the type (1), the version: 7 was the last before
+    // messages carried their relations (ADR-0136).
+    hello.at(5) = std::byte{7};
     peer.send(hello);
     EXPECT_TRUE(peer.hung_up());
     EXPECT_EQ(a.events.refused,
-              std::vector<std::string>{"version mismatch: peer speaks 6, this node 7"});
+              std::vector<std::string>{"version mismatch: peer speaks 7, this node 8"});
 }
 
 TEST_P(RoomRouterTest, AHelloIsNotEnoughWithoutTheProofThatFollowsIt) {

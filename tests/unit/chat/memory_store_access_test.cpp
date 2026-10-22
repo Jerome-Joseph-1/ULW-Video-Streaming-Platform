@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <memory>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -122,6 +123,68 @@ TEST_F(MemoryStoreAccess, AMessageIsRedactedByItsSenderAnAdminOrTheServiceAndSta
     }
     // A repeat of the send is answered with its seq, whatever its body, and restores nothing.
     EXPECT_EQ(append(9, alice_, "k1", {std::byte{8}}), 1U);
+}
+
+// ADR-0136 on the store a development chat_server keeps: a message's relation is kept with it,
+// listed by the message it relates to and counted, and goes when it is redacted; a relation to a
+// later message is not kept. The same laws on Postgres are in integration/message_store_test.cpp.
+TEST_F(MemoryStoreAccess, ARelationIsKeptListedAndCountedAndGoesWithARedaction) {
+    using core::ports::Relation;
+    using core::ports::RelType;
+    using core::ports::StoredMessage;
+    const core::RoomId room = new_room();
+    const auto append = [&](std::uint64_t seq, std::optional<Relation> rel) {
+        return ulw::test::ask<std::uint64_t>(*reactor_, [&](auto done) {
+            store_->append(room, seq, alice_, "k" + std::to_string(seq), {std::byte{1}},
+                           std::chrono::system_clock::now(), std::move(done), false, rel);
+        });
+    };
+    ASSERT_TRUE(append(1, std::nullopt));
+    ASSERT_TRUE(append(2, Relation{.type = RelType::Reply, .seq = 1}));
+    ASSERT_TRUE(append(3, Relation{.type = RelType::React, .seq = 1}));
+    ASSERT_TRUE(append(4, Relation{.type = RelType::Reply, .seq = 1}));
+    // A relation to a message after it is not kept.
+    ASSERT_TRUE(append(5, Relation{.type = RelType::Reply, .seq = 9}));
+    const auto relating = [&](core::ports::RelatingPage page, std::size_t limit = 10) {
+        const auto got = ulw::test::ask<std::vector<StoredMessage>>(
+            *reactor_, [&](auto done) { store_->relating(room, page, limit, std::move(done)); });
+        std::vector<std::uint64_t> seqs;
+        for (const StoredMessage& m : got.value_or(std::vector<StoredMessage>{})) {
+            seqs.push_back(m.seq);
+        }
+        return seqs;
+    };
+    EXPECT_EQ(
+        relating({.to = 1, .type = std::nullopt, .before = std::nullopt, .after = std::nullopt}),
+        (std::vector<std::uint64_t>{4, 3, 2}));
+    EXPECT_EQ(relating({.to = 1, .type = RelType::Reply, .before = 4, .after = std::nullopt}),
+              (std::vector<std::uint64_t>{2}));
+    EXPECT_EQ(relating({.to = 1, .type = RelType::Reply, .before = std::nullopt, .after = 0}, 1),
+              (std::vector<std::uint64_t>{2}));
+    EXPECT_TRUE(
+        relating({.to = 9, .type = std::nullopt, .before = std::nullopt, .after = std::nullopt})
+            .empty());
+    const auto counts = [&](std::vector<std::uint64_t> seqs, RelType type) {
+        return ulw::test::ask<std::vector<core::ports::RelCount>>(*reactor_, [&](auto done) {
+            store_->rel_counts(room, std::move(seqs), type, std::move(done));
+        });
+    };
+    EXPECT_EQ(counts({9, 1, 1}, RelType::Reply),
+              (std::vector<core::ports::RelCount>{{.seq = 1, .count = 2, .latest = 4},
+                                                  {.seq = 9, .count = 0, .latest = 0}}));
+    ASSERT_EQ(ulw::test::ask<core::ports::RedactOutcome>(
+                  *reactor_, [&](auto done) { store_->redact(room, 4, alice_, std::move(done)); }),
+              core::ports::RedactOutcome::Done);
+    EXPECT_EQ(counts({1}, RelType::Reply),
+              (std::vector<core::ports::RelCount>{{.seq = 1, .count = 1, .latest = 2}}));
+    EXPECT_EQ(counts({1}, RelType::Reply), counts({1}, RelType::Reply));
+    EXPECT_TRUE(ulw::test::ask<std::vector<core::ports::RelCount>>(
+                    *reactor_,
+                    [&](auto done) {
+                        store_->rel_counts(new_room(), {1}, RelType::Reply, std::move(done));
+                    })
+                    ->front()
+                    .count == 0);
 }
 
 } // namespace

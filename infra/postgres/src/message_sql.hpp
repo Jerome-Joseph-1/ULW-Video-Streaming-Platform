@@ -14,35 +14,86 @@ namespace infra::postgres::message_sql {
 // size (its running sum is its own length): no writer here stores a body over the bound, but a
 // page that came back empty would read as the end of the room. The window reads rows in index
 // order and one row ahead of what it emits, so the limit stops the scan early.
-// $1 room, $2 cursor (exclusive), $3 row limit, $4 byte bound.
+// $1 room, $2 cursor (exclusive), $3 row limit, $4 byte bound. Each message's relation
+// (ADR-0136) is one primary-key probe of chat_message_relations per row of the page: the LIMIT
+// keeps the planner from making it a join that reads every relation of the room and sorts them.
 inline constexpr std::string_view kHistoryBeforeText = R"sql(
-SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet,
-       redacted
+SELECT page.seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet,
+       redacted, r.rel_type, r.rel_seq
   FROM (SELECT seq, sender, msg_key, sent_at, body, quiet, redacted,
                sum(octet_length(body)) OVER (ORDER BY seq DESC) AS running
           FROM chat_messages
          WHERE room_id = $1 AND seq < $2
          ORDER BY seq DESC
          LIMIT $3) AS page
+  LEFT JOIN LATERAL (SELECT rel_type, rel_seq FROM chat_message_relations
+                      WHERE room_id = $1 AND seq = page.seq LIMIT 1) AS r ON true
  WHERE running <= $4 OR running = octet_length(body)
- ORDER BY seq DESC)sql";
+ ORDER BY page.seq DESC)sql";
 // A view of a literal: data() is NUL-terminated.
 // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
 inline constexpr Sql kHistoryBefore = kHistoryBeforeText.data();
 
 inline constexpr std::string_view kHistoryAfterText = R"sql(
-SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet,
-       redacted
+SELECT page.seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet,
+       redacted, r.rel_type, r.rel_seq
   FROM (SELECT seq, sender, msg_key, sent_at, body, quiet, redacted,
                sum(octet_length(body)) OVER (ORDER BY seq) AS running
           FROM chat_messages
          WHERE room_id = $1 AND seq > $2
          ORDER BY seq
          LIMIT $3) AS page
+  LEFT JOIN LATERAL (SELECT rel_type, rel_seq FROM chat_message_relations
+                      WHERE room_id = $1 AND seq = page.seq LIMIT 1) AS r ON true
  WHERE running <= $4 OR running = octet_length(body)
- ORDER BY seq)sql";
+ ORDER BY page.seq)sql";
 // NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
 inline constexpr Sql kHistoryAfter = kHistoryAfterText.data();
+
+// The messages relating to one (ADR-0136), paged by their own seqs as history is, and cut at
+// the same bounds: the index on (room, rel_seq, rel_type, seq) walks those of one type in order
+// and stops at the limit; of any type, it reads every relation of the message and sorts them.
+// Each message is then a primary-key probe of chat_messages. $1 room, $2 the message related
+// to, $3 the type ('' for any), $4 cursor (exclusive), $5 row limit, $6 byte bound.
+inline constexpr std::string_view kRelatingBeforeText = R"sql(
+SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet,
+       redacted, rel_type, rel_seq
+  FROM (SELECT m.seq, m.sender, m.msg_key, m.sent_at, m.body, m.quiet, m.redacted, r.rel_type,
+               r.rel_seq, sum(octet_length(m.body)) OVER (ORDER BY r.seq DESC) AS running
+          FROM chat_message_relations r
+          JOIN chat_messages m ON m.room_id = r.room_id AND m.seq = r.seq
+         WHERE r.room_id = $1 AND r.rel_seq = $2 AND ($3 = '' OR r.rel_type = $3) AND r.seq < $4
+         ORDER BY r.seq DESC
+         LIMIT $5) AS page
+ WHERE running <= $6 OR running = octet_length(body)
+ ORDER BY seq DESC)sql";
+// NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
+inline constexpr Sql kRelatingBefore = kRelatingBeforeText.data();
+
+inline constexpr std::string_view kRelatingAfterText = R"sql(
+SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet,
+       redacted, rel_type, rel_seq
+  FROM (SELECT m.seq, m.sender, m.msg_key, m.sent_at, m.body, m.quiet, m.redacted, r.rel_type,
+               r.rel_seq, sum(octet_length(m.body)) OVER (ORDER BY r.seq) AS running
+          FROM chat_message_relations r
+          JOIN chat_messages m ON m.room_id = r.room_id AND m.seq = r.seq
+         WHERE r.room_id = $1 AND r.rel_seq = $2 AND ($3 = '' OR r.rel_type = $3) AND r.seq > $4
+         ORDER BY r.seq
+         LIMIT $5) AS page
+ WHERE running <= $6 OR running = octet_length(body)
+ ORDER BY seq)sql";
+// NOLINTNEXTLINE(bugprone-suspicious-stringview-data-usage)
+inline constexpr Sql kRelatingAfter = kRelatingAfterText.data();
+
+// For each seq of $2 (space-separated), the messages relating to it by type $3: how many and the
+// newest, read from the index alone. Each seq once, in order.
+inline constexpr Sql kRelCounts = R"sql(
+SELECT s.seq, count(r.seq), coalesce(max(r.seq), 0)
+  FROM (SELECT DISTINCT unnest(string_to_array($2, ' ')::bigint[]) AS seq) AS s
+  LEFT JOIN chat_message_relations r
+         ON r.room_id = $1 AND r.rel_seq = s.seq AND r.rel_type = $3
+ GROUP BY s.seq
+ ORDER BY s.seq)sql";
 
 // The counter the owner's fenced write advances, not max(seq): one source for both.
 // The newest message that is not quiet (ADR-0128), walking the primary key down from the top.
@@ -53,7 +104,7 @@ SELECT coalesce((SELECT seq FROM chat_messages WHERE room_id = $1 AND NOT quiet
 // Blanks a message for its sender, an admin of the room, or the service ($3 empty: no user id
 // is), by its primary key (ADR-0135). Answers whether the message is stored, and whether it was
 // blanked; a stored one that was not is the actor's to refuse. Repeated, it blanks it again,
-// which changes nothing.
+// which changes nothing. What it related to goes with its body (ADR-0136).
 inline constexpr Sql kRedact = R"sql(
 WITH blanked AS (
     UPDATE chat_messages SET body = ''::bytea, redacted = true
@@ -61,7 +112,10 @@ WITH blanked AS (
        AND ($3 = '' OR sender = $3
             OR EXISTS (SELECT 1 FROM chat_members
                         WHERE room_id = $1 AND user_id = $3 AND role = 'admin'))
-    RETURNING seq)
+    RETURNING seq),
+unrelated AS (
+    DELETE FROM chat_message_relations
+     WHERE room_id = $1 AND seq = $2 AND EXISTS (SELECT 1 FROM blanked))
 SELECT EXISTS (SELECT 1 FROM chat_messages WHERE room_id = $1 AND seq = $2),
        EXISTS (SELECT 1 FROM blanked))sql";
 

@@ -401,7 +401,7 @@ including every room from before M19 (migration 0006), needs a new room id.
 The chat nodes speak a versioned channel to each other (docs/adr/0043), and a node refuses a
 peer of another version. A release that changes the version (M19 moves it from 2 to 3, the
 call handler from 3 to 4, docs/adr/0087, the call's ring from 4 to 5, docs/adr/0091, a message's time from 5 to 6,
-docs/adr/0112, and a message's flags from 6 to 7, docs/adr/0128; one `Recreate` covers several when they ship together) splits a rolling update in two: until the last old pod
+docs/adr/0112, a message's flags from 6 to 7, docs/adr/0128, and a message's relation from 7 to 8, docs/adr/0136; one `Recreate` covers several when they ship together) splits a rolling update in two: until the last old pod
 is gone, old and new nodes cannot reach each other, rooms owned across the split are unreachable
 from the other side, and their joins and sends fail as `unavailable` (clients retry them). Roll
 such a release out with the chat Deployment's strategy set to `Recreate`

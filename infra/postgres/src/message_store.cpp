@@ -78,6 +78,16 @@ private:
         if (!seq || !sender || !key || !micros || !body || !quiet || !redacted) {
             return std::unexpected(MessageStoreError::Corrupt);
         }
+        // Null for a message that relates to none (ADR-0136).
+        std::optional<core::ports::Relation> rel;
+        if (const auto type_text = r.get(row, 7)) {
+            const auto type = core::ports::rel_type_of(*type_text);
+            const auto to = r.get(row, 8).and_then(parse_uint64);
+            if (!type || !to) {
+                return std::unexpected(MessageStoreError::Corrupt);
+            }
+            rel = core::ports::Relation{.type = *type, .seq = *to};
+        }
         page.push_back(StoredMessage{
             .seq = *seq,
             .sender = *sender,
@@ -86,6 +96,7 @@ private:
             .body = std::move(*body),
             .quiet = *quiet,
             .redacted = *redacted,
+            .rel = rel,
         });
     }
     return page;
@@ -178,6 +189,102 @@ private:
     core::RoomId room_;
     core::UserId user_;
     MessageCallback<void> done_;
+};
+
+// A relation's page binds its type's name, which is static (ADR-0136).
+class Relating final : public Operation {
+public:
+    Relating(const core::RoomId& room, const core::ports::RelatingPage& page, std::size_t limit,
+             MessageCallback<std::vector<StoredMessage>> done)
+        : room_(room), page_(page), limit_(std::min(limit, kMaxHistoryRows)),
+          done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        const std::string_view type =
+            page_.type ? core::ports::rel_type_name(*page_.type) : std::string_view{};
+        const std::uint64_t cursor =
+            page_.after.value_or(page_.before.value_or(std::numeric_limits<std::uint64_t>::max()));
+        return Statement{.sql = page_.after ? message_sql::kRelatingAfter
+                                            : message_sql::kRelatingBefore,
+                         .params = Params{}
+                                       .add_uuid(room_.uuid())
+                                       .add_int(as_int(page_.to))
+                                       .add_text(type)
+                                       .add_int(as_int(cursor))
+                                       .add_int(as_int(limit_))
+                                       .add_int(as_int(kMaxHistoryBytes))};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+        } else {
+            done_(decode_page(*outcome));
+        }
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(MessageStoreError::Unavailable));
+    }
+
+private:
+    core::RoomId room_;
+    core::ports::RelatingPage page_;
+    std::size_t limit_;
+    MessageCallback<std::vector<StoredMessage>> done_;
+};
+
+// Binds the seqs asked, as one space-separated text it keeps.
+class RelCounts final : public Operation {
+public:
+    RelCounts(const core::RoomId& room, std::string seqs, core::ports::RelType type,
+              MessageCallback<std::vector<core::ports::RelCount>> done)
+        : room_(room), seqs_(std::move(seqs)), type_(type), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = message_sql::kRelCounts,
+                         .params = Params{}
+                                       .add_uuid(room_.uuid())
+                                       .add_text(seqs_)
+                                       .add_text(core::ports::rel_type_name(type_))};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+            return std::nullopt;
+        }
+        std::vector<core::ports::RelCount> counts;
+        try {
+            counts.reserve(static_cast<std::size_t>(outcome->rows()));
+            for (int row = 0; row < outcome->rows(); ++row) {
+                const auto seq = outcome->get(row, 0).and_then(parse_uint64);
+                const auto count = outcome->get(row, 1).and_then(parse_uint64);
+                const auto latest = outcome->get(row, 2).and_then(parse_uint64);
+                if (!seq || !count || !latest) {
+                    done_(std::unexpected(MessageStoreError::Corrupt));
+                    return std::nullopt;
+                }
+                counts.push_back({.seq = *seq, .count = *count, .latest = *latest});
+            }
+        } catch (const std::bad_alloc&) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+            return std::nullopt;
+        }
+        done_(std::move(counts));
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(MessageStoreError::Unavailable));
+    }
+
+private:
+    core::RoomId room_;
+    std::string seqs_;
+    core::ports::RelType type_;
+    MessageCallback<std::vector<core::ports::RelCount>> done_;
 };
 
 // A redaction binds the actor's id, which must outlive the statement (ADR-0135).
@@ -1365,6 +1472,32 @@ void PgMessageStore::last_loud_seq(const core::RoomId& room, MessageCallback<std
     impl_->pool().submit(std::make_unique<Single<std::uint64_t>>(
         Statement{.sql = message_sql::kLastLoudSeq, .params = Params{}.add_uuid(room.uuid())},
         &decode_last_seq, std::move(done)));
+}
+
+void PgMessageStore::relating(const core::RoomId& room, const core::ports::RelatingPage& page,
+                              std::size_t limit, MessageCallback<std::vector<StoredMessage>> done) {
+    impl_->pool().submit(std::make_unique<Relating>(room, page, limit, std::move(done)));
+}
+
+void PgMessageStore::rel_counts(const core::RoomId& room, std::vector<std::uint64_t> seqs,
+                                core::ports::RelType type,
+                                MessageCallback<std::vector<core::ports::RelCount>> done) {
+    if (seqs.size() > core::ports::kMaxRelCounts) {
+        seqs.resize(core::ports::kMaxRelCounts);
+    }
+    // Seqs are bigint: one past it is no room's, and is left out.
+    std::erase_if(seqs, [](std::uint64_t seq) {
+        return seq > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    });
+    std::string joined;
+    for (const std::uint64_t seq : seqs) {
+        if (!joined.empty()) {
+            joined += ' ';
+        }
+        joined += std::to_string(seq);
+    }
+    impl_->pool().submit(
+        std::make_unique<RelCounts>(room, std::move(joined), type, std::move(done)));
 }
 
 void PgMessageStore::redact(const core::RoomId& room, std::uint64_t seq,
