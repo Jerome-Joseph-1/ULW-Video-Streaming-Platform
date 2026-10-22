@@ -571,8 +571,9 @@ TEST_P(ChatSessionTest, AnUpgradeAskedToBeRefusedOnTheSocketIsClosedWithACodeTha
         }
         while (const auto frame = c->next_frame(seconds(10))) {
             if (frame->first == codec::ws::Opcode::Close && frame->second.size() >= 2) {
-                const unsigned code = (static_cast<unsigned char>(frame->second[0]) << 8U) |
-                                      static_cast<unsigned char>(frame->second[1]);
+                const unsigned code =
+                    (static_cast<unsigned>(static_cast<unsigned char>(frame->second[0])) << 8U) |
+                    static_cast<unsigned char>(frame->second[1]);
                 return {code, frame->second.substr(2)};
             }
         }
