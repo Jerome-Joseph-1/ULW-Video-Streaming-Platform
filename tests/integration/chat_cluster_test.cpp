@@ -1772,11 +1772,20 @@ TEST_P(ChatClusterTest, ADirectChatsMembersGetTicketsOnAnyNodeThatLiveKitAdmitsT
     EXPECT_NE(second->join.find("alice/" + alice_device), std::string::npos)
         << "bob's join response does not name alice as already in the room";
 
-    // A call is two participants: a third device, with a ticket of its own, is refused.
-    const auto third = call_answer(*alice, direct, "01a0eb86-6cca-7dce-84cc-3bb47615f9a2");
+    // A call takes two devices of each member (ADR-0131): alice's second is admitted beside
+    // her first, and her third is refused by chat, which counts hers in the room first.
+    const auto phone = call_answer(*alice, direct, "01a0eb86-6cca-7dce-84cc-3bb47615f9a2");
+    ASSERT_TRUE(phone);
+    ASSERT_EQ(phone->type, "ticket") << phone->reason;
+    const auto both = rtc_join(phone->token, &refusal);
+    ASSERT_TRUE(both) << "LiveKit refused alice's second device: " << refusal;
+    EXPECT_NE(both->join.find(direct + ":1"), std::string::npos);
+    EXPECT_NE(both->join.find("bob/" + bob_device), std::string::npos);
+    const auto third = call_answer(*alice, direct, "01a0eb86-6cca-7dce-84cc-3bb47615f9a3");
     ASSERT_TRUE(third);
-    ASSERT_EQ(third->type, "ticket") << third->reason;
-    EXPECT_FALSE(rtc_join(third->token, &refusal)) << "LiveKit admitted a third participant";
+    EXPECT_EQ(third->type, "error");
+    EXPECT_EQ(third->reason, "call_full");
+    EXPECT_EQ(metric(nodes_[0], "call_refusals_total{reason=\"call_full\"}"), 1U);
 
     // The ticket is what admits: one with its signature altered is refused.
     // The signature's first character: all six of its bits are the signature's, where the
