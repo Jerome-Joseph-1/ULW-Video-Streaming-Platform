@@ -18,15 +18,26 @@ inputs:
 runs:
   using: composite
   steps:
+    # A mirror that stops answering held apt for a job's whole hour more than once: a fetch that
+    # hears nothing for 30 s is dropped and retried, and an install that fails is tried again,
+    # three times in all. A mirror that is slow but answering is waited for, however long.
     - name: Install toolchain
       shell: bash
       run: |
-        sudo apt-get update -qq
-        sudo apt-get install -y -qq --no-install-recommends \
-          g++-14 clang-19 clang-tidy-19 clang-format-18 lld-19 libclang-rt-19-dev \
-          ninja-build ccache mold jq pkg-config \
-          libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev libjemalloc-dev zlib1g-dev ffmpeg \
-          python3-yaml
+        apt=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3
+             -o DPkg::Lock::Timeout=120)
+        for attempt in 1 2 3; do
+          if sudo apt-get "${apt[@]}" update -qq &&
+            sudo apt-get "${apt[@]}" install -y -qq --no-install-recommends \
+              g++-14 clang-19 clang-tidy-19 clang-format-18 lld-19 libclang-rt-19-dev \
+              ninja-build ccache mold jq pkg-config \
+              libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev libjemalloc-dev zlib1g-dev \
+              ffmpeg python3-yaml; then
+            exit 0
+          fi
+          echo "apt attempt $attempt failed" >&2
+        done
+        exit 1
     # The worker runs ffmpeg in a network namespace of its own (ADR-0025). The runners'
     # AppArmor policy refuses unprivileged user namespaces, and the worker refuses to start
     # without its sandbox, so its tests would only skip.
