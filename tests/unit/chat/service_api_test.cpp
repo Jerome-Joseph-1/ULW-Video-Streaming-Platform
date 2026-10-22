@@ -10,6 +10,7 @@
 #include "call.hpp"
 #include "live_chat.hpp"
 #include "named_rooms.hpp"
+#include "presence_room.hpp"
 #include "service_api.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_verifier.hpp"
@@ -680,6 +681,14 @@ TEST_F(ServiceApiTest, RequestsThatAreNotTheApisAreRefusedBeforeAnythingIsAsked)
         {"members", R"({"room":")" + room + R"(","limit":"5"})"},
         {"members", R"({"room":"nope"})"},
         {"members", R"({"room":")" + room + R"(","x":1})"},
+        {"history", R"({"room":")" + room + R"(","before":5,"after":1})"},
+        {"history", R"({"room":")" + room + R"(","before":-1})"},
+        {"history", R"({"room":")" + room + R"(","after":"1"})"},
+        {"history", R"({"room":")" + room + R"(","bodies":"yes"})"},
+        {"history", R"({"room":")" + room + R"(","limit":101})"},
+        {"history", R"({"room":")" + room + R"(","around":3})"},
+        {"history", R"({"after":3})"},
+        {"history", R"({"room":")" + chat::presence_room(user("a")).to_string() + R"("})"},
     };
     for (const auto& [op, body] : bad) {
         const Answer a = ask(op, body);
@@ -770,14 +779,68 @@ TEST_F(ServiceApiTest, AStoreThatCannotBeReachedIs503) {
         {"remove_member", R"({"room":"04ff0817-879c-8a63-b5a8-9ebacad5d927","user":"b"})"},
         {"rooms", R"({"user":"alice"})"},
         {"members", R"({"room":"04ff0817-879c-8a63-b5a8-9ebacad5d927"})"},
-        {"disconnect_user", R"({"user":"alice"})"}};
+        {"disconnect_user", R"({"user":"alice"})"},
+        {"history", R"({"room":"04ff0817-879c-8a63-b5a8-9ebacad5d927"})"},
+        {"history", R"({"room":"04ff0817-879c-8a63-b5a8-9ebacad5d927","after":0})"}};
     for (const auto& [op, body] : requests) {
         const Answer a = ask(op, body);
         EXPECT_EQ(a.status, 503) << op;
         EXPECT_EQ(a.field("reason"), "unavailable") << op;
         EXPECT_EQ(a.header("Retry-After"), "1") << op;
     }
-    EXPECT_EQ(api_->counters().unavailable, 7U);
+    EXPECT_EQ(api_->counters().unavailable, 9U);
+}
+
+// ADR-0133: the backend reads a room's history as the socket's `history` pages it, to check that
+// a seq exists and who sent it, with the bodies only when it asks for them.
+TEST_F(ServiceApiTest, HistoryNamesEachMessagesSeqSenderIdAndTimeAndItsBodyOnlyWhenAsked) {
+    auto& memory = static_cast<infra::messages::MemoryMessageStore&>(*store_);
+    const core::RoomId room = chat::direct_room(user("alice"), user("bob"));
+    const std::string r = room.to_string();
+    const core::WallTime at{std::chrono::microseconds{1767225700123456}};
+    int stored = 0;
+    for (std::uint64_t seq = 1; seq <= 3; ++seq) {
+        const std::string text = "hi " + std::to_string(seq);
+        const auto b = std::as_bytes(std::span{text});
+        memory.append(
+            room, seq, user(seq == 2 ? "bob" : "alice"), "m" + std::to_string(seq),
+            {b.begin(), b.end()}, at + std::chrono::seconds{seq},
+            [&](core::ports::MessageResult<std::uint64_t> done) noexcept {
+                stored += done ? 1 : 0;
+            },
+            seq == 3);
+    }
+    ASSERT_TRUE(pump_until(*reactor_, [&] { return stored == 3; }));
+
+    const Answer newest = ask("history", R"({"room":")" + r + R"(","limit":2})");
+    ASSERT_EQ(newest.status, 200) << newest.body;
+    EXPECT_EQ(
+        newest.body,
+        std::format(R"({{"type":"history","room":"{}","messages":[)"
+                    R"({{"seq":3,"sender":"alice","id":"m3","at":1767225703123,"quiet":true}},)"
+                    R"({{"seq":2,"sender":"bob","id":"m2","at":1767225702123,"quiet":false}}]}})",
+                    r));
+    const Answer before = ask("history", R"({"room":")" + r + R"(","before":2,"bodies":true})");
+    EXPECT_EQ(before.body, std::format(R"({{"type":"history","room":"{}","messages":[)"
+                                       R"({{"seq":1,"sender":"alice","id":"m1","at":1767225701123,)"
+                                       R"("quiet":false,"body":"aGkgMQ"}}]}})",
+                                       r));
+    const Answer after = ask("history", R"({"room":")" + r + R"(","after":1,"bodies":false})");
+    const auto page = core::json::parse(after.body);
+    ASSERT_TRUE(page);
+    const auto* messages = page->find("messages")->as_array();
+    ASSERT_NE(messages, nullptr);
+    ASSERT_EQ(messages->size(), 2U);
+    EXPECT_EQ((*messages)[0].find("seq")->as_u64(), 2U);
+    EXPECT_EQ((*messages)[1].find("seq")->as_u64(), 3U);
+    EXPECT_EQ((*messages)[1].find("body"), nullptr);
+    // Past the end, and a room nothing was sent in: an empty page.
+    EXPECT_EQ(ask("history", R"({"room":")" + r + R"(","after":3})").body,
+              std::format(R"({{"type":"history","room":"{}","messages":[]}})", r));
+    const std::string other = chat::direct_room(user("carol"), user("dave")).to_string();
+    EXPECT_EQ(ask("history", R"({"room":")" + other + R"("})").body,
+              std::format(R"({{"type":"history","room":"{}","messages":[]}})", other));
+    EXPECT_EQ(api_->counters().reads, 5U);
 }
 
 TEST_F(ServiceApiTest, ConnectionsPastTheCapAndAfterAStopAreClosedAtAccept) {

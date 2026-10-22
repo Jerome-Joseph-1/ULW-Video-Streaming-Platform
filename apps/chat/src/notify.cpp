@@ -3,6 +3,7 @@
 #include "core/ports/message_store.hpp"
 #include "core/util/json.hpp"
 #include "core/util/uuid.hpp"
+#include "rt/room_store.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -429,6 +430,38 @@ void Notifier::message(const core::RoomId& room, const core::UserId& sender,
                                    ++n.counters_.allocation_failures;
                                }
                            });
+}
+
+// Every message, as its owner sequenced it, with what the backend checks a claim against (who sent
+// which seq in which room, under which id) and never its body (ADR-0133). Not looked up, not
+// throttled, and from the owner alone, so a seq is told once whichever node its sender is on.
+void Notifier::sequenced(const rt::Message& message) noexcept {
+    // A presence room keeps nothing, and a stream's live chat has thousands of senders whose
+    // events would crowd every other one out of the queue.
+    if (!limits_.sequenced || stopped_ || rt::is_ephemeral_room(message.room) ||
+        core::ports::is_stream_chat(message.room)) {
+        return;
+    }
+    try {
+        std::string out;
+        head(out, "message_sequenced");
+        out += R"(,"room":")";
+        out += message.room.to_string();
+        std::format_to(std::back_inserter(out), R"(","seq":{},"sender":)", message.seq);
+        append_user(out, message.sender);
+        out += R"(,"message_id":)";
+        core::json::append_string(out, message.key.view());
+        // Unix milliseconds, floored, as the socket's `at` (ADR-0112).
+        std::format_to(
+            std::back_inserter(out), R"(,"sent_at":{},"quiet":{}}})",
+            std::chrono::floor<std::chrono::milliseconds>(message.sent_at.time_since_epoch())
+                .count(),
+            message.quiet);
+        offer(std::move(out));
+    } catch (...) {
+        // std::bad_alloc, or std::format's own error, which this format cannot raise.
+        ++counters_.allocation_failures;
+    }
 }
 
 // "users": those away, as without the option; "present": each member with a socket in view and

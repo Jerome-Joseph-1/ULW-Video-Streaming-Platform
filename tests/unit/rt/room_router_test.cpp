@@ -75,6 +75,11 @@ public:
     }
     void on_peer_refused(std::string_view why) noexcept override { refused.emplace_back(why); }
     void on_node_taken() noexcept override { ++taken; }
+    void on_sequenced(const rt::Message& message) noexcept override {
+        sequenced.push_back(std::to_string(message.seq) + " " + std::string(message.sender.view()) +
+                            " " + std::string(message.key.view()) + " " +
+                            ulw::test::as_text(message.body));
+    }
 
     struct Fence {
         core::RoomId room;
@@ -85,6 +90,8 @@ public:
     std::vector<std::uint64_t> took;
     std::vector<std::string> lost;
     std::vector<std::string> refused;
+    // Each message this node sequenced as the owner: "<seq> <sender> <key> <body>".
+    std::vector<std::string> sequenced;
     int taken = 0;
 };
 
@@ -722,6 +729,7 @@ TEST_P(RoomRouterTest, ASendRepeatedWithItsKeyGetsItsFirstSeqAndIsDeliveredOnce)
     const rt::MessageKey key = next_key();
     ASSERT_EQ(send(b, bob, "bob", "hello", key), 1U);
     ASSERT_TRUE(pump([&] { return bob.got.size() == 1; }));
+    const std::string first = "1 bob " + std::string(key.view()) + " hello";
 
     // chat-b delivered it, so it answers without asking the owner.
     EXPECT_EQ(send(b, bob, "bob", "hello", key), 1U);
@@ -736,6 +744,10 @@ TEST_P(RoomRouterTest, ASendRepeatedWithItsKeyGetsItsFirstSeqAndIsDeliveredOnce)
     EXPECT_EQ(alice.got, expected);
     EXPECT_EQ(bob.got, expected);
     EXPECT_EQ(db_.rooms.at(room_).last_seq, 2U);
+    // ADR-0133: the owner was told of each seq it took once, the repeat never.
+    EXPECT_EQ(a.events.sequenced,
+              (std::vector<std::string>{first, "2 alice " + std::string(key.view()) + " hi"}));
+    EXPECT_TRUE(b.events.sequenced.empty());
 }
 
 TEST_P(RoomRouterTest, AKeyResentWithAnotherBodyIsAConflictAndIsDeliveredNowhere) {

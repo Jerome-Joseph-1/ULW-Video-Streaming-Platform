@@ -2,8 +2,10 @@
 #include "infra/notify/memory_connectivity.hpp"
 #include "net/reactor_factory.hpp"
 
+#include "chat.hpp"
 #include "live_chat.hpp"
 #include "notify.hpp"
+#include "presence_room.hpp"
 #include "support/fake_clock.hpp"
 #include "support/fake_random.hpp"
 
@@ -366,6 +368,60 @@ TEST_F(NotifierTest, AMessageNamesTheMembersWithNoSocketAndTellsEachOncePerInter
     notifier_->message(*live, user("alice"), 1);
     pump();
     EXPECT_TRUE(sink_.take().empty());
+}
+
+// ADR-0133: with ULW_NOTIFY_SEQUENCED, every message the owner sequences is an event, quiet ones
+// and those nobody is owed included, never throttled and never with the body.
+TEST_F(NotifierTest, WithSequencedOnEveryMessageTheOwnerSequencesIsAnEventWithoutItsBody) {
+    const auto body = std::as_bytes(std::span{std::string_view{"secret words"}});
+    const auto message = [&](const core::RoomId& room, std::uint64_t seq, bool quiet) {
+        return rt::Message{.room = room,
+                           .seq = seq,
+                           .sender = user("alice"),
+                           .key = *rt::MessageKey::parse("m-" + std::to_string(seq)),
+                           .sent_at = core::WallTime{std::chrono::microseconds{1767225700123456}},
+                           .quiet = quiet,
+                           .body = body};
+    };
+    make();
+    notifier_->sequenced(message(room_id(), 1, false));
+    EXPECT_TRUE(sink_.events.empty()) << "off by default";
+
+    chat::NotifyLimits limits;
+    limits.sequenced = true;
+    make(false, limits);
+    // Through the room plane's events, as the server wires it.
+    chat::RoomLog log(*core::NodeId::parse("chat-1"));
+    log.on_sequenced(message(room_id(), 1, false));
+    EXPECT_TRUE(sink_.events.empty()) << "nobody told yet";
+    log.tell_sequenced(notifier_.get());
+    log.on_sequenced(message(room_id(), 7, false));
+    log.on_sequenced(message(room_id(), 8, true));
+    log.tell_sequenced(nullptr);
+    ASSERT_EQ(sink_.events.size(), 2U);
+    EXPECT_EQ(sink_.events[0].find("secret"), std::string::npos) << "never content";
+    auto events = sink_.take();
+    EXPECT_EQ(text(events[0], "type"), "message_sequenced");
+    EXPECT_FALSE(text(events[0], "id").empty());
+    EXPECT_EQ(text(events[0], "room"), kRoom);
+    EXPECT_EQ(events[0].find("seq")->as_u64(), 7U);
+    EXPECT_EQ(text(events[0], "sender"), "alice");
+    EXPECT_EQ(text(events[0], "message_id"), "m-7");
+    EXPECT_EQ(events[0].find("sent_at")->as_u64(), 1767225700123U);
+    EXPECT_EQ(events[0].find("quiet")->as_bool(), false);
+    EXPECT_EQ(events[0].find("body"), nullptr);
+    EXPECT_EQ(events[1].find("seq")->as_u64(), 8U);
+    EXPECT_EQ(events[1].find("quiet")->as_bool(), true);
+    // A presence room keeps nothing, and a stream's live chat is never told.
+    const auto live = chat::live_chat_room("stream-1");
+    ASSERT_TRUE(live);
+    notifier_->sequenced(message(*live, 1, false));
+    notifier_->sequenced(message(chat::presence_room(user("alice")), 1, false));
+    EXPECT_TRUE(sink_.events.empty());
+    // Nor after the drain.
+    notifier_->stop([]() noexcept {});
+    notifier_->sequenced(message(room_id(), 9, false));
+    EXPECT_TRUE(sink_.events.empty());
 }
 
 TEST_F(NotifierTest, ARegistryThatForgotTheNodeIsWrittenEverySocketAgain) {

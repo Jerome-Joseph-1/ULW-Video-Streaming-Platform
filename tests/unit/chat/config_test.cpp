@@ -495,4 +495,26 @@ TEST_F(ChatConfigTest, NamingThePresentIsOffUnlessAskedForWithTheHook) {
     EXPECT_FALSE(config->notify->message_present);
 }
 
+// ADR-0133: an event for every message is off unless asked for, and only with the hook.
+TEST_F(ChatConfigTest, AnEventForEveryMessageIsOffUnlessAskedForWithTheHook) {
+    env["ULW_NOTIFY_SEQUENCED"] = "on";
+    EXPECT_EQ(refused_variable(), "ULW_NOTIFY_SEQUENCED");
+    env["ULW_NOTIFY_URL"] = "http://push.example.svc:8080/ulw/events";
+    env["ULW_NOTIFY_SECRET"] = "a-hook-secret-of-at-least-32-bytes!!";
+    auto config = load();
+    ASSERT_TRUE(config);
+    EXPECT_TRUE(config->notify->sequenced);
+    EXPECT_FALSE(config->notify->message_present);
+    env["ULW_NOTIFY_SEQUENCED"] = "1";
+    EXPECT_EQ(refused_variable(), "ULW_NOTIFY_SEQUENCED");
+    env["ULW_NOTIFY_SEQUENCED"] = "off";
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->notify->sequenced);
+    env.erase("ULW_NOTIFY_SEQUENCED");
+    config = load();
+    ASSERT_TRUE(config);
+    EXPECT_FALSE(config->notify->sequenced);
+}
+
 } // namespace

@@ -117,6 +117,11 @@ public:
     // Another live process runs under this node's name. This one takes no room and stays
     // unready, trying again each beat, until the other stops.
     virtual void on_node_taken() noexcept = 0;
+    // This node, the room's owner, took `message`'s seq and stored it with the message: once per
+    // seq it takes, never for a repeat its store or its recent keys recognised, and before any
+    // member hears it. The body is valid only during the call, which must not call back into the
+    // router (ADR-0133).
+    virtual void on_sequenced(const Message& /*message*/) noexcept {}
 };
 
 // A node secret shorter than this is refused at startup: HMAC-SHA256 is as strong as its key,
