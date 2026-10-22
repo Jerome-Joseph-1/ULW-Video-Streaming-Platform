@@ -290,18 +290,21 @@ TEST(Envelope, AMessagesWireSizeBoundsWhatWriteMessageMakes) {
          {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{48} * 1024}) {
         const std::string body(size, 'b');
         std::string out;
-        chat::write_message(out,
-                            {.room = room(),
-                             .seq = UINT64_MAX,
-                             .sender = *core::UserId::parse(longest_sender),
-                             .key = *rt::MessageKey::parse(longest_id),
-                             // The longest time a system_clock holds: 14 characters.
-                             .sent_at = core::WallTime::min(),
-                             // And quiet, which says so (ADR-0128).
-                             .quiet = true,
-                             .body = std::as_bytes(std::span{body})},
-                            // And redacted, which says so too (ADR-0135).
-                            /*redacted=*/true);
+        chat::write_message(
+            out,
+            {.room = room(),
+             .seq = UINT64_MAX,
+             .sender = *core::UserId::parse(longest_sender),
+             .key = *rt::MessageKey::parse(longest_id),
+             // The longest time a system_clock holds: 14 characters.
+             .sent_at = core::WallTime::min(),
+             // And quiet, which says so (ADR-0128).
+             .quiet = true,
+             // And the longest relation (ADR-0136).
+             .rel = core::ports::Relation{.type = core::ports::RelType::Thread, .seq = UINT64_MAX},
+             .body = std::as_bytes(std::span{body})},
+            // And redacted, which says so too (ADR-0135).
+            /*redacted=*/true);
         // The frame header of a text message under 64 KiB is 4 bytes.
         EXPECT_LE(out.size() + 4, chat::message_wire_size(size)) << size;
         EXPECT_GE(out.size() + 4 + 8, chat::message_wire_size(size)) << size;
@@ -346,6 +349,89 @@ TEST(Envelope, ARedactNamesARoomAndASeqAndItsAnswersNameBoth) {
                          .body = {}},
                         /*redacted=*/true);
     EXPECT_NE(out.find(R"("redacted":true,"body":"")"), std::string::npos) << out;
+}
+
+// ADR-0136: a send may name what it relates to, history may list what relates to a message, and
+// rel_counts counts it; each refuses anything else.
+TEST(Envelope, ARelationIsNamedByItsTypeAndAnEarlierSeq) {
+    using core::ports::Relation;
+    using core::ports::RelType;
+    const std::string at = std::string(R"("room":")") + std::string(kRoom) + '"';
+    const auto send = [&](std::string_view rel) {
+        return chat::parse_command(R"({"type":"send",)" + at + R"(,"id":"r1","body":"eA","rel":)" +
+                                   std::string(rel) + "}");
+    };
+    const auto reply = send(R"({"type":"reply","seq":4})");
+    ASSERT_TRUE(reply);
+    EXPECT_EQ(std::get<chat::Send>(*reply).rel, (Relation{.type = RelType::Reply, .seq = 4}));
+    for (const auto& [name, type] : {std::pair{"thread", RelType::Thread},
+                                     {"edit", RelType::Edit},
+                                     {"react", RelType::React}}) {
+        const auto parsed = send(std::string(R"({"type":")") + name + R"(","seq":1})");
+        ASSERT_TRUE(parsed) << name;
+        EXPECT_EQ(std::get<chat::Send>(*parsed).rel->type, type);
+    }
+    for (const std::string_view bad :
+         {R"({"type":"like","seq":4})", R"({"type":"reply","seq":0})", R"({"type":"reply"})",
+          R"({"seq":4})", R"({"type":"reply","seq":4,"x":1})", R"("reply")", R"(4)"}) {
+        EXPECT_EQ(send(bad), std::unexpected(EnvelopeError::Malformed)) << bad;
+    }
+
+    const auto history = [&](std::string_view rest) {
+        return chat::parse_command(R"({"type":"history",)" + at + std::string(rest) + "}");
+    };
+    const auto thread = history(R"(,"rel_to":4,"rel_type":"thread","after":4,"limit":10)");
+    ASSERT_TRUE(thread);
+    const auto& h = std::get<chat::History>(*thread);
+    EXPECT_EQ(h.rel_to, 4U);
+    EXPECT_EQ(h.rel_type, RelType::Thread);
+    EXPECT_EQ(h.after, 4U);
+    EXPECT_FALSE(std::get<chat::History>(*history(R"(,"rel_to":4)")).rel_type);
+    for (const std::string_view bad :
+         {R"(,"rel_type":"thread")", R"(,"rel_to":4,"rel_type":"like")",
+          R"(,"rel_to":4,"around":5)", R"(,"rel_to":"4")"}) {
+        EXPECT_EQ(history(bad), std::unexpected(EnvelopeError::Malformed)) << bad;
+    }
+
+    const auto counts = [&](std::string_view rest) {
+        return chat::parse_command(R"({"type":"rel_counts",)" + at + std::string(rest) + "}");
+    };
+    const auto parsed = counts(R"(,"seqs":[3,1,3])");
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(std::get<chat::RelCounts>(*parsed).seqs, (std::vector<std::uint64_t>{3, 1, 3}));
+    EXPECT_EQ(std::get<chat::RelCounts>(*parsed).type, RelType::Reply);
+    EXPECT_EQ(std::get<chat::RelCounts>(*counts(R"(,"seqs":[1],"rel_type":"react")")).type,
+              RelType::React);
+    std::string hundred_and_one = R"(,"seqs":[1)";
+    for (int i = 0; i < 100; ++i) {
+        hundred_and_one += ",1";
+    }
+    hundred_and_one += "]";
+    for (const std::string& bad : {std::string(R"(,"seqs":[])"), std::string(R"(,"seqs":["1"])"),
+                                   std::string(), std::string(R"(,"seqs":[1],"rel_type":"like")"),
+                                   std::string(R"(,"seqs":[1],"x":1)"), hundred_and_one}) {
+        EXPECT_EQ(counts(bad), std::unexpected(EnvelopeError::Malformed)) << bad;
+    }
+
+    std::string out;
+    chat::write_message(out, {.room = room(),
+                              .seq = 5,
+                              .sender = *core::UserId::parse("bob"),
+                              .key = *rt::MessageKey::parse("m5"),
+                              .sent_at = {},
+                              .rel = Relation{.type = RelType::Edit, .seq = 4},
+                              .body = {}});
+    EXPECT_NE(out.find(R"("rel":{"type":"edit","seq":4},"body":"")"), std::string::npos) << out;
+    out.clear();
+    chat::write_history(out, room(), 2, 4);
+    EXPECT_EQ(out, std::string(R"({"type":"history",)") + at + R"(,"count":2,"rel_to":4})");
+    out.clear();
+    const std::vector<core::ports::RelCount> answer{{.seq = 1, .count = 0, .latest = 0},
+                                                    {.seq = 3, .count = 2, .latest = 9}};
+    chat::write_rel_counts(out, room(), RelType::Thread, answer);
+    EXPECT_EQ(out, std::string(R"({"type":"rel_counts",)") + at +
+                       R"(,"rel_type":"thread","counts":[{"seq":1,"count":0},)"
+                       R"({"seq":3,"count":2,"latest":9}]})");
 }
 
 TEST(Envelope, AMessageWrittenIntoAReusedTextIsTheSameAsIntoANewOne) {

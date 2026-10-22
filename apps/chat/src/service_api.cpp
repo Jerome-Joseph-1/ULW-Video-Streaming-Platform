@@ -66,6 +66,7 @@ enum class Op : std::uint8_t {
     History,
     Reads,
     RedactMessage,
+    RelCounts,
 };
 
 Op op_of(std::string_view target) noexcept {
@@ -73,7 +74,7 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 18> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 19> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
@@ -92,6 +93,7 @@ Op op_of(std::string_view target) noexcept {
         {"history", Op::History},
         {"reads", Op::Reads},
         {"redact_message", Op::RedactMessage},
+        {"rel_counts", Op::RelCounts},
     }};
     const auto* found = std::ranges::find(kOps, name, &std::pair<std::string_view, Op>::first);
     return found == kOps.end() ? Op::None : found->second;
@@ -200,8 +202,8 @@ Parsed<std::optional<std::uint64_t>> seq_of(const core::json::Value& body, std::
 }
 
 // A page of history as the backend reads it (ADR-0133): each message as the socket's `message`
-// frame names it, `quiet` always said, `redacted` when it is, and the body, base64url, only when
-// asked for.
+// frame names it, `quiet` always said, `redacted` and `rel` when it has them, and the body,
+// base64url, only when asked for.
 void write_page(std::string& out, const core::RoomId& room,
                 std::span<const core::ports::StoredMessage> page, bool bodies) {
     out += R"({"type":"history","room":")";
@@ -223,6 +225,12 @@ void write_page(std::string& out, const core::RoomId& room,
         // Blanked since (ADR-0135): its body, if asked for, is empty.
         if (m.redacted) {
             out += R"(,"redacted":true)";
+        }
+        // What it relates to (ADR-0136).
+        if (m.rel) {
+            out += R"(,"rel":{"type":")";
+            out += core::ports::rel_type_name(m.rel->type);
+            std::format_to(std::back_inserter(out), R"(","seq":{}}})", m.rel->seq);
         }
         if (bodies) {
             out += R"(,"body":")";
@@ -646,6 +654,9 @@ private:
         case Op::RedactMessage:
             started = redact_message(*json);
             break;
+        case Op::RelCounts:
+            started = rel_counts(*json);
+            break;
         case Op::None:
             started = std::unexpected(Refusal{.status = Status::NotFound, .reason = "not_found"});
             break;
@@ -1045,6 +1056,50 @@ private:
                     write_redacted(out, room, seq);
                     c.answered(Status::Ok, out);
                 }));
+        return {};
+    }
+
+    // How many messages relate to each of some seqs (ADR-0136), as the socket's rel_counts
+    // answers: a thread's or a message's replies, for a backend's own listing.
+    Parsed<void> rel_counts(const core::json::Value& body) {
+        if (!only(body, {"room", "seqs", "rel_type"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto room = room_of(body, "room");
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        core::ports::RelType type = core::ports::RelType::Reply;
+        if (const core::json::Value* named = body.find("rel_type")) {
+            const auto parsed = named->as_string().and_then(core::ports::rel_type_of);
+            if (!parsed) {
+                return std::unexpected(kMalformed);
+            }
+            type = *parsed;
+        }
+        const core::json::Value* list = body.find("seqs");
+        const auto* items = list == nullptr ? nullptr : list->as_array();
+        if (items == nullptr || items->empty() || items->size() > core::ports::kMaxRelCounts) {
+            return std::unexpected(kMalformed);
+        }
+        std::vector<std::uint64_t> seqs;
+        seqs.reserve(items->size());
+        for (const core::json::Value& item : *items) {
+            const auto seq = item.as_u64();
+            if (!seq) {
+                return std::unexpected(kMalformed);
+            }
+            seqs.push_back(*seq);
+        }
+        api_.store_.rel_counts(*room, std::move(seqs), type,
+                               reply<std::vector<core::ports::RelCount>>(
+                                   [room = *room, type](Connection& c, ServiceApi& api,
+                                                        std::vector<core::ports::RelCount> counts) {
+                                       ++api.counters_.reads;
+                                       std::string out;
+                                       write_rel_counts(out, room, type, counts);
+                                       c.answered(Status::Ok, out);
+                                   }));
         return {};
     }
 

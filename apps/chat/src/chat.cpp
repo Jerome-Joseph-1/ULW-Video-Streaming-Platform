@@ -629,6 +629,10 @@ std::string ChatServer::render_metrics() const {
                        "redacted_events_total {}\n",
                        chat.redactions, chat.redact_not_found, chat.redact_not_allowed,
                        chat.redaction_events) +
+           // Relations between messages (ADR-0136).
+           std::format("relation_refusals_total{{reason=\"bad_rel\"}} {}\n"
+                       "rel_counts_total {}\n",
+                       chat.bad_relations, chat.rel_counts) +
            // Who may see whose presence, and the operator's service API (ADR-0096).
            std::format("presence_checks_total {}\n"
                        "presence_refusals_total{{reason=\"not_shared\"}} {}\n"

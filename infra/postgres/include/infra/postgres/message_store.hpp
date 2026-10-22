@@ -63,6 +63,12 @@ public:
                        core::ports::MessageCallback<std::uint64_t> done) override;
     void redact(const core::RoomId& room, std::uint64_t seq, const core::ports::Actor& actor,
                 core::ports::MessageCallback<core::ports::RedactOutcome> done) override;
+    void
+    relating(const core::RoomId& room, const core::ports::RelatingPage& page, std::size_t limit,
+             core::ports::MessageCallback<std::vector<core::ports::StoredMessage>> done) override;
+    void rel_counts(const core::RoomId& room, std::vector<std::uint64_t> seqs,
+                    core::ports::RelType type,
+                    core::ports::MessageCallback<std::vector<core::ports::RelCount>> done) override;
     void add_member(const core::RoomId& room, const core::UserId& user,
                     core::ports::MessageCallback<void> done) override;
     void remove_member(const core::RoomId& room, const core::UserId& user,

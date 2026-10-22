@@ -35,6 +35,9 @@
 //                            once the server has opened it, is joined by "stream" alone, and
 //                            is refused with not_live until then
 //   {"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
+//       "quiet":true         optional: notify nobody of it (ADR-0128)
+//       "rel":{"type":"reply"|"thread"|"edit"|"react","seq":<seq>}   optional: what it is to an
+//                            earlier message of the room, which the server indexes (ADR-0136)
 //   {"type":"redact","room":"<uuid>","seq":<seq>}   blanks a stored message, for its sender or an
 //       admin of the room (ADR-0135): answered with redacted, which every socket joined to the
 //       room hears too
@@ -42,6 +45,10 @@
 //       "before":<seq>       optional: those below it, newest first (the default: the newest)
 //       "after":<seq>        optional, instead of before: those above it, oldest first
 //       "limit":<n>          optional: 1 to 100, 50 when absent
+//       "rel_to":<seq>       optional: only the messages relating to that one, by "rel_type"
+//                            when given (ADR-0136); paged by before and after as the room is
+//   {"type":"rel_counts","room":"<uuid>","seqs":[<seq>,...]}   for each, 1 to 100 of them, how
+//       many messages relate to it by "rel_type" (optional, "reply" by default) and the newest
 //   {"type":"typing","room":"<uuid>"}   this user is typing in a room this connection joined:
 //       lossy, never stored, at most one a second from each connection (ADR-0138)
 //   {"type":"read","room":"<uuid>","seq":<seq>}   this user read the room up to seq: stored,
@@ -92,7 +99,11 @@
 //   {"type":"redacted","room":"<uuid>","seq":<integer>}   the message is blanked: the answer to
 //       redact, and unasked to every socket joined to the room
 //   {"type":"history","room":"<uuid>","count":<n>}   ends a history answer, after its n
-//                                                   messages; 0 when there are no more
+//                                                   messages; 0 when there are no more. With
+//                                                   "rel_to" when the history asked it
+//   {"type":"rel_counts","room":"<uuid>","rel_type":..,"counts":[{"seq":..,"count":..,
+//    "latest":..}]}   the answer to rel_counts, each seq asked once, in order; no "latest"
+//       for a count of 0
 //   {"type":"typing","room":"<uuid>","user":"<sub>"}   unasked, to the room's joined connections
 //       of other users: that member is typing
 //   {"type":"read","room":"<uuid>","user":"<sub>","seq":<integer>}   unasked, to the room's joined
@@ -169,6 +180,8 @@ struct Send {
     std::vector<std::byte> body;
     // Notify nobody of it, and leave it out of loud_seq: a reaction, an edit (ADR-0128).
     bool quiet = false;
+    // What it is to an earlier message of the room (ADR-0136).
+    std::optional<core::ports::Relation> rel = std::nullopt;
 };
 
 // redact: the message stored under `seq` blanked, by its sender or an admin of the room
@@ -193,6 +206,18 @@ struct History {
     // Instead of before and after: up to `limit` messages around this seq, it included when it
     // is stored, oldest first (ADR-0118).
     std::optional<std::uint64_t> around = std::nullopt;
+    // Only the messages relating to this seq, of `rel_type` alone when given (ADR-0136); with
+    // before or after, not around.
+    std::optional<std::uint64_t> rel_to = std::nullopt;
+    std::optional<core::ports::RelType> rel_type = std::nullopt;
+};
+
+// rel_counts: for each seq, how many messages relate to it by `type`, and the newest (ADR-0136).
+// 1 to core::ports::kMaxRelCounts seqs, as given.
+struct RelCounts {
+    core::RoomId room;
+    std::vector<std::uint64_t> seqs;
+    core::ports::RelType type = core::ports::RelType::Reply;
 };
 
 struct Watch {
@@ -355,7 +380,7 @@ using DirectoryCommand =
 using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery,
                              Part, Ping, SocketState, IceServersRequest, OpenDirect, CreateGroup,
                              AddMembers, RemoveMember, LeaveRoom, ListRooms, ListMembers,
-                             DirectoryCommand, Typing, MarkRead, ListReads, Redact>;
+                             DirectoryCommand, Typing, MarkRead, ListReads, Redact, RelCounts>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -397,8 +422,13 @@ void write_redacted(std::string& out, const core::RoomId& room, std::uint64_t se
 // A redact refused, naming its room and seq, and when to ask again for rate_limited.
 void write_redact_error(std::string& out, std::string_view reason, const core::RoomId& room,
                         std::uint64_t seq, std::optional<core::Millis> retry_after = std::nullopt);
-// Ends the answer to a history command, after its `count` messages.
-void write_history(std::string& out, const core::RoomId& room, std::size_t count);
+// Ends the answer to a history command, after its `count` messages; `rel_to` repeats the one a
+// history of a message's relations asked about (ADR-0136).
+void write_history(std::string& out, const core::RoomId& room, std::size_t count,
+                   std::optional<std::uint64_t> rel_to = std::nullopt);
+// The answer to rel_counts, the socket's and the service API's alike (ADR-0136).
+void write_rel_counts(std::string& out, const core::RoomId& room, core::ports::RelType type,
+                      std::span<const core::ports::RelCount> counts);
 void write_error(std::string& out, std::string_view reason,
                  const std::optional<core::RoomId>& room = std::nullopt,
                  const std::optional<rt::MessageKey>& id = std::nullopt);

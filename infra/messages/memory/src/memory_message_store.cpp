@@ -61,7 +61,8 @@ void MemoryMessageStore::on_timeout() noexcept {
 void MemoryMessageStore::append(const core::RoomId& room, std::uint64_t seq,
                                 const core::UserId& sender, std::string key,
                                 std::vector<std::byte> body, core::WallTime sent_at,
-                                MessageCallback<std::uint64_t> done, bool quiet) {
+                                MessageCallback<std::uint64_t> done, bool quiet,
+                                std::optional<core::ports::Relation> rel) {
     MessageResult<std::uint64_t> result = seq;
     Room& r = rooms_[room];
     std::pair<std::string, std::string> sender_key{sender.view(), key};
@@ -87,7 +88,10 @@ void MemoryMessageStore::append(const core::RoomId& room, std::uint64_t seq,
                                .key = std::move(key),
                                .sent_at = std::chrono::floor<std::chrono::microseconds>(sent_at),
                                .body = std::move(body),
-                               .quiet = quiet});
+                               .quiet = quiet,
+                               .redacted = false,
+                               // An earlier message only, as the durable store keeps it.
+                               .rel = rel && rel->seq < seq ? rel : std::nullopt});
     }
     defer([done = std::move(done), result]() mutable noexcept { done(result); });
 }
@@ -173,12 +177,64 @@ void MemoryMessageStore::redact(const core::RoomId& room, std::uint64_t seq,
         if (!user || *user == m->sender || admin(*user)) {
             m->body.clear();
             m->redacted = true;
+            m->rel.reset();
             outcome = RedactOutcome::Done;
         } else {
             outcome = RedactOutcome::NotAllowed;
         }
     }
     defer([done = std::move(done), outcome]() mutable noexcept { done(outcome); });
+}
+
+void MemoryMessageStore::relating(const core::RoomId& room, const core::ports::RelatingPage& query,
+                                  std::size_t limit,
+                                  MessageCallback<std::vector<StoredMessage>> done) {
+    std::vector<StoredMessage> out;
+    if (const auto it = rooms_.find(room); it != rooms_.end()) {
+        const auto relates = [&](const StoredMessage& m) {
+            return m.rel && m.rel->seq == query.to && (!query.type || m.rel->type == *query.type);
+        };
+        const auto& messages = it->second.messages;
+        if (query.after) {
+            out = page(std::ranges::subrange(messages.upper_bound(*query.after), messages.end()) |
+                           std::views::values | std::views::filter(relates),
+                       limit);
+        } else {
+            const auto end = query.before ? messages.lower_bound(*query.before) : messages.end();
+            out = page(std::ranges::subrange(messages.begin(), end) | std::views::reverse |
+                           std::views::values | std::views::filter(relates),
+                       limit);
+        }
+    }
+    defer([done = std::move(done), out = std::move(out)]() mutable noexcept {
+        done(std::move(out));
+    });
+}
+
+void MemoryMessageStore::rel_counts(const core::RoomId& room, std::vector<std::uint64_t> seqs,
+                                    core::ports::RelType type,
+                                    MessageCallback<std::vector<core::ports::RelCount>> done) {
+    std::ranges::sort(seqs);
+    const auto [first, last] = std::ranges::unique(seqs);
+    seqs.erase(first, last);
+    std::vector<core::ports::RelCount> out;
+    out.reserve(seqs.size());
+    const auto it = rooms_.find(room);
+    for (const std::uint64_t seq : seqs) {
+        core::ports::RelCount count{.seq = seq, .count = 0, .latest = 0};
+        if (it != rooms_.end()) {
+            for (const auto& [at, m] : it->second.messages) {
+                if (m.rel && m.rel->seq == seq && m.rel->type == type) {
+                    ++count.count;
+                    count.latest = at;
+                }
+            }
+        }
+        out.push_back(count);
+    }
+    defer([done = std::move(done), out = std::move(out)]() mutable noexcept {
+        done(std::move(out));
+    });
 }
 
 void MemoryMessageStore::add_member(const core::RoomId& room, const core::UserId& user,

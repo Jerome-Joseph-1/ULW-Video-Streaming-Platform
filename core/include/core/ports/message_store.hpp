@@ -9,6 +9,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace core::ports {
@@ -271,6 +272,64 @@ template <class T> using MessageResult = std::expected<T, MessageStoreError>;
 // Called exactly once, on the reactor thread, never from inside the call that was given it.
 template <class T> using MessageCallback = std::move_only_function<void(MessageResult<T>) noexcept>;
 
+// What a message is to an earlier one of its room (ADR-0136), as the server indexes it apart from
+// the body, which stays opaque: a reply to it, a message in its thread, an edit of it, or a
+// reaction to it.
+enum class RelType : std::uint8_t { Reply = 1, Thread = 2, Edit = 3, React = 4 };
+
+[[nodiscard]] constexpr std::string_view rel_type_name(RelType type) noexcept {
+    switch (type) {
+    case RelType::Reply:
+        return "reply";
+    case RelType::Thread:
+        return "thread";
+    case RelType::Edit:
+        return "edit";
+    case RelType::React:
+        return "react";
+    }
+    return "reply";
+}
+
+[[nodiscard]] constexpr std::optional<RelType> rel_type_of(std::string_view name) noexcept {
+    for (const RelType type : {RelType::Reply, RelType::Thread, RelType::Edit, RelType::React}) {
+        if (name == rel_type_name(type)) {
+            return type;
+        }
+    }
+    return std::nullopt;
+}
+
+struct Relation {
+    RelType type = RelType::Reply;
+    // The message related to, earlier in the same room.
+    std::uint64_t seq = 0;
+
+    friend bool operator==(const Relation&, const Relation&) = default;
+};
+
+// At most this many seqs one rel_counts asks about.
+inline constexpr std::size_t kMaxRelCounts = 100;
+
+// Of the messages relating to `seq` by one type: how many, and the newest (0 when none).
+struct RelCount {
+    std::uint64_t seq = 0;
+    std::uint64_t count = 0;
+    std::uint64_t latest = 0;
+
+    friend bool operator==(const RelCount&, const RelCount&) = default;
+};
+
+// A page of the messages relating to `to` (ADR-0136): of `type` alone, or of any. Paged by their
+// own seqs, as history is: below `before` newest first (the newest when neither is set), or above
+// `after` oldest first.
+struct RelatingPage {
+    std::uint64_t to = 0;
+    std::optional<RelType> type;
+    std::optional<std::uint64_t> before;
+    std::optional<std::uint64_t> after;
+};
+
 struct StoredMessage {
     std::uint64_t seq = 0;
     UserId sender;
@@ -283,6 +342,9 @@ struct StoredMessage {
     bool quiet = false;
     // Redacted (ADR-0135): its body is empty, and stays so.
     bool redacted = false;
+    // What it is to an earlier message (ADR-0136); a redacted message has none. Initialised, so
+    // that a designated initializer may leave it out.
+    std::optional<Relation> rel = std::nullopt;
 
     friend bool operator==(const StoredMessage&, const StoredMessage&) = default;
 };
@@ -345,8 +407,16 @@ public:
     // The newest stored message that is not quiet (ADR-0128): what an unread count reads; 0 when
     // there is none.
     virtual void last_loud_seq(const RoomId& room, MessageCallback<std::uint64_t> done) = 0;
+    // The messages relating to page.to, as RelatingPage says, bounded as a history page is.
+    virtual void relating(const RoomId& room, const RelatingPage& page, std::size_t limit,
+                          MessageCallback<std::vector<StoredMessage>> done) = 0;
+    // For each distinct seq of `seqs` (at most kMaxRelCounts), in ascending order, the messages
+    // relating to it by `type`: how many, and the newest.
+    virtual void rel_counts(const RoomId& room, std::vector<std::uint64_t> seqs, RelType type,
+                            MessageCallback<std::vector<RelCount>> done) = 0;
     // Blanks the message stored under `seq` (ADR-0135): its body emptied and the message marked
-    // redacted, its seq, sender, key and time kept. For its sender, an admin of the room, or the
+    // redacted, its seq, sender, key and time kept; what it related to is dropped (ADR-0136), so
+    // a redacted reply or reaction is counted no more. For its sender, an admin of the room, or the
     // service. Idempotent: a redacted message is answered Done again. The only write of a stored
     // message after its owner's: it takes no seq, so it needs no fence.
     virtual void redact(const RoomId& room, std::uint64_t seq, const Actor& actor,

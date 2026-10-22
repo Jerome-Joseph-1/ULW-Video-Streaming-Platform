@@ -541,7 +541,9 @@ TEST_P(ChatSessionTest, EveryMetricsLineIsANameAndANumberAndEveryFeatureHasItsLi
           "membership_refusals_total{reason=\"unavailable\"}", "member_events_total",
           // Redactions (ADR-0135).
           "messages_redacted_total", "redact_refusals_total{reason=\"not_found\"}",
-          "redact_refusals_total{reason=\"not_allowed\"}", "redacted_events_total"}) {
+          "redact_refusals_total{reason=\"not_allowed\"}", "redacted_events_total",
+          // Relations (ADR-0136).
+          "relation_refusals_total{reason=\"bad_rel\"}", "rel_counts_total"}) {
         EXPECT_NE(std::ranges::find(names, name), names.end()) << name;
     }
 }
@@ -829,6 +831,12 @@ TEST_P(ChatSessionTest, ARedactIsAnsweredOnTheSocketWithItsSeq) {
     EXPECT_EQ(next_but_activity(*alice, seconds(10)),
               R"({"type":"error","reason":"not_found","room":")" + std::string(kRoom) +
                   R"(","seq":1})");
+    // ADR-0136: rel_counts reaches it too.
+    ASSERT_TRUE(alice->send_text(R"({"type":"rel_counts","room":")" + std::string(kRoom) +
+                                 R"(","seqs":[1]})"));
+    EXPECT_EQ(next_but_activity(*alice, seconds(10)),
+              R"({"type":"rel_counts","room":")" + std::string(kRoom) +
+                  R"(","rel_type":"reply","counts":[{"seq":1,"count":0}]})");
 }
 
 TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {

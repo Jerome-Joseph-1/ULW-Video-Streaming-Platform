@@ -88,10 +88,11 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     wire::encode_proof(out, mac);
     wire::encode_subscribe(out, 7, room_);
     wire::encode_unsubscribe(out, room_);
-    wire::encode_send(out, 1ULL << 40U, room_, alice_, key_, /*quiet=*/true, body);
+    const core::ports::Relation rel{.type = core::ports::RelType::Thread, .seq = 9};
+    wire::encode_send(out, 1ULL << 40U, room_, alice_, key_, /*quiet=*/true, rel, body);
     wire::encode_reply(out, 9, wire::Status::Fenced, 12);
     const core::WallTime sent_at{std::chrono::microseconds{1767225700123456}};
-    wire::encode_deliver(out, room_, 13, alice_, key_, sent_at, /*quiet=*/true, body);
+    wire::encode_deliver(out, room_, 13, alice_, key_, sent_at, /*quiet=*/true, rel, body);
 
     auto frames = decode_all(out);
     ASSERT_EQ(frames.size(), 8U);
@@ -116,6 +117,7 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     EXPECT_EQ(send.sender, alice_);
     EXPECT_EQ(send.key, key_);
     EXPECT_TRUE(send.quiet);
+    EXPECT_EQ(send.rel, rel);
     EXPECT_EQ(text(send.body), text(body));
     const auto& reply = std::get<wire::Reply>(frames[4]);
     EXPECT_EQ(reply.request, 9U);
@@ -128,29 +130,78 @@ TEST_F(WireTest, EveryFrameComesBackAsItWasSent) {
     EXPECT_EQ(deliver.key, key_);
     EXPECT_EQ(deliver.sent_at, sent_at);
     EXPECT_TRUE(deliver.quiet);
+    EXPECT_EQ(deliver.rel, rel);
     EXPECT_EQ(text(deliver.body), text(body));
 }
 
 // ADR-0128: a message's flags travel in one byte; a bit nobody defined is refused.
 TEST_F(WireTest, AMessagesFlagsTravelAndAnUnknownOneIsMalformed) {
     std::vector<std::byte> out;
-    wire::encode_send(out, 1, room_, alice_, key_, false, bytes("x"));
-    wire::encode_deliver(out, room_, 2, alice_, key_, core::WallTime{}, false, bytes("y"));
+    wire::encode_send(out, 1, room_, alice_, key_, false, std::nullopt, bytes("x"));
+    wire::encode_deliver(out, room_, 2, alice_, key_, core::WallTime{}, false, std::nullopt,
+                         bytes("y"));
     const auto frames = decode_all(out);
     ASSERT_EQ(frames.size(), 2U);
     EXPECT_FALSE(std::get<wire::Send>(frames[0]).quiet);
     EXPECT_FALSE(std::get<wire::Deliver>(frames[1]).quiet);
+    EXPECT_FALSE(std::get<wire::Send>(frames[0]).rel);
+    EXPECT_FALSE(std::get<wire::Deliver>(frames[1]).rel);
     for (const bool deliver : {false, true}) {
         std::vector<std::byte> frame;
         if (deliver) {
-            wire::encode_deliver(frame, room_, 2, alice_, key_, core::WallTime{}, true, bytes("y"));
+            wire::encode_deliver(frame, room_, 2, alice_, key_, core::WallTime{}, true,
+                                 std::nullopt, bytes("y"));
         } else {
-            wire::encode_send(frame, 1, room_, alice_, key_, true, bytes("x"));
+            wire::encode_send(frame, 1, room_, alice_, key_, true, std::nullopt, bytes("x"));
         }
         // The flags byte sits just before the body's one byte.
-        frame[frame.size() - 2] = std::byte{0x03};
+        frame[frame.size() - 2] = std::byte{0x05};
         EXPECT_EQ(error_of(frame), wire::DecodeError::Malformed) << deliver;
     }
+}
+
+// ADR-0136: a relation follows the flags, a type from 1 to 4 and a seq a room can have.
+TEST_F(WireTest, ARelationNamesAKnownTypeAndASeqARoomCanHave) {
+    // Each on a decoder of its own: one that refused a frame refuses everything after it.
+    const auto refused = [](std::span<const std::byte> frame) {
+        wire::Decoder decoder;
+        decoder.feed(frame);
+        const auto next = decoder.next();
+        return !next && next.error() == wire::DecodeError::Malformed;
+    };
+    for (const std::uint64_t seq : {std::uint64_t{0}, std::uint64_t{1} << 63U}) {
+        std::vector<std::byte> frame;
+        wire::encode_send(frame, 1, room_, alice_, key_, false,
+                          core::ports::Relation{.type = core::ports::RelType::React, .seq = seq},
+                          bytes("x"));
+        EXPECT_TRUE(refused(frame)) << seq;
+    }
+    for (const std::byte type : {std::byte{0}, std::byte{5}}) {
+        std::vector<std::byte> frame;
+        wire::encode_deliver(frame, room_, 2, alice_, key_, core::WallTime{}, false,
+                             core::ports::Relation{.type = core::ports::RelType::Edit, .seq = 1},
+                             bytes("y"));
+        // The type byte sits before the relation's seq and the body's one byte.
+        frame[frame.size() - 10] = type;
+        EXPECT_TRUE(refused(frame));
+    }
+    // A relation's bit with no relation after it.
+    std::vector<std::byte> cut;
+    wire::encode_send(cut, 1, room_, alice_, key_, false, std::nullopt, {});
+    cut.back() = std::byte{wire::kRelated};
+    EXPECT_TRUE(refused(cut));
+    // The largest Deliver, a relation and the largest body included, is a frame the channel takes.
+    std::vector<std::byte> largest;
+    const std::string body(wire::kMaxBody, 'b');
+    wire::encode_deliver(largest, room_, UINT64_MAX >> 1U,
+                         *core::UserId::parse(std::string(core::UserId::kMaxLength, 'u')),
+                         *rt::MessageKey::parse(std::string(rt::MessageKey::kMaxLength, 'k')),
+                         core::WallTime{}, true,
+                         core::ports::Relation{.type = core::ports::RelType::Reply, .seq = 1},
+                         std::as_bytes(std::span{body}));
+    const auto frames = decode_all(largest);
+    ASSERT_EQ(frames.size(), 1U);
+    EXPECT_EQ(std::get<wire::Deliver>(frames[0]).rel->type, core::ports::RelType::Reply);
 }
 
 TEST_F(WireTest, AnAskAndItsAnswerComeBackAsTheyWereSent) {
@@ -200,9 +251,10 @@ TEST_F(WireTest, AnAnswerWithAStatusNobodyDefinedIsMalformed) {
 
 TEST_F(WireTest, AnEmptyBodyAndTheLargestBodyBothTravel) {
     std::vector<std::byte> out;
-    wire::encode_send(out, 1, room_, alice_, key_, false, {});
+    wire::encode_send(out, 1, room_, alice_, key_, false, std::nullopt, {});
     const std::vector<std::byte> largest(wire::kMaxBody, std::byte{0x5A});
-    wire::encode_deliver(out, room_, 2, alice_, key_, core::WallTime{}, false, largest);
+    wire::encode_deliver(out, room_, 2, alice_, key_, core::WallTime{}, false, std::nullopt,
+                         largest);
     const auto frames = decode_all(out);
     ASSERT_EQ(frames.size(), 2U);
     EXPECT_TRUE(std::get<wire::Send>(frames[0]).body.empty());
@@ -212,7 +264,8 @@ TEST_F(WireTest, AnEmptyBodyAndTheLargestBodyBothTravel) {
 TEST_F(WireTest, BytesFedOneAtATimeDecodeToTheSameFrames) {
     std::vector<std::byte> out;
     wire::encode_subscribe(out, 3, room_);
-    wire::encode_deliver(out, room_, 4, alice_, key_, core::WallTime{}, false, bytes("hi"));
+    wire::encode_deliver(out, room_, 4, alice_, key_, core::WallTime{}, false, std::nullopt,
+                         bytes("hi"));
     std::vector<wire::Frame> frames;
     for (const std::byte b : out) {
         const auto got = decode_all(std::span{&b, 1});

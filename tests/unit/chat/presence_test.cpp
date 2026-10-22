@@ -43,7 +43,7 @@ public:
     }
     void send(const core::RoomId& room, rt::IMember& from, const core::UserId& sender,
               const rt::MessageKey& key, std::vector<std::byte> body, bool /*quiet*/,
-              rt::SendCallback done) override {
+              std::optional<core::ports::Relation> /*rel*/, rt::SendCallback done) override {
         sends_.push_back({.room = room,
                           .from = &from,
                           .sender = sender,

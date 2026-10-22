@@ -34,11 +34,13 @@ inline rt::Outgoing outgoing(const core::UserId& sender, std::string_view key,
                              std::span<const std::byte> body,
                              core::WallTime sent_at = std::chrono::floor<std::chrono::microseconds>(
                                  std::chrono::system_clock::now()),
-                             bool quiet = false) {
+                             bool quiet = false,
+                             std::optional<core::ports::Relation> rel = std::nullopt) {
     return rt::Outgoing{.sender = sender,
                         .key = *rt::MessageKey::parse(key),
                         .sent_at = sent_at,
                         .quiet = quiet,
+                        .rel = rel,
                         .body = body};
 }
 
