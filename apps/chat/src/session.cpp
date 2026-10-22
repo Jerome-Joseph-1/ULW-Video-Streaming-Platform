@@ -639,6 +639,10 @@ void Session::command(const codec::ws::Frame& frame) {
         chat.send(*client_, std::move(*s));
         return;
     }
+    if (const auto* r = std::get_if<Redact>(&*parsed)) {
+        chat.redact(*client_, *r);
+        return;
+    }
     if (const auto* w = std::get_if<Watch>(&*parsed)) {
         server_.presence().watch(*presence_, w->user);
         return;

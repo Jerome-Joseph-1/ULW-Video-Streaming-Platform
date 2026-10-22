@@ -35,6 +35,9 @@
 //                            once the server has opened it, is joined by "stream" alone, and
 //                            is refused with not_live until then
 //   {"type":"send","room":"<uuid>","id":"<message id>","body":"<base64url>"}
+//   {"type":"redact","room":"<uuid>","seq":<seq>}   blanks a stored message, for its sender or an
+//       admin of the room (ADR-0135): answered with redacted, which every socket joined to the
+//       room hears too
 //   {"type":"history","room":"<uuid>"}   the room's stored messages, from the store, not this
 //       "before":<seq>       optional: those below it, newest first (the default: the newest)
 //       "after":<seq>        optional, instead of before: those above it, oldest first
@@ -85,7 +88,9 @@
 //                                                      whose last seq is lower missed messages
 //   {"type":"sent","room":"<uuid>","id":"<message id>","seq":<integer>}
 //   {"type":"message","room":"<uuid>","seq":<integer>,"sender":"<sub>","id":"<message id>",
-//    "body":"<base64url>"}
+//    "body":"<base64url>"}   "redacted":true, with an empty body, for a message redacted since
+//   {"type":"redacted","room":"<uuid>","seq":<integer>}   the message is blanked: the answer to
+//       redact, and unasked to every socket joined to the room
 //   {"type":"history","room":"<uuid>","count":<n>}   ends a history answer, after its n
 //                                                   messages; 0 when there are no more
 //   {"type":"typing","room":"<uuid>","user":"<sub>"}   unasked, to the room's joined connections
@@ -164,6 +169,13 @@ struct Send {
     std::vector<std::byte> body;
     // Notify nobody of it, and leave it out of loud_seq: a reaction, an edit (ADR-0128).
     bool quiet = false;
+};
+
+// redact: the message stored under `seq` blanked, by its sender or an admin of the room
+// (ADR-0135).
+struct Redact {
+    core::RoomId room;
+    std::uint64_t seq = 0;
 };
 
 // A history page is sent to the client as message frames, so it counts against the same output
@@ -340,10 +352,10 @@ struct ClaimKeyPackages {
 using DirectoryCommand =
     std::variant<RegisterDevice, RetireDevice, PublishKeyPackages, ListDevices, ClaimKeyPackages>;
 
-using Command =
-    std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery, Part, Ping,
-                 SocketState, IceServersRequest, OpenDirect, CreateGroup, AddMembers, RemoveMember,
-                 LeaveRoom, ListRooms, ListMembers, DirectoryCommand, Typing, MarkRead, ListReads>;
+using Command = std::variant<Join, Send, History, Watch, Unwatch, Call, CallMove, CallStatusQuery,
+                             Part, Ping, SocketState, IceServersRequest, OpenDirect, CreateGroup,
+                             AddMembers, RemoveMember, LeaveRoom, ListRooms, ListMembers,
+                             DirectoryCommand, Typing, MarkRead, ListReads, Redact>;
 
 enum class EnvelopeError : std::uint8_t {
     NotJson,
@@ -378,7 +390,13 @@ void write_joined(std::string& out, const core::RoomId& room, std::uint64_t head
                   std::optional<std::uint64_t> loud = std::nullopt);
 void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey& id,
                 std::uint64_t seq);
-void write_message(std::string& out, const rt::Message& message);
+// `redacted`: a stored or kept message blanked since (ADR-0135), whose body is empty.
+void write_message(std::string& out, const rt::Message& message, bool redacted = false);
+// {"type":"redacted","room":..,"seq":..}: the message is blanked (ADR-0135).
+void write_redacted(std::string& out, const core::RoomId& room, std::uint64_t seq);
+// A redact refused, naming its room and seq, and when to ask again for rate_limited.
+void write_redact_error(std::string& out, std::string_view reason, const core::RoomId& room,
+                        std::uint64_t seq, std::optional<core::Millis> retry_after = std::nullopt);
 // Ends the answer to a history command, after its `count` messages.
 void write_history(std::string& out, const core::RoomId& room, std::size_t count);
 void write_error(std::string& out, std::string_view reason,

@@ -61,6 +61,8 @@ public:
                   core::ports::MessageCallback<std::uint64_t> done) override;
     void last_loud_seq(const core::RoomId& room,
                        core::ports::MessageCallback<std::uint64_t> done) override;
+    void redact(const core::RoomId& room, std::uint64_t seq, const core::ports::Actor& actor,
+                core::ports::MessageCallback<core::ports::RedactOutcome> done) override;
     void add_member(const core::RoomId& room, const core::UserId& user,
                     core::ports::MessageCallback<void> done) override;
     void remove_member(const core::RoomId& room, const core::UserId& user,

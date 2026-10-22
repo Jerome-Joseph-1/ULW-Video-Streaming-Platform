@@ -136,8 +136,6 @@ public:
               rt::SendCallback done) override {
         done(std::unexpected(rt::RouteError::Unavailable));
     }
-    void notify(const core::RoomId& /*room*/,
-                std::span<const std::byte> /*notice*/) noexcept override {}
     void ask_owner(const core::RoomId& /*room*/, rt::IMember& /*from*/,
                    std::span<const std::byte> request, rt::OwnerAnswer done) override {
         asked = chat::decode_request(request);
@@ -147,6 +145,10 @@ public:
         }
         done(answer);
     }
+    void notify(const core::RoomId& room, std::span<const std::byte> notice) noexcept override {
+        notices.emplace_back(room, std::vector<std::byte>(notice.begin(), notice.end()));
+    }
+    std::vector<std::pair<core::RoomId, std::vector<std::byte>>> notices;
     void reply(chat::CallOutcome outcome) {
         answer = chat::encode_answer({.outcome = outcome,
                                       .ticket = std::nullopt,
@@ -543,6 +545,61 @@ TEST_F(ServiceApiTest, DisconnectUserTellsEveryNodeAndChangesNoList) {
     EXPECT_EQ(bad_user.status, 400);
     EXPECT_EQ(bad_user.field("reason"), "bad_user");
     EXPECT_TRUE(heard_.take().empty());
+}
+
+// ADR-0135: the service blanks any stored message, whoever sent it, and the room's members hear
+// it through the room plane; a seq with no message is 404, and nothing is told.
+TEST_F(ServiceApiTest, RedactMessageBlanksAStoredMessageAndTellsTheRoom) {
+    constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
+    const core::RoomId room = *core::RoomId::parse(kRoom);
+    auto& memory = dynamic_cast<infra::messages::MemoryMessageStore&>(*store_);
+    bool stored = false;
+    memory.append(
+        room, 1, user("bob"), "k1", {std::byte{1}, std::byte{2}}, clock_.wall_now(),
+        [&](core::ports::MessageResult<std::uint64_t> r) noexcept { stored = r.has_value(); });
+    const std::string body = std::string(R"({"room":")") + std::string(kRoom) + R"(","seq":1})";
+    for (int i = 0; i < 2; ++i) {
+        const Answer a = ask("redact_message", body);
+        EXPECT_EQ(a.status, 200) << a.body;
+        EXPECT_EQ(a.body, std::string(R"({"type":"redacted","room":")") + std::string(kRoom) +
+                              R"(","seq":1})");
+    }
+    ASSERT_TRUE(stored);
+    ASSERT_EQ(rooms_.notices.size(), 2U);
+    EXPECT_EQ(rooms_.notices[0].first, room);
+    const auto notice = chat::decode_room_notice(rooms_.notices[0].second);
+    ASSERT_TRUE(notice && std::holds_alternative<chat::RedactionNotice>(*notice));
+    EXPECT_EQ(std::get<chat::RedactionNotice>(*notice).seq, 1U);
+    std::optional<core::ports::MessageResult<std::vector<core::ports::StoredMessage>>> page;
+    memory.history_before(room, std::nullopt, 10, [&](auto r) noexcept { page = std::move(r); });
+    ASSERT_TRUE(pump_until(*reactor_, [&] { return page.has_value(); }));
+    ASSERT_TRUE(*page);
+    ASSERT_EQ((*page)->size(), 1U);
+    EXPECT_TRUE((*page)->front().redacted);
+    EXPECT_TRUE((*page)->front().body.empty());
+    // The backend's history says so too (ADR-0133).
+    const Answer read =
+        ask("history", std::string(R"({"room":")") + std::string(kRoom) + R"(","bodies":true})");
+    EXPECT_NE(read.body.find(R"("quiet":false,"redacted":true,"body":"")"), std::string::npos)
+        << read.body;
+
+    const Answer missing =
+        ask("redact_message", std::string(R"({"room":")") + std::string(kRoom) + R"(","seq":2})");
+    EXPECT_EQ(missing.status, 404);
+    EXPECT_EQ(missing.field("reason"), "no_message");
+    EXPECT_EQ(rooms_.notices.size(), 2U);
+    for (const std::string_view bad :
+         {R"({})", R"({"room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd"})",
+          R"({"room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","seq":0})",
+          R"({"room":"01a0eb86-6cca-7dce-84cc-3bb47615f9fd","seq":1,"x":1})"}) {
+        const Answer refused = ask("redact_message", bad);
+        EXPECT_EQ(refused.status, 400) << bad;
+        EXPECT_EQ(refused.field("reason"), "malformed") << bad;
+    }
+    EXPECT_EQ(ask("redact_message", R"({"room":"nope","seq":1})").field("reason"), "bad_room");
+    // Without a room plane, the store's answer alone.
+    start(roomy(), false, false);
+    EXPECT_EQ(ask("redact_message", body).status, 404);
 }
 
 TEST_F(ServiceApiTest, PresenceSaysWhoIsConnectedAndOnWhichDevices) {

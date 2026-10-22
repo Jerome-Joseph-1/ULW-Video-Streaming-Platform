@@ -50,11 +50,19 @@ struct ReadNotice {
     std::uint64_t seq = 0;
 };
 
-using RoomNotice = std::variant<TypingNotice, ReadNotice>;
+// Told to the room too, once the store has blanked a message (ADR-0135): every node with members
+// in the room blanks what it keeps of it and tells its joined sockets.
+struct RedactionNotice {
+    core::RoomId room;
+    std::uint64_t seq = 0;
+};
+
+using RoomNotice = std::variant<TypingNotice, ReadNotice, RedactionNotice>;
 
 [[nodiscard]] std::vector<std::byte> encode_typing(const TypingNotice& notice);
 [[nodiscard]] std::vector<std::byte> encode_read(const ReadNotice& notice);
-// Either, or nullopt for any other layout, or one that does not read whole.
+[[nodiscard]] std::vector<std::byte> encode_redaction(const RedactionNotice& notice);
+// Any of them, or nullopt for any other layout, or one that does not read whole.
 [[nodiscard]] std::optional<RoomNotice> decode_room_notice(std::span<const std::byte> bytes);
 
 } // namespace chat

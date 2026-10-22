@@ -372,6 +372,34 @@ TEST_P(MessageStoreConformance, AQuietMessageIsKeptSoAndTheLoudSeqSkipsIt) {
     EXPECT_EQ(last_loud_seq(hushed), 0U);
 }
 
+// ADR-0135: a redacted message keeps its seq, sender, key and time, and its body is gone for good;
+// only its sender (or an admin, or the service) may, and a repeat answers the same.
+TEST_P(MessageStoreConformance, ARedactedMessageKeepsItsPlaceAndLosesItsBody) {
+    using core::ports::RedactOutcome;
+    const core::RoomId room = new_room();
+    ASSERT_EQ(write(room, alice_, bytes("oops"), at(1)), 1U);
+    ASSERT_EQ(write(room, bob_, bytes("reply")), 2U);
+    const auto redact = [&](std::uint64_t seq, const core::ports::Actor& actor) {
+        return ask<RedactOutcome>(
+            [&](auto done) { store().redact(room, seq, actor, std::move(done)); });
+    };
+    EXPECT_EQ(redact(1, bob_), RedactOutcome::NotAllowed);
+    EXPECT_EQ(redact(1, alice_), RedactOutcome::Done);
+    EXPECT_EQ(redact(1, alice_), RedactOutcome::Done);
+    EXPECT_EQ(redact(3, alice_), RedactOutcome::NotFound);
+    EXPECT_EQ(redact(2, core::ports::Actor::service()), RedactOutcome::Done);
+    const auto page = after(room, 0, 10);
+    ASSERT_TRUE(page);
+    ASSERT_EQ(page->size(), 2U);
+    EXPECT_EQ((*page)[0].seq, 1U);
+    EXPECT_EQ((*page)[0].sender, alice_);
+    EXPECT_EQ((*page)[0].sent_at, at(1));
+    EXPECT_TRUE((*page)[0].body.empty());
+    EXPECT_TRUE((*page)[0].redacted);
+    EXPECT_TRUE((*page)[1].redacted);
+    EXPECT_EQ(last_seq(room), 2U);
+}
+
 TEST_P(MessageStoreConformance, SentAtIsTheTimeTheWriterGaveIt) {
     const core::RoomId room = new_room();
     const core::WallTime first{std::chrono::microseconds{1767225700123456}};

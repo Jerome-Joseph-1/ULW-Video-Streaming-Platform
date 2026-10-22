@@ -622,6 +622,13 @@ std::string ChatServer::render_metrics() const {
                        chat.membership_room_limit, chat.membership_gone,
                        chat.membership_rate_limited, chat.membership_unavailable,
                        chat.member_events, chat.membership_not_allowed) +
+           // Messages redacted (ADR-0135).
+           std::format("messages_redacted_total {}\n"
+                       "redact_refusals_total{{reason=\"not_found\"}} {}\n"
+                       "redact_refusals_total{{reason=\"not_allowed\"}} {}\n"
+                       "redacted_events_total {}\n",
+                       chat.redactions, chat.redact_not_found, chat.redact_not_allowed,
+                       chat.redaction_events) +
            // Who may see whose presence, and the operator's service API (ADR-0096).
            std::format("presence_checks_total {}\n"
                        "presence_refusals_total{{reason=\"not_shared\"}} {}\n"

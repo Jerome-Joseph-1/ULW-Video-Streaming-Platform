@@ -259,6 +259,13 @@ struct ServiceCounters {
     std::uint64_t reads_listed = 0;
     // Notices for a room here that did not decode, or named another room.
     std::uint64_t room_notices_malformed = 0;
+    // Messages clients here redacted (ADR-0135), redacts refused because no message was stored
+    // under the seq or the user was neither its sender nor an admin, and `redacted` frames sent
+    // to the clients here in the room, from any node's redaction.
+    std::uint64_t redactions = 0;
+    std::uint64_t redact_not_found = 0;
+    std::uint64_t redact_not_allowed = 0;
+    std::uint64_t redaction_events = 0;
 };
 
 // Identifies an attached client; never reused while the service lives.
@@ -306,6 +313,13 @@ public:
     void call_status(ClientId id, const CallStatusQuery& query);
     // A history page around a seq (ADR-0118).
     void around(ClientId id, const History& history);
+    // Blanks a stored message, for its sender or an admin of the room, in a room the client
+    // joined (ADR-0135); charged as a send. Once the store has, every node with members in the
+    // room hears it (on_redaction), this one included, and the client is answered `redacted`.
+    void redact(ClientId id, const Redact& redact);
+    // A message of the room was redacted, on any node (a RedactionNotice heard by on_notice): what
+    // this node keeps of it is blanked, and every client here in the room is told `redacted`.
+    void on_redaction(const core::RoomId& room, std::uint64_t seq) noexcept;
     // The socket stops following a room it joined, freeing its place (ADR-0117).
     void part(ClientId id, const Part& part);
     // Fresh relay credentials for the client's device, in a room it joined (ADR-0127); charged as
@@ -474,6 +488,8 @@ private:
     void
     read_marked(ClientId id, const core::RoomId& room, const core::UserId& user,
                 const core::ports::MessageResult<std::optional<std::uint64_t>>& result) noexcept;
+    void redact_answered(ClientId id, const Redact& redact,
+                         core::ports::MessageResult<core::ports::RedactOutcome> result) noexcept;
     void
     page_read(ClientId id, const core::RoomId& room,
               core::ports::MessageResult<std::vector<core::ports::StoredMessage>> page) noexcept;
@@ -529,6 +545,8 @@ private:
                  core::ports::MessageResult<core::ports::MembershipChange> result,
                  ChangeAnswer answered) noexcept;
     void refuse(IClient& client, std::string_view reason, const ErrorContext& context) noexcept;
+    void refuse_redact(IClient& client, std::string_view reason, const Redact& redact,
+                       std::optional<core::Millis> retry_after = std::nullopt) noexcept;
     // A `member` frame to the user's clients here and to every client here in the room; a client
     // still waiting for the room's member list is not in it yet, and hears only of its own user.
     void tell_members(const core::RoomId& room, const core::UserId& user,

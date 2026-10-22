@@ -290,19 +290,62 @@ TEST(Envelope, AMessagesWireSizeBoundsWhatWriteMessageMakes) {
          {std::size_t{0}, std::size_t{1}, std::size_t{2}, std::size_t{3}, std::size_t{48} * 1024}) {
         const std::string body(size, 'b');
         std::string out;
-        chat::write_message(out, {.room = room(),
-                                  .seq = UINT64_MAX,
-                                  .sender = *core::UserId::parse(longest_sender),
-                                  .key = *rt::MessageKey::parse(longest_id),
-                                  // The longest time a system_clock holds: 14 characters.
-                                  .sent_at = core::WallTime::min(),
-                                  // And quiet, which says so (ADR-0128).
-                                  .quiet = true,
-                                  .body = std::as_bytes(std::span{body})});
+        chat::write_message(out,
+                            {.room = room(),
+                             .seq = UINT64_MAX,
+                             .sender = *core::UserId::parse(longest_sender),
+                             .key = *rt::MessageKey::parse(longest_id),
+                             // The longest time a system_clock holds: 14 characters.
+                             .sent_at = core::WallTime::min(),
+                             // And quiet, which says so (ADR-0128).
+                             .quiet = true,
+                             .body = std::as_bytes(std::span{body})},
+                            // And redacted, which says so too (ADR-0135).
+                            /*redacted=*/true);
         // The frame header of a text message under 64 KiB is 4 bytes.
         EXPECT_LE(out.size() + 4, chat::message_wire_size(size)) << size;
         EXPECT_GE(out.size() + 4 + 8, chat::message_wire_size(size)) << size;
     }
+}
+
+// ADR-0135: redact names a room and a stored seq, and its answers name both.
+TEST(Envelope, ARedactNamesARoomAndASeqAndItsAnswersNameBoth) {
+    const std::string at = std::string(R"("room":")") + std::string(kRoom) + '"';
+    const auto parsed = chat::parse_command(R"({"type":"redact",)" + at + R"(,"seq":7})");
+    ASSERT_TRUE(parsed);
+    EXPECT_EQ(std::get<chat::Redact>(*parsed).room, room());
+    EXPECT_EQ(std::get<chat::Redact>(*parsed).seq, 7U);
+    for (const std::string& bad : {std::string(R"({"type":"redact",)") + at + "}",
+                                   std::string(R"({"type":"redact",)") + at + R"(,"seq":0})",
+                                   std::string(R"({"type":"redact",)") + at + R"(,"seq":"7"})",
+                                   std::string(R"({"type":"redact",)") + at + R"(,"seq":7,"x":1})",
+                                   std::string(R"({"type":"redact","seq":7})")}) {
+        EXPECT_EQ(chat::parse_command(bad), std::unexpected(EnvelopeError::Malformed)) << bad;
+    }
+    EXPECT_EQ(chat::parse_command(R"({"type":"redact","room":"x","seq":7})"),
+              std::unexpected(EnvelopeError::BadRoom));
+
+    std::string out;
+    chat::write_redacted(out, room(), 7);
+    EXPECT_EQ(out, std::string(R"({"type":"redacted",)") + at + R"(,"seq":7})");
+    out.clear();
+    chat::write_redact_error(out, "not_allowed", room(), 7);
+    EXPECT_EQ(out, std::string(R"({"type":"error","reason":"not_allowed",)") + at + R"(,"seq":7})");
+    out.clear();
+    chat::write_redact_error(out, "rate_limited", room(), 7, core::Millis{500});
+    EXPECT_EQ(out, std::string(R"({"type":"error","reason":"rate_limited",)") + at +
+                       R"(,"seq":7,"retry_after_ms":500})");
+    // A redacted message says so, with its empty body.
+    out.clear();
+    chat::write_message(out,
+                        {.room = room(),
+                         .seq = 7,
+                         .sender = *core::UserId::parse("bob"),
+                         .key = *rt::MessageKey::parse("m7"),
+                         .sent_at = {},
+                         .body = {}},
+                        /*redacted=*/true);
+    EXPECT_NE(out.find(R"("redacted":true,"body":"")"), std::string::npos) << out;
 }
 
 TEST(Envelope, AMessageWrittenIntoAReusedTextIsTheSameAsIntoANewOne) {

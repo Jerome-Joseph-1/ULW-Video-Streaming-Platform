@@ -16,8 +16,9 @@ namespace infra::postgres::message_sql {
 // order and one row ahead of what it emits, so the limit stops the scan early.
 // $1 room, $2 cursor (exclusive), $3 row limit, $4 byte bound.
 inline constexpr std::string_view kHistoryBeforeText = R"sql(
-SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet
-  FROM (SELECT seq, sender, msg_key, sent_at, body, quiet,
+SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet,
+       redacted
+  FROM (SELECT seq, sender, msg_key, sent_at, body, quiet, redacted,
                sum(octet_length(body)) OVER (ORDER BY seq DESC) AS running
           FROM chat_messages
          WHERE room_id = $1 AND seq < $2
@@ -30,8 +31,9 @@ SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, bo
 inline constexpr Sql kHistoryBefore = kHistoryBeforeText.data();
 
 inline constexpr std::string_view kHistoryAfterText = R"sql(
-SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet
-  FROM (SELECT seq, sender, msg_key, sent_at, body, quiet,
+SELECT seq, sender, msg_key, (extract(epoch FROM sent_at) * 1000000)::bigint, body, quiet,
+       redacted
+  FROM (SELECT seq, sender, msg_key, sent_at, body, quiet, redacted,
                sum(octet_length(body)) OVER (ORDER BY seq) AS running
           FROM chat_messages
          WHERE room_id = $1 AND seq > $2
@@ -47,6 +49,21 @@ inline constexpr Sql kHistoryAfter = kHistoryAfterText.data();
 inline constexpr Sql kLastLoudSeq = R"sql(
 SELECT coalesce((SELECT seq FROM chat_messages WHERE room_id = $1 AND NOT quiet
                   ORDER BY seq DESC LIMIT 1), 0))sql";
+
+// Blanks a message for its sender, an admin of the room, or the service ($3 empty: no user id
+// is), by its primary key (ADR-0135). Answers whether the message is stored, and whether it was
+// blanked; a stored one that was not is the actor's to refuse. Repeated, it blanks it again,
+// which changes nothing.
+inline constexpr Sql kRedact = R"sql(
+WITH blanked AS (
+    UPDATE chat_messages SET body = ''::bytea, redacted = true
+     WHERE room_id = $1 AND seq = $2
+       AND ($3 = '' OR sender = $3
+            OR EXISTS (SELECT 1 FROM chat_members
+                        WHERE room_id = $1 AND user_id = $3 AND role = 'admin'))
+    RETURNING seq)
+SELECT EXISTS (SELECT 1 FROM chat_messages WHERE room_id = $1 AND seq = $2),
+       EXISTS (SELECT 1 FROM blanked))sql";
 
 inline constexpr Sql kLastSeq =
     "SELECT coalesce((SELECT last_seq FROM room_state WHERE room_id = $1), 0)";

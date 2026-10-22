@@ -89,7 +89,9 @@ struct ServiceApiCounters {
 class ServiceApi final : public net::IAcceptHandler {
 public:
     // `rooms` is the room plane decline_call and call_status ask the room's owner through
-    // (ADR-0111); null, they are answered unavailable. It must outlive the API.
+    // (ADR-0111), and redact_message tells the room's members through (ADR-0135); null, the
+    // calls are answered unavailable and a redaction reaches the store alone. It must outlive the
+    // API.
     ServiceApi(net::IReactor& reactor, const core::ports::IClock& clock,
                core::ports::IJwtVerifier& verifier, core::ports::IMessageStore& store,
                ServiceApiLimits limits, IRooms* rooms = nullptr);

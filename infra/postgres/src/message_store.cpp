@@ -74,7 +74,8 @@ private:
         const auto micros = r.get(row, 3).and_then(parse_int64);
         auto body = r.get(row, 4).and_then(parse_bytea);
         const auto quiet = r.get(row, 5).and_then(parse_bool);
-        if (!seq || !sender || !key || !micros || !body || !quiet) {
+        const auto redacted = r.get(row, 6).and_then(parse_bool);
+        if (!seq || !sender || !key || !micros || !body || !quiet || !redacted) {
             return std::unexpected(MessageStoreError::Corrupt);
         }
         page.push_back(StoredMessage{
@@ -84,6 +85,7 @@ private:
             .sent_at = core::WallTime{std::chrono::microseconds{*micros}},
             .body = std::move(*body),
             .quiet = *quiet,
+            .redacted = *redacted,
         });
     }
     return page;
@@ -176,6 +178,50 @@ private:
     core::RoomId room_;
     core::UserId user_;
     MessageCallback<void> done_;
+};
+
+// A redaction binds the actor's id, which must outlive the statement (ADR-0135).
+class Redact final : public Operation {
+public:
+    Redact(const core::RoomId& room, std::uint64_t seq, const core::ports::Actor& actor,
+           MessageCallback<core::ports::RedactOutcome> done)
+        : room_(room), seq_(seq), actor_(actor.user()), done_(std::move(done)) {}
+
+    [[nodiscard]] Statement start() noexcept override {
+        return Statement{.sql = message_sql::kRedact,
+                         .params = Params{}
+                                       .add_uuid(room_.uuid())
+                                       .add_int(as_int(seq_))
+                                       .add_text(actor_ ? actor_->view() : std::string_view{})};
+    }
+
+    [[nodiscard]] std::optional<Statement> next(Outcome outcome) noexcept override {
+        if (!outcome) {
+            done_(std::unexpected(MessageStoreError::Unavailable));
+            return std::nullopt;
+        }
+        const auto stored = outcome->get(0, 0).and_then(parse_bool);
+        const auto blanked = outcome->get(0, 1).and_then(parse_bool);
+        if (!stored || !blanked) {
+            done_(std::unexpected(MessageStoreError::Corrupt));
+        } else if (*blanked) {
+            done_(core::ports::RedactOutcome::Done);
+        } else {
+            done_(*stored ? core::ports::RedactOutcome::NotAllowed
+                          : core::ports::RedactOutcome::NotFound);
+        }
+        return std::nullopt;
+    }
+
+    void abandon(DbError /*error*/) noexcept override {
+        done_(std::unexpected(MessageStoreError::Unavailable));
+    }
+
+private:
+    core::RoomId room_;
+    std::uint64_t seq_;
+    std::optional<core::UserId> actor_;
+    MessageCallback<core::ports::RedactOutcome> done_;
 };
 
 class DisconnectUser final : public Operation {
@@ -1319,6 +1365,12 @@ void PgMessageStore::last_loud_seq(const core::RoomId& room, MessageCallback<std
     impl_->pool().submit(std::make_unique<Single<std::uint64_t>>(
         Statement{.sql = message_sql::kLastLoudSeq, .params = Params{}.add_uuid(room.uuid())},
         &decode_last_seq, std::move(done)));
+}
+
+void PgMessageStore::redact(const core::RoomId& room, std::uint64_t seq,
+                            const core::ports::Actor& actor,
+                            MessageCallback<core::ports::RedactOutcome> done) {
+    impl_->pool().submit(std::make_unique<Redact>(room, seq, actor, std::move(done)));
 }
 
 void PgMessageStore::last_seq(const core::RoomId& room, MessageCallback<std::uint64_t> done) {

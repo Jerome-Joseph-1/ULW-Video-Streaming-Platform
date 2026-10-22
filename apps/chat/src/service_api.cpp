@@ -65,6 +65,7 @@ enum class Op : std::uint8_t {
     DisconnectUser,
     History,
     Reads,
+    RedactMessage,
 };
 
 Op op_of(std::string_view target) noexcept {
@@ -72,7 +73,7 @@ Op op_of(std::string_view target) noexcept {
         return Op::None;
     }
     const std::string_view name = target.substr(kServicePrefix.size());
-    constexpr std::array<std::pair<std::string_view, Op>, 17> kOps{{
+    constexpr std::array<std::pair<std::string_view, Op>, 18> kOps{{
         {"open_direct", Op::OpenDirect},
         {"create_group", Op::CreateGroup},
         {"add_members", Op::AddMembers},
@@ -90,6 +91,7 @@ Op op_of(std::string_view target) noexcept {
         {"disconnect_user", Op::DisconnectUser},
         {"history", Op::History},
         {"reads", Op::Reads},
+        {"redact_message", Op::RedactMessage},
     }};
     const auto* found = std::ranges::find(kOps, name, &std::pair<std::string_view, Op>::first);
     return found == kOps.end() ? Op::None : found->second;
@@ -198,7 +200,8 @@ Parsed<std::optional<std::uint64_t>> seq_of(const core::json::Value& body, std::
 }
 
 // A page of history as the backend reads it (ADR-0133): each message as the socket's `message`
-// frame names it, `quiet` always said, and the body, base64url, only when asked for.
+// frame names it, `quiet` always said, `redacted` when it is, and the body, base64url, only when
+// asked for.
 void write_page(std::string& out, const core::RoomId& room,
                 std::span<const core::ports::StoredMessage> page, bool bodies) {
     out += R"({"type":"history","room":")";
@@ -217,6 +220,10 @@ void write_page(std::string& out, const core::RoomId& room,
             std::back_inserter(out), R"(,"at":{},"quiet":{})",
             std::chrono::floor<std::chrono::milliseconds>(m.sent_at.time_since_epoch()).count(),
             m.quiet);
+        // Blanked since (ADR-0135): its body, if asked for, is empty.
+        if (m.redacted) {
+            out += R"(,"redacted":true)";
+        }
         if (bodies) {
             out += R"(,"body":")";
             // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -636,6 +643,9 @@ private:
         case Op::Reads:
             started = reads(*json);
             break;
+        case Op::RedactMessage:
+            started = redact_message(*json);
+            break;
         case Op::None:
             started = std::unexpected(Refusal{.status = Status::NotFound, .reason = "not_found"});
             break;
@@ -997,6 +1007,44 @@ private:
                 c->refused(Refusal{.status = Status::ServiceUnavailable, .reason = "unavailable"});
             }
         });
+        return {};
+    }
+
+    // A stored message blanked for the operator (ADR-0135), whoever sent it: moderation, or a
+    // user's request to remove what they sent. Every socket joined to the room hears `redacted`,
+    // on every node, as for a member's own redact.
+    Parsed<void> redact_message(const core::json::Value& body) {
+        if (!only(body, {"room", "seq"})) {
+            return std::unexpected(kMalformed);
+        }
+        auto room = room_of(body, "room");
+        if (!room) {
+            return std::unexpected(room.error());
+        }
+        const core::json::Value* seq_field = body.find("seq");
+        const auto seq = seq_field != nullptr ? seq_field->as_u64() : std::nullopt;
+        if (!seq || *seq == 0) {
+            return std::unexpected(kMalformed);
+        }
+        api_.store_.redact(
+            *room, *seq, core::ports::Actor::service(),
+            reply<core::ports::RedactOutcome>(
+                [room = *room, seq = *seq](Connection& c, ServiceApi& api,
+                                           core::ports::RedactOutcome outcome) {
+                    if (outcome != core::ports::RedactOutcome::Done) {
+                        // The service is never refused as a user is: only a seq with no message.
+                        ++api.counters_.refused;
+                        c.refused(Refusal{.status = Status::NotFound, .reason = "no_message"});
+                        return;
+                    }
+                    if (api.rooms_ != nullptr) {
+                        api.rooms_->notify(room, encode_redaction({.room = room, .seq = seq}));
+                    }
+                    ++api.counters_.changes;
+                    std::string out;
+                    write_redacted(out, room, seq);
+                    c.answered(Status::Ok, out);
+                }));
         return {};
     }
 

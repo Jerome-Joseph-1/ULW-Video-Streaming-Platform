@@ -69,6 +69,8 @@ struct ChatService::Room final : rt::IMember {
         rt::MessageKey key;
         core::WallTime sent_at;
         bool quiet = false;
+        // Blanked since it was kept (ADR-0135): its body is empty.
+        bool redacted = false;
         std::vector<std::byte> body;
     };
 
@@ -449,13 +451,15 @@ std::uint64_t ChatService::replay(const Room& room, Client& c, std::uint64_t aft
     std::string out;
     for (auto it = first; it != room.kept.end(); ++it) {
         out.clear();
-        write_message(out, rt::Message{.room = room.id,
-                                       .seq = it->seq,
-                                       .sender = it->sender,
-                                       .key = it->key,
-                                       .sent_at = it->sent_at,
-                                       .quiet = it->quiet,
-                                       .body = it->body});
+        write_message(out,
+                      rt::Message{.room = room.id,
+                                  .seq = it->seq,
+                                  .sender = it->sender,
+                                  .key = it->key,
+                                  .sent_at = it->sent_at,
+                                  .quiet = it->quiet,
+                                  .body = it->body},
+                      it->redacted);
         c.client->push(out);
         ++counters_.replayed;
     }
@@ -658,6 +662,116 @@ void ChatService::around(ClientId id, const History& history) {
                 ++counters_.allocation_failures;
             }
         });
+}
+
+void ChatService::redact(ClientId id, const Redact& redact) {
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    Room* r = find(redact.room);
+    if (r == nullptr || !r->joined ||
+        std::ranges::find(r->subscribers, id, &Room::Subscriber::id) == r->subscribers.end()) {
+        refuse_redact(*c->client, reason(rt::RouteError::NotJoined), redact);
+        return;
+    }
+    // A store write that every node with members in the room hears: charged as a send is.
+    const core::MonoTime now = clock_.now();
+    const auto bucket =
+        sends_.try_emplace(c->user, limits_.send_burst, limits_.sends_per_second, now).first;
+    if (const auto taken = bucket->second.take(now); !taken) {
+        ++counters_.rate_limited;
+        refuse_redact(*c->client, "rate_limited", redact, taken.error());
+        return;
+    }
+    messages_.redact(
+        redact.room, redact.seq, c->user,
+        [this, id, redact](core::ports::MessageResult<core::ports::RedactOutcome> result) noexcept {
+            redact_answered(id, redact, result);
+        });
+}
+
+void ChatService::redact_answered(
+    ClientId id, const Redact& redact,
+    core::ports::MessageResult<core::ports::RedactOutcome> result) noexcept {
+    // Told to the room whether or not the client is still here: the message is blanked.
+    if (result && *result == core::ports::RedactOutcome::Done) {
+        ++counters_.redactions;
+        try {
+            rooms_plane_.notify(redact.room,
+                                encode_redaction({.room = redact.room, .seq = redact.seq}));
+        } catch (const std::bad_alloc&) {
+            // This node's own clients are told all the same; others see it in history.
+            ++counters_.allocation_failures;
+            on_redaction(redact.room, redact.seq);
+        }
+    }
+    Client* c = find(id);
+    if (c == nullptr) {
+        return;
+    }
+    if (!result) {
+        refuse_redact(*c->client, reason(rt::RouteError::Unavailable), redact);
+        return;
+    }
+    switch (*result) {
+    case core::ports::RedactOutcome::Done:
+        break;
+    case core::ports::RedactOutcome::NotFound:
+        ++counters_.redact_not_found;
+        refuse_redact(*c->client, "not_found", redact);
+        return;
+    case core::ports::RedactOutcome::NotAllowed:
+        ++counters_.redact_not_allowed;
+        refuse_redact(*c->client, "not_allowed", redact);
+        return;
+    }
+    try {
+        std::string out;
+        write_redacted(out, redact.room, redact.seq);
+        c->client->push(out);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        c->client->allocation_failed();
+    }
+}
+
+void ChatService::on_redaction(const core::RoomId& room, std::uint64_t seq) noexcept {
+    Room* r = find(room);
+    if (r == nullptr) {
+        return;
+    }
+    // What this node keeps of it goes too: a client resuming from here is sent it blank.
+    if (const auto it = std::ranges::lower_bound(r->kept, seq, {}, &Room::Kept::seq);
+        it != r->kept.end() && it->seq == seq && !it->redacted) {
+        r->kept_bytes -= it->body.size();
+        buffered_bytes_ -= it->body.size();
+        std::vector<std::byte>{}.swap(it->body);
+        it->redacted = true;
+    }
+    try {
+        std::string out;
+        write_redacted(out, room, seq);
+        for (const Room::Subscriber& s : r->subscribers) {
+            if (s.client->push(out)) {
+                ++counters_.redaction_events;
+            }
+        }
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+    }
+}
+
+void ChatService::refuse_redact(IClient& client, std::string_view reason, const Redact& redact,
+                                std::optional<core::Millis> retry_after) noexcept {
+    try {
+        std::string out;
+        write_redact_error(out, reason, redact.room, redact.seq, retry_after);
+        client.push(out);
+    } catch (const std::bad_alloc&) {
+        ++counters_.allocation_failures;
+        client.allocation_failed();
+    }
 }
 
 ChatService::Room* ChatService::calling_room(Client& c, ClientId id, const core::RoomId& room) {
@@ -1086,13 +1200,15 @@ void ChatService::page_read(
             }
             used += cost;
             out.clear();
-            write_message(out, rt::Message{.room = room,
-                                           .seq = m.seq,
-                                           .sender = m.sender,
-                                           .key = *key,
-                                           .sent_at = m.sent_at,
-                                           .quiet = m.quiet,
-                                           .body = m.body});
+            write_message(out,
+                          rt::Message{.room = room,
+                                      .seq = m.seq,
+                                      .sender = m.sender,
+                                      .key = *key,
+                                      .sent_at = m.sent_at,
+                                      .quiet = m.quiet,
+                                      .body = m.body},
+                          m.redacted);
             c->client->push(out);
             ++count;
         }
@@ -1235,6 +1351,14 @@ void ChatService::on_notice(const core::RoomId& room, std::span<const std::byte>
             }
             return;
         }
+        if (const auto* redaction = std::get_if<RedactionNotice>(&*notice)) {
+            if (redaction->room != room) {
+                ++counters_.room_notices_malformed;
+                return;
+            }
+            on_redaction(room, redaction->seq);
+            return;
+        }
         const auto* read_notice = std::get_if<ReadNotice>(&*notice);
         if (read_notice == nullptr || read_notice->room != room) {
             ++counters_.room_notices_malformed;
@@ -1316,13 +1440,15 @@ void ChatService::catch_up(Room& room, ClientId id, Client& c) {
         counters_.lossy_drops += it->seq - next;
         next = it->seq;
         out.clear();
-        write_message(out, rt::Message{.room = room.id,
-                                       .seq = it->seq,
-                                       .sender = it->sender,
-                                       .key = it->key,
-                                       .sent_at = it->sent_at,
-                                       .quiet = it->quiet,
-                                       .body = it->body});
+        write_message(out,
+                      rt::Message{.room = room.id,
+                                  .seq = it->seq,
+                                  .sender = it->sender,
+                                  .key = it->key,
+                                  .sent_at = it->sent_at,
+                                  .quiet = it->quiet,
+                                  .body = it->body},
+                      it->redacted);
         if (!c.client->push(out)) {
             // Closing: what is left is counted when it detaches.
             s->behind = next;

@@ -3,6 +3,7 @@
 #include "core/ports/message_store.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -10,8 +11,8 @@
 namespace ulw::test {
 
 // A base for fakes of the message store whose tests are about something other than member lists
-// changed by their users (ADR-0096): every such change and listing is answered Unavailable, at
-// once.
+// changed by their users (ADR-0096): every such change and listing, and a redaction (ADR-0135),
+// is answered Unavailable, at once.
 class NoMembershipStore : public core::ports::IMessageStore {
 public:
     void open_direct(const core::RoomId& /*room*/, const core::UserId& /*user*/,
@@ -59,6 +60,11 @@ public:
     }
     void shared_with(const core::UserId& /*user*/, std::vector<core::UserId> /*others*/,
                      core::ports::MessageCallback<std::vector<core::UserId>> done) override {
+        done(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    }
+    void redact(const core::RoomId& /*room*/, std::uint64_t /*seq*/,
+                const core::ports::Actor& /*actor*/,
+                core::ports::MessageCallback<core::ports::RedactOutcome> done) override {
         done(std::unexpected(core::ports::MessageStoreError::Unavailable));
     }
     void disconnect_user(const core::UserId& /*user*/,

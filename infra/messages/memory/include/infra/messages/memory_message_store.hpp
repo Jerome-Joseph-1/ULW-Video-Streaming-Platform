@@ -30,7 +30,8 @@ public:
     // Stores a message under `seq` (from 1) and answers the seq it is stored under. As the
     // durable store does, a key the sender already used in the room is answered with that
     // message's seq when the body is the same, and is Conflict when it is not; nothing is
-    // written either way. A seq already taken by another message is Conflict. Over
+    // written either way; a key whose message was redacted (ADR-0135) is answered with its seq
+    // whatever the body. A seq already taken by another message is Conflict. Over
     // kMaxMessageBody is TooLarge. An ephemeral room's
     // (rt::is_ephemeral_room) message is not kept: only its seq counts, for last_seq.
     void append(const core::RoomId& room, std::uint64_t seq, const core::UserId& sender,
@@ -46,6 +47,8 @@ public:
                   core::ports::MessageCallback<std::uint64_t> done) override;
     void last_loud_seq(const core::RoomId& room,
                        core::ports::MessageCallback<std::uint64_t> done) override;
+    void redact(const core::RoomId& room, std::uint64_t seq, const core::ports::Actor& actor,
+                core::ports::MessageCallback<core::ports::RedactOutcome> done) override;
     void add_member(const core::RoomId& room, const core::UserId& user,
                     core::ports::MessageCallback<void> done) override;
     void remove_member(const core::RoomId& room, const core::UserId& user,

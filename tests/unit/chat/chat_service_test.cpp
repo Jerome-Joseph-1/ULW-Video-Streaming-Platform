@@ -152,6 +152,24 @@ public:
         done(loud_seq);
     }
     std::uint64_t loud_seq = 0;
+    struct Redacting {
+        core::RoomId room;
+        std::uint64_t seq = 0;
+        std::optional<core::UserId> actor;
+        core::ports::MessageCallback<core::ports::RedactOutcome> done;
+    };
+    void redact(const core::RoomId& room, std::uint64_t seq, const core::ports::Actor& actor,
+                core::ports::MessageCallback<core::ports::RedactOutcome> done) override {
+        redacts.push_back(
+            {.room = room, .seq = seq, .actor = actor.user(), .done = std::move(done)});
+    }
+    // Answers the oldest redact.
+    void answer_redact(core::ports::MessageResult<core::ports::RedactOutcome> result) {
+        auto done = std::move(redacts.front().done);
+        redacts.erase(redacts.begin());
+        done(result);
+    }
+    std::vector<Redacting> redacts;
     void add_member(const core::RoomId& /*room*/, const core::UserId& /*user*/,
                     core::ports::MessageCallback<void> done) override {
         done({});
@@ -1057,6 +1075,144 @@ TEST_F(ChatServiceTest, WithPreviewsOnTheHookIsGivenTheStartOfALoudMessagesBody)
     rooms_.sends[0].done(1);
     EXPECT_EQ(watcher.told, std::vector<std::string>{"1:hello"});
     service_->watch_messages(nullptr);
+}
+
+// ADR-0135: a redact goes to the store as the client's user. Once the store has blanked the
+// message, the room hears it through the room plane, the client is answered, and what each node
+// keeps of it is blanked: a client resuming from here is sent it blank, as history does.
+TEST_F(ChatServiceTest, ARedactBlanksTheMessageInTheStoreAndWhatThisNodeKeepsAndTellsTheRoom) {
+    FakeClient alice;
+    FakeClient bob;
+    const auto a = attach(alice);
+    const auto b = attach(bob, "bob");
+    // Only in a room the client joined.
+    service_->redact(a, {.room = room_id(), .seq = 1});
+    const Seen refused = seen(alice.take().at(0));
+    EXPECT_EQ(refused.reason, "not_joined");
+    EXPECT_EQ(refused.seq, 1U);
+    EXPECT_TRUE(messages_.redacts.empty());
+    join(a);
+    join(b);
+    rt::IMember& member = rooms_.admit();
+    deliver(member, 1, "secret", "alice");
+    deliver(member, 2, "kept", "bob");
+    alice.take();
+    bob.take();
+    const std::size_t kept = service_->buffered_bytes();
+
+    service_->redact(a, {.room = room_id(), .seq = 1});
+    ASSERT_EQ(messages_.redacts.size(), 1U);
+    EXPECT_EQ(messages_.redacts[0].seq, 1U);
+    EXPECT_EQ(messages_.redacts[0].actor, core::UserId::parse("alice"));
+    EXPECT_TRUE(rooms_.notices.empty());
+    messages_.answer_redact(core::ports::RedactOutcome::Done);
+    ASSERT_EQ(rooms_.notices.size(), 1U);
+    EXPECT_EQ(rooms_.notices[0].room, room_id());
+    const auto notice = chat::decode_room_notice(rooms_.notices[0].body);
+    ASSERT_TRUE(notice && std::holds_alternative<chat::RedactionNotice>(*notice));
+    EXPECT_EQ(std::get<chat::RedactionNotice>(*notice).room, room_id());
+    EXPECT_EQ(std::get<chat::RedactionNotice>(*notice).seq, 1U);
+    const std::string redacted =
+        std::string(R"({"type":"redacted","room":")") + std::string(kRoom) + R"(","seq":1})";
+    EXPECT_EQ(alice.take(), std::vector{redacted});
+    EXPECT_TRUE(bob.take().empty());
+    EXPECT_EQ(service_->counters().redactions, 1U);
+
+    // The notice reaches every node with members in the room, this one included.
+    service_->on_redaction(room_id(), 1);
+    EXPECT_EQ(alice.take(), std::vector{redacted});
+    EXPECT_EQ(bob.take(), std::vector{redacted});
+    EXPECT_EQ(service_->counters().redaction_events, 2U);
+    EXPECT_EQ(service_->buffered_bytes(), kept - 6);
+    // Heard again, it blanks nothing more.
+    service_->on_redaction(room_id(), 1);
+    EXPECT_EQ(service_->buffered_bytes(), kept - 6);
+    alice.take();
+    bob.take();
+    // A room this node is not in tells nobody; a seq it does not keep is told all the same.
+    service_->on_redaction(room_id(kOtherRoom), 1);
+    service_->on_redaction(room_id(), 9);
+    EXPECT_EQ(alice.take().size(), 1U);
+    EXPECT_EQ(bob.take().size(), 1U);
+
+    FakeClient carol;
+    const auto c = attach(carol, "carol");
+    join(c, 0);
+    const auto resumed = carol.take();
+    ASSERT_EQ(resumed.size(), 3U);
+    EXPECT_NE(resumed[1].find(R"("seq":1,)"), std::string::npos);
+    EXPECT_NE(resumed[1].find(R"("redacted":true,"body":"")"), std::string::npos) << resumed[1];
+    EXPECT_EQ(seen(resumed[2]).body, "kept");
+    EXPECT_EQ(resumed[2].find("redacted"), std::string::npos);
+
+    // History says so, from the store.
+    history(a);
+    auto blank = stored(1, "");
+    blank.redacted = true;
+    messages_.pages.back()(std::vector{blank, stored(2, "kept")});
+    const auto page = alice.take();
+    ASSERT_EQ(page.size(), 3U);
+    EXPECT_NE(page[0].find(R"("redacted":true,"body":"")"), std::string::npos) << page[0];
+    EXPECT_EQ(page[1].find("redacted"), std::string::npos);
+
+    // A redaction's notice reads whole or not at all.
+    auto longer = chat::encode_redaction({.room = room_id(), .seq = 1});
+    longer.push_back(std::byte{0});
+    EXPECT_FALSE(chat::decode_room_notice(longer));
+    EXPECT_FALSE(chat::decode_room_notice(std::vector{std::byte{5}}));
+}
+
+// A redaction's notice reaches on_redaction through the service's room notices (layout 5), and
+// only for the room it names.
+TEST_F(ChatServiceTest, ARedactionsNoticeIsHeardForTheRoomItNames) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    service_->on_notice(room_id(), chat::encode_redaction({.room = room_id(), .seq = 4}));
+    const Seen told = seen(alice.take().at(0));
+    EXPECT_EQ(told.type, "redacted");
+    EXPECT_EQ(told.seq, 4U);
+    service_->on_notice(room_id(), chat::encode_redaction({.room = room_id(kOtherRoom), .seq = 4}));
+    EXPECT_TRUE(alice.take().empty());
+    EXPECT_EQ(service_->counters().room_notices_malformed, 1U);
+}
+
+// What the store refuses is answered with why, and tells nobody; a redact is charged as a send.
+TEST_F(ChatServiceTest, ARedactTheStoreRefusesIsAnsweredWhyAndTellsNobody) {
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    alice.take();
+    const auto refused = [&](core::ports::MessageResult<core::ports::RedactOutcome> result) {
+        service_->redact(a, {.room = room_id(), .seq = 3});
+        messages_.answer_redact(result);
+        return seen(alice.take().at(0));
+    };
+    EXPECT_EQ(refused(core::ports::RedactOutcome::NotFound).reason, "not_found");
+    EXPECT_EQ(refused(core::ports::RedactOutcome::NotAllowed).reason, "not_allowed");
+    const Seen down = refused(std::unexpected(core::ports::MessageStoreError::Unavailable));
+    EXPECT_EQ(down.reason, "unavailable");
+    EXPECT_EQ(down.seq, 3U);
+    EXPECT_TRUE(rooms_.notices.empty());
+    EXPECT_EQ(service_->counters().redact_not_found, 1U);
+    EXPECT_EQ(service_->counters().redact_not_allowed, 1U);
+
+    for (int i = 0; i < 7; ++i) {
+        service_->redact(a, {.room = room_id(), .seq = 3});
+    }
+    EXPECT_EQ(messages_.redacts.size(), 7U);
+    service_->redact(a, {.room = room_id(), .seq = 3});
+    EXPECT_EQ(messages_.redacts.size(), 7U);
+    const Seen limited = seen(alice.take().at(0));
+    EXPECT_EQ(limited.reason, "rate_limited");
+    EXPECT_EQ(limited.retry_after_ms, 500U);
+    // Answered after its client went, a redaction is still told to the room.
+    service_->detach(a);
+    messages_.answer_redact(core::ports::RedactOutcome::Done);
+    EXPECT_EQ(rooms_.notices.size(), 1U);
 }
 
 TEST_F(ChatServiceTest, ARateLimitedSendIsRefusedWithWhenToRetryAndNeverReachesTheRoom) {

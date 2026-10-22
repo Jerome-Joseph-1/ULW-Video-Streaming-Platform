@@ -148,6 +148,23 @@ std::expected<Command, EnvelopeError> send_of(const core::json::Value& message) 
     return Send{.room = *room, .id = *id, .body = std::move(*body), .quiet = quiet};
 }
 
+std::expected<Command, EnvelopeError> redact_of(const core::json::Value& message) {
+    if (!only(message, {"type", "room", "seq"})) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    auto room = room_of(message);
+    if (!room) {
+        return std::unexpected(room.error());
+    }
+    const core::json::Value* seq = message.find("seq");
+    const auto n = seq == nullptr ? std::nullopt : seq->as_u64();
+    // Seqs start at 1.
+    if (!n || *n == 0) {
+        return std::unexpected(EnvelopeError::Malformed);
+    }
+    return Redact{.room = *room, .seq = *n};
+}
+
 [[nodiscard]] std::expected<Command, EnvelopeError> history_of(const core::json::Value& message) {
     if (!only(message, {"type", "room", "before", "after", "around", "limit"})) {
         return std::unexpected(EnvelopeError::Malformed);
@@ -787,6 +804,9 @@ std::expected<Command, EnvelopeError> parse_command(std::string_view text) {
     if (name == "history") {
         return history_of(*message);
     }
+    if (name == "redact") {
+        return redact_of(*message);
+    }
     if (name == "call") {
         return call_of(*message);
     }
@@ -943,7 +963,7 @@ void write_sent(std::string& out, const core::RoomId& room, const rt::MessageKey
     std::format_to(std::back_inserter(out), R"(,"seq":{}}})", seq);
 }
 
-void write_message(std::string& out, const rt::Message& message) {
+void write_message(std::string& out, const rt::Message& message, bool redacted) {
     // Grown once, to its final size: a message is up to tens of KiB, and a string doubling its
     // way there leaves every smaller copy behind as a hole in the heap.
     out.reserve(out.size() + message_wire_size(message.body.size()));
@@ -960,6 +980,9 @@ void write_message(std::string& out, const rt::Message& message) {
     if (message.quiet) {
         out += R"(,"quiet":true)";
     }
+    if (redacted) {
+        out += R"(,"redacted":true)";
+    }
     out += R"(,"body":")";
     // The body's bytes, whatever they are; the encoding reads them as octets.
     // NOLINTBEGIN(cppcoreguidelines-pro-type-reinterpret-cast)
@@ -968,6 +991,23 @@ void write_message(std::string& out, const rt::Message& message) {
     // NOLINTEND(cppcoreguidelines-pro-type-reinterpret-cast)
     infra::auth::append_base64url(out, octets);
     out += R"("})";
+}
+
+void write_redacted(std::string& out, const core::RoomId& room, std::uint64_t seq) {
+    out += R"({"type":"redacted",)";
+    append_room(out, room);
+    std::format_to(std::back_inserter(out), R"(,"seq":{}}})", seq);
+}
+
+void write_redact_error(std::string& out, std::string_view reason, const core::RoomId& room,
+                        std::uint64_t seq, std::optional<core::Millis> retry_after) {
+    write_error(out, reason, room);
+    out.pop_back();
+    std::format_to(std::back_inserter(out), R"(,"seq":{})", seq);
+    if (retry_after) {
+        std::format_to(std::back_inserter(out), R"(,"retry_after_ms":{})", retry_after->count());
+    }
+    out += '}';
 }
 
 void write_history(std::string& out, const core::RoomId& room, std::size_t count) {
@@ -992,10 +1032,10 @@ void write_error(std::string& out, std::string_view reason, const std::optional<
 
 // base64url without padding is four characters per three bytes and two or three for a partial
 // group. Around it, {"type":"message", the room (45), the seq (27), the sender (at most 140),
-// the id (at most 72), the time (at most 20), "quiet":true (13) and "body":"" (11) come to 346
-// bytes, and the WebSocket header of a frame under 64 KiB to 4 more.
+// the id (at most 72), the time (at most 20), "quiet":true (13), "redacted":true (16) and
+// "body":"" (11) come to 362 bytes, and the WebSocket header of a frame under 64 KiB to 4 more.
 std::size_t message_wire_size(std::size_t body) noexcept {
-    constexpr std::size_t kAround = 353;
+    constexpr std::size_t kAround = 369;
     return (((body * 4) + 2) / 3) + kAround;
 }
 
