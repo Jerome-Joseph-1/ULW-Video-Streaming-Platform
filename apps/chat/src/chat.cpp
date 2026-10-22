@@ -576,6 +576,14 @@ std::string ChatServer::render_metrics() const {
            std::format("user_disconnects_total{{of=\"socket\"}} {}\n"
                        "user_disconnects_total{{of=\"call\"}} {}\n",
                        chat.disconnects, call.disconnects) +
+           // Rooms' activity told to their members (ADR-0137).
+           std::format("activity_notices_total {}\n"
+                       "activity_folded_total {}\n"
+                       "activity_failures_total {}\n"
+                       "activity_pushed_total {}\n"
+                       "activity_rooms {}\n",
+                       chat.activity_notices, chat.activity_folded, chat.activity_failures,
+                       bell.activity, chat_.activity_rooms()) +
            // Member lists changed by their users (ADR-0096).
            std::format("directs_opened_total {}\n"
                        "groups_created_total {}\n"

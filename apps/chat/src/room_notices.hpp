@@ -1,0 +1,39 @@
+#pragma once
+
+#include "core/models/ids.hpp"
+#include "core/util/time.hpp"
+
+#include <cstddef>
+#include <cstdint>
+#include <optional>
+#include <span>
+#include <vector>
+
+// What the chat service hands the room plane as unsequenced notices (rt::RoomRouter::notify), as
+// the ring does (ring.hpp), and the nodes that hear them push to their sockets. Each layout's
+// first byte says which it is; the ring's is 1, and a node that reads a byte it does not know
+// drops the notice, so a node of an earlier release hears none of these and counts them as
+// malformed.
+namespace chat {
+
+// A room moved on (ADR-0137): told to one member's presence room, which every node with a socket
+// of theirs is in, so that each of those sockets hears it whether it joined the room or not.
+struct ActivityNotice {
+    core::UserId to;
+    core::RoomId room;
+    // The latest message this notice covers: its seq, sender and when it was sequenced.
+    std::uint64_t seq = 0;
+    core::UserId sender;
+    // Unix milliseconds on the wire.
+    core::WallTime at;
+    // Every message since the member's last notice of this room was quiet (ADR-0128).
+    bool quiet = false;
+};
+
+[[nodiscard]] std::vector<std::byte> encode_activity(const ActivityNotice& notice);
+// nullopt for any other layout, or one that does not read whole.
+[[nodiscard]] std::optional<ActivityNotice> decode_activity(std::span<const std::byte> bytes);
+// Whether the notice is in the activity layout, by its first byte alone.
+[[nodiscard]] bool is_activity(std::span<const std::byte> bytes) noexcept;
+
+} // namespace chat

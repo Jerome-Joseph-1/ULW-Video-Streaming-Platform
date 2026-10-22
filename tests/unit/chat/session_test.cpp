@@ -64,6 +64,18 @@ std::string without_at(const std::optional<std::string>& text) {
 }
 
 constexpr std::string_view kRoom = "01a0eb86-6cca-7dce-84cc-3bb47615f9fd";
+
+// The next frame that is not a room's activity (ADR-0137), which a member's sockets hear as the
+// room moves on whenever the notice comes round.
+template <class Client>
+std::optional<std::string> next_but_activity(Client& client, std::chrono::milliseconds limit) {
+    for (;;) {
+        auto text = client.next_text(limit);
+        if (!text || !text->starts_with(R"({"type":"activity",)")) {
+            return text;
+        }
+    }
+}
 constexpr std::string_view kAllowed = "https://app.example.com";
 
 // Hands the server each connection as if it came from the peer `named` holds, while it holds
@@ -745,13 +757,31 @@ TEST_P(ChatSessionTest, AMessageAfterALargerOneIsSentExactlyToEveryMember) {
                                     R"(","seq":)" + std::to_string(seq) +
                                     R"(,"sender":"alice","id":")" + id + R"(","body":")" + *body +
                                     R"("})";
-        EXPECT_EQ(without_at(alice->next_text(seconds(10))), message) << id;
-        EXPECT_EQ(alice->next_text(seconds(10)), R"({"type":"sent","room":")" + std::string(kRoom) +
-                                                     R"(","id":")" + id + R"(","seq":)" +
-                                                     std::to_string(seq) + "}")
+        EXPECT_EQ(without_at(next_but_activity(*alice, seconds(10))), message) << id;
+        EXPECT_EQ(next_but_activity(*alice, seconds(10)),
+                  R"({"type":"sent","room":")" + std::string(kRoom) + R"(","id":")" + id +
+                      R"(","seq":)" + std::to_string(seq) + "}")
             << id;
-        EXPECT_EQ(without_at(bob->next_text(seconds(10))), message) << id;
+        EXPECT_EQ(without_at(next_but_activity(*bob, seconds(10))), message) << id;
     }
+}
+
+// A member's socket that never joined the room hears that it moved on (ADR-0137): its seq, who
+// sent it and when, through the member's presence room, with no body.
+TEST_P(ChatSessionTest, AMembersSocketThatDidNotJoinHearsTheRoomsActivity) {
+    auto alice = open_as("alice");
+    auto bob = open_as("bob");
+    ASSERT_TRUE(alice);
+    ASSERT_TRUE(bob);
+    ASSERT_TRUE(alice->send_text(R"({"type":"join","room":")" + std::string(kRoom) + R"("})"));
+    EXPECT_EQ(alice->next_text(seconds(10)),
+              R"({"type":"joined","room":")" + std::string(kRoom) + R"(","seq":0,"loud_seq":0})");
+    ASSERT_TRUE(alice->send_text(R"({"type":"send","room":")" + std::string(kRoom) +
+                                 R"(","id":"m1","body":"eA","quiet":true})"));
+    const auto activity = bob->next_text(seconds(10));
+    ASSERT_TRUE(activity);
+    EXPECT_EQ(without_at(activity), R"({"type":"activity","room":")" + std::string(kRoom) +
+                                        R"(","seq":1,"sender":"alice","quiet":true})");
 }
 
 TEST_P(ChatSessionTest, SendingToARoomNotJoinedIsRefusedAndTheSocketStaysOpen) {

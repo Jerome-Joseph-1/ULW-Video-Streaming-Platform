@@ -903,13 +903,20 @@ private:
         const auto kind_text = r.get(row, 1);
         const auto role = r.get(row, 2).and_then(role_of);
         const auto peer_text = r.get(row, 3);
-        if (!room || !role) {
+        const auto seq = r.get(row, 4).and_then(parse_uint64);
+        const auto last_at = r.get(row, 5);
+        const auto micros = last_at.and_then(parse_int64);
+        if (!room || !role || !seq || (last_at && !micros)) {
             return std::unexpected(MessageStoreError::Corrupt);
         }
         core::ports::RoomEntry entry{.room = *room,
                                      .kind = core::ports::RoomKind::GroupChat,
                                      .role = *role,
-                                     .peer = std::nullopt};
+                                     .peer = std::nullopt,
+                                     .seq = *seq};
+        if (micros) {
+            entry.last_at = core::WallTime{std::chrono::microseconds{*micros}};
+        }
         if (kind_text) {
             const auto kind = kind_of(*kind_text);
             if (!kind) {

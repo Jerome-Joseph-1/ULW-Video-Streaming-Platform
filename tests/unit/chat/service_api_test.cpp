@@ -136,6 +136,8 @@ public:
               rt::SendCallback done) override {
         done(std::unexpected(rt::RouteError::Unavailable));
     }
+    void notify(const core::RoomId& /*room*/,
+                std::span<const std::byte> /*notice*/) noexcept override {}
     void ask_owner(const core::RoomId& /*room*/, rt::IMember& /*from*/,
                    std::span<const std::byte> request, rt::OwnerAnswer done) override {
         asked = chat::decode_request(request);
@@ -454,7 +456,7 @@ TEST_F(ServiceApiTest, AGroupIsCreatedOnceForItsRequestAndManagedAsItsAdminWould
     const Answer rooms = ask("rooms", R"({"user":"dave"})");
     EXPECT_EQ(rooms.status, 200);
     EXPECT_EQ(rooms.body, std::format(R"({{"type":"rooms","rooms":[{{"room":"{}","kind":"group",)"
-                                      R"("role":"member"}}],"more":false}})",
+                                      R"("role":"member","seq":0}}],"more":false}})",
                                       r));
 
     // Removing the admin hands the group on, as a leave does.

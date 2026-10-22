@@ -1035,6 +1035,17 @@ void write_ticket(std::string& out, const core::RoomId& room,
     out += '}';
 }
 
+void write_activity(std::string& out, const ActivityNotice& notice) {
+    out += R"({"type":"activity",)";
+    append_room(out, notice.room);
+    std::format_to(std::back_inserter(out), R"(,"seq":{})", notice.seq);
+    append_user(out, "sender", notice.sender);
+    std::format_to(
+        std::back_inserter(out), R"(,"at":{},"quiet":{}}})",
+        std::chrono::floor<std::chrono::milliseconds>(notice.at.time_since_epoch()).count(),
+        notice.quiet);
+}
+
 void write_call_event(std::string& out, const CallNotice& notice) {
     std::string_view type = "call_ringing";
     switch (notice.event) {
@@ -1254,6 +1265,15 @@ void write_rooms(std::string& out, std::span<const core::ports::RoomEntry> rooms
         out += '"';
         if (entry.peer) {
             append_user(out, "peer", *entry.peer);
+        }
+        // ADR-0137: the latest seq, and when the newest stored message was sequenced, in Unix
+        // milliseconds floored as a message's "at" is; no last_at before one is stored.
+        std::format_to(std::back_inserter(out), R"(,"seq":{})", entry.seq);
+        if (entry.last_at) {
+            std::format_to(
+                std::back_inserter(out), R"(,"last_at":{})",
+                std::chrono::floor<std::chrono::milliseconds>(entry.last_at->time_since_epoch())
+                    .count());
         }
         out += '}';
     }

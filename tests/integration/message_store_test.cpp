@@ -834,6 +834,40 @@ TEST_F(MessageStoreTest, AUsersRoomsAreReadThroughTheirIndex) {
     EXPECT_EQ(rooms->size(), 40U);
 }
 
+// ADR-0137: a room's entry carries its counter's seq and its newest stored message's time, to the
+// microsecond, and a counter with no message stored under it says no time.
+TEST_F(MessageStoreTest, AUsersRoomsSayTheirLatestSeqAndWhenItWasSequenced) {
+    const core::RoomId room = core::RoomId::generate(clock_, random_);
+    ASSERT_TRUE(ask<void>([&](auto done) { store_->add_member(room, alice_, std::move(done)); }));
+    const auto entry = [&]() -> std::optional<core::ports::RoomEntry> {
+        const auto rooms = ask<std::vector<core::ports::RoomEntry>>(
+            [&](auto done) { store_->rooms_of(alice_, std::nullopt, 10, std::move(done)); });
+        if (!rooms || rooms->size() != 1) {
+            ADD_FAILURE() << "one room expected";
+            return std::nullopt;
+        }
+        return rooms->front();
+    };
+    EXPECT_EQ(entry()->seq, 0U);
+    const std::uint64_t generation = own(room);
+    ASSERT_TRUE(write(room, generation, bytes("one")));
+    const auto at = core::WallTime{std::chrono::microseconds{1'790'000'000'123'456}};
+    ASSERT_TRUE(conn_->exec("UPDATE chat_messages SET sent_at = to_timestamp(1790000000.123456) "
+                            "WHERE room_id = $1",
+                            Params{}.add_uuid(room.uuid())));
+    const auto moved = entry();
+    ASSERT_TRUE(moved);
+    EXPECT_EQ(moved->seq, 1U);
+    EXPECT_EQ(moved->last_at, at);
+    // The counter moved past what is stored (a message deleted): the seq is the counter's.
+    ASSERT_TRUE(conn_->exec("DELETE FROM chat_messages WHERE room_id = $1",
+                            Params{}.add_uuid(room.uuid())));
+    const auto bare = entry();
+    ASSERT_TRUE(bare);
+    EXPECT_EQ(bare->seq, 1U);
+    EXPECT_EQ(bare->last_at, std::nullopt);
+}
+
 // Who shares a chat with whom is read from the asker's rooms by their index, each probed for the
 // others by primary key: never a scan of every list, however many there are.
 TEST_F(MessageStoreTest, WhoSharesAChatIsReadThroughTheIndexesAlone) {

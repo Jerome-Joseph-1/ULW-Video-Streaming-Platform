@@ -877,23 +877,27 @@ TEST(Envelope, MemberListRepliesAreTheDocumentedShapes) {
     chat::write_left(out, room(), uid("carol"));
     EXPECT_EQ(out, R"({"type":"left","room":")" + r + R"(","promoted":"carol"})");
     out.clear();
-    const std::vector<core::ports::RoomEntry> rooms{{.room = room(),
-                                                     .kind = core::ports::RoomKind::DirectChat,
-                                                     .role = core::ports::MemberRole::Member,
-                                                     .peer = uid("bob")},
-                                                    {.room = room(),
-                                                     .kind = core::ports::RoomKind::GroupChat,
-                                                     .role = core::ports::MemberRole::Admin,
-                                                     .peer = std::nullopt},
-                                                    {.room = room(),
-                                                     .kind = core::ports::RoomKind::StreamLiveChat,
-                                                     .role = core::ports::MemberRole::Member,
-                                                     .peer = std::nullopt}};
+    const std::vector<core::ports::RoomEntry> rooms{
+        {.room = room(),
+         .kind = core::ports::RoomKind::DirectChat,
+         .role = core::ports::MemberRole::Member,
+         .peer = uid("bob")},
+        {.room = room(),
+         .kind = core::ports::RoomKind::GroupChat,
+         .role = core::ports::MemberRole::Admin,
+         .peer = std::nullopt,
+         .seq = 42,
+         .last_at = core::WallTime{std::chrono::microseconds{1'700'000'000'123'456}}},
+        {.room = room(),
+         .kind = core::ports::RoomKind::StreamLiveChat,
+         .role = core::ports::MemberRole::Member,
+         .peer = std::nullopt}};
     chat::write_rooms(out, rooms, true);
     EXPECT_EQ(out, R"({"type":"rooms","rooms":[{"room":")" + r +
-                       R"(","kind":"direct","role":"member","peer":"bob"},{"room":")" + r +
-                       R"(","kind":"group","role":"admin"},{"room":")" + r +
-                       R"(","kind":"live","role":"member"}],"more":true})");
+                       R"(","kind":"direct","role":"member","peer":"bob","seq":0},{"room":")" + r +
+                       R"(","kind":"group","role":"admin","seq":42,"last_at":1700000000123},)"
+                       R"({"room":")" +
+                       r + R"(","kind":"live","role":"member","seq":0}],"more":true})");
     out.clear();
     chat::write_rooms(out, {}, false);
     EXPECT_EQ(out, R"({"type":"rooms","rooms":[],"more":false})");

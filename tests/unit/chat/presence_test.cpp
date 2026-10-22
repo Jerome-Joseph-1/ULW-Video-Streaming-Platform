@@ -51,7 +51,9 @@ public:
                           .body = std::move(body),
                           .done = std::move(done)});
     }
-    // Presence never asks a room's owner anything.
+    // Presence never notifies a room, nor asks its owner anything.
+    void notify(const core::RoomId& /*room*/,
+                std::span<const std::byte> /*notice*/) noexcept override {}
     void ask_owner(const core::RoomId& /*room*/, rt::IMember& /*from*/,
                    std::span<const std::byte> /*request*/, rt::OwnerAnswer done) override {
         done(std::unexpected(rt::RouteError::Unavailable));

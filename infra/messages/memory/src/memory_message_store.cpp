@@ -512,6 +512,14 @@ void MemoryMessageStore::rooms_of(const core::UserId& user, std::optional<core::
         if (const auto kind = kinds_.find(room); kind != kinds_.end()) {
             entry.kind = kind->second;
         }
+        if (const auto kept = rooms_.find(room); kept != rooms_.end()) {
+            entry.seq = kept->second.last;
+            if (!kept->second.messages.empty()) {
+                const auto& newest = *kept->second.messages.rbegin();
+                entry.seq = std::max(entry.seq, newest.first);
+                entry.last_at = newest.second.sent_at;
+            }
+        }
         if (entry.kind == core::ports::RoomKind::DirectChat) {
             for (const auto& [other, role] : members) {
                 if (other != user) {
