@@ -533,12 +533,14 @@ void CallHandler::RingRecorder::observed(const CallEvent& event) noexcept {
         return;
     }
     // A ring starts, or ends for everyone it rang. A group call answered by one, or declined by
-    // one, rings the others on, until it rings out or ends.
+    // one, rings the others on, until it rings out, ends, or the last of them answers or
+    // declines: from then it is on, and a new owner must not end it (ADR-0129).
     const bool direct = event.kind == CallKind::Direct;
     const bool ended =
         event.event == RingEvent::Cancelled || event.event == RingEvent::Missed ||
         event.event == RingEvent::Ended ||
-        (direct && (event.event == RingEvent::Answered || event.event == RingEvent::Declined));
+        ((event.event == RingEvent::Answered || event.event == RingEvent::Declined) &&
+         (direct || !event.rings));
     auto done = [this](core::ports::RingStoreResult<void> result) noexcept {
         if (!result) {
             ++failed;

@@ -175,6 +175,9 @@ struct CallEvent {
     // As CallNotice::reason and text.
     std::optional<CallReason> reason = std::nullopt;
     std::string text = {};
+    // Whether the call still rings anyone after this event: false once a group call's last
+    // member rung has answered or declined, and the call is on for those in it.
+    bool rings = true;
 };
 
 // Told of a ring's events on the room's owner, from inside the ringer: must not call back into it.
@@ -488,7 +491,8 @@ private:
         // RingOptions::max_people.
         std::uint16_t max_people = 0;
         // The latest ticket of the call: its device may be connecting still, which the SFU does
-        // not list yet, so nobody listed within caller_grace of it ends nothing.
+        // not list yet, so nobody listed within caller_grace of it ends nothing. A move to the
+        // next media generation counts as one: everyone in the call is asking for theirs.
         core::MonoTime last_ticket;
         core::MonoTime ring_deadline;
         core::WallTime expires_at;
