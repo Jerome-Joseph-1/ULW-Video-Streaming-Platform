@@ -65,6 +65,9 @@ struct NotifyConfig {
     // ULW_NOTIFY_SEQUENCED: on, every message is also a `message_sequenced`, from its room's
     // owner (ADR-0133); off by default.
     bool sequenced = false;
+    // ULW_NOTIFY_MESSAGE_PREVIEW_CHARS: 0 (the default) to 200, the characters of a message's
+    // body `message` carries (ADR-0134).
+    std::size_t preview_chars = 0;
 };
 
 inline constexpr std::size_t kMinNotifySecretBytes = 32;

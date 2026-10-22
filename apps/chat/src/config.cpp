@@ -151,6 +151,13 @@ std::expected<std::optional<NotifyConfig>, ConfigError> notify_config(const EnvL
     if (present && *present != "on" && *present != "off") {
         return error("ULW_NOTIFY_MESSAGE_PRESENT", "expected on or off");
     }
+    // A notification's line or two (ADR-0134).
+    constexpr std::size_t kMaxPreviewChars = 200;
+    const auto preview =
+        bounded<std::size_t>(env, "ULW_NOTIFY_MESSAGE_PREVIEW_CHARS", 0, kMaxPreviewChars);
+    if (!preview) {
+        return std::unexpected(preview.error());
+    }
     const auto sequenced = lookup(env, "ULW_NOTIFY_SEQUENCED");
     if (sequenced && *sequenced != "on" && *sequenced != "off") {
         return error("ULW_NOTIFY_SEQUENCED", "expected on or off");
@@ -161,6 +168,9 @@ std::expected<std::optional<NotifyConfig>, ConfigError> notify_config(const EnvL
         }
         if (sequenced) {
             return error("ULW_NOTIFY_SEQUENCED", "set, but ULW_NOTIFY_URL is not");
+        }
+        if (*preview) {
+            return error("ULW_NOTIFY_MESSAGE_PREVIEW_CHARS", "set, but ULW_NOTIFY_URL is not");
         }
         if (secret) {
             return error("ULW_NOTIFY_SECRET", "set, but ULW_NOTIFY_URL is not");
@@ -188,7 +198,8 @@ std::expected<std::optional<NotifyConfig>, ConfigError> notify_config(const EnvL
     NotifyConfig out{.url = std::move(*url),
                      .secret = std::move(*secret),
                      .message_present = present == "on",
-                     .sequenced = sequenced == "on"};
+                     .sequenced = sequenced == "on",
+                     .preview_chars = preview->value_or(0)};
     if (*interval) {
         out.message_interval = core::Millis{std::int64_t{**interval} * 1'000};
     }

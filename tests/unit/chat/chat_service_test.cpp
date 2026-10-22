@@ -947,8 +947,9 @@ TEST_F(ChatServiceTest, ASendIsAnsweredWithItsIdAndTheSeqTheOwnerGaveIt) {
 TEST_F(ChatServiceTest, AQuietMessageNotifiesNobodyAndLeavesTheLoudSeq) {
     struct Watcher final : chat::IMessageWatcher {
         void message(const core::RoomId& /*room*/, const core::UserId& /*sender*/,
-                     std::uint64_t seq) noexcept override {
+                     std::uint64_t seq, std::string_view preview) noexcept override {
             seqs.push_back(seq);
+            EXPECT_TRUE(preview.empty()) << "none unless asked for";
         }
         std::vector<std::uint64_t> seqs;
     } watcher;
@@ -990,6 +991,31 @@ TEST_F(ChatServiceTest, AQuietMessageNotifiesNobodyAndLeavesTheLoudSeq) {
     join(c);
     EXPECT_EQ(carol.take().at(0), std::string(R"({"type":"joined","room":")") + std::string(kRoom) +
                                       R"(","seq":8,"loud_seq":8})");
+    service_->watch_messages(nullptr);
+}
+
+// ADR-0134: with previews on, the hook is given the start of a message's body, kept from its
+// send; a quiet one and a live chat's are given nothing, and no body is kept for them.
+TEST_F(ChatServiceTest, WithPreviewsOnTheHookIsGivenTheStartOfALoudMessagesBody) {
+    struct Watcher final : chat::IMessageWatcher {
+        void message(const core::RoomId& /*room*/, const core::UserId& /*sender*/,
+                     std::uint64_t seq, std::string_view preview) noexcept override {
+            told.push_back(std::to_string(seq) + ":" + std::string(preview));
+        }
+        [[nodiscard]] std::size_t preview_chars() const noexcept override { return 5; }
+        std::vector<std::string> told;
+    } watcher;
+    service_->watch_messages(&watcher);
+    FakeClient alice;
+    const auto a = attach(alice);
+    join(a);
+    rooms_.admit();
+    send(a, "m1", "hello there");
+    service_->send(a, {.room = room_id(), .id = key("r1"), .body = bytes("+1"), .quiet = true});
+    ASSERT_EQ(rooms_.sends.size(), 2U);
+    rooms_.sends[1].done(2);
+    rooms_.sends[0].done(1);
+    EXPECT_EQ(watcher.told, std::vector<std::string>{"1:hello"});
     service_->watch_messages(nullptr);
 }
 

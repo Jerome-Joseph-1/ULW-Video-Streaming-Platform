@@ -4,6 +4,8 @@
 #include "log.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cstddef>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -460,6 +462,65 @@ std::uint64_t ChatService::replay(const Room& room, Client& c, std::uint64_t aft
     return first == room.kept.end() ? room.head + 1 : first->seq;
 }
 
+std::string message_preview(std::span<const std::byte> body, std::size_t chars) {
+    // An MLSMessage (RFC 9420, section 6) opens with its version, mls10 (0x0001), and its wire
+    // format (1 to 5): ciphertext and handshakes, never text (ADR-0016). The checks below refuse
+    // it anyway, at its first byte; this says why.
+    const auto at = [&](std::size_t i) { return std::to_integer<unsigned>(body[i]); };
+    if (chars == 0 || body.empty() ||
+        (body.size() >= 4 && at(0) == 0 && at(1) == 1 && at(2) == 0 && at(3) >= 1 && at(3) <= 5)) {
+        return {};
+    }
+    constexpr unsigned kTab = 0x09;
+    constexpr unsigned kLineFeed = 0x0A;
+    constexpr unsigned kReturn = 0x0D;
+    constexpr unsigned kSpace = 0x20;
+    constexpr unsigned kDelete = 0x7F;
+    std::size_t end = 0;
+    for (std::size_t n = 0; n < chars && end < body.size(); ++n) {
+        const unsigned lead = at(end);
+        // RFC 3629: the length a lead byte says, and the smallest code point that needs it,
+        // so that an overlong form, a surrogate or a value past U+10FFFF is not text.
+        std::size_t length = 1;
+        unsigned point = lead;
+        if (lead < 0x80U) {
+            if ((lead < kSpace && lead != kTab && lead != kLineFeed && lead != kReturn) ||
+                lead == kDelete) {
+                return {};
+            }
+        } else if (lead >= 0xC2U && lead <= 0xDFU) {
+            length = 2;
+            point = lead & 0x1FU;
+        } else if (lead >= 0xE0U && lead <= 0xEFU) {
+            length = 3;
+            point = lead & 0x0FU;
+        } else if (lead >= 0xF0U && lead <= 0xF4U) {
+            length = 4;
+            point = lead & 0x07U;
+        } else {
+            return {};
+        }
+        if (end + length > body.size()) {
+            return {};
+        }
+        for (std::size_t i = 1; i < length; ++i) {
+            const unsigned next = at(end + i);
+            if ((next & 0xC0U) != 0x80U) {
+                return {};
+            }
+            point = (point << 6U) | (next & 0x3FU);
+        }
+        constexpr std::array<unsigned, 5> kSmallest{0, 0, 0x80, 0x800, 0x10000};
+        if (point < kSmallest.at(length) || point > 0x10FFFFU ||
+            (point >= 0xD800U && point <= 0xDFFFU)) {
+            return {};
+        }
+        end += length;
+    }
+    // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): the bytes are UTF-8 text.
+    return {reinterpret_cast<const char*>(body.data()), end};
+}
+
 void ChatService::send(ClientId id, Send send) {
     Client* c = find(id);
     if (c == nullptr) {
@@ -504,10 +565,16 @@ void ChatService::send(ClientId id, Send send) {
         return;
     }
     c->send_bytes_in_flight += bytes;
+    // Kept only while the hook asks for it, and only for a message it may tell of (ADR-0134).
+    std::string preview;
+    if (message_watcher_ != nullptr && !send.quiet && !live) {
+        preview = message_preview(send.body, message_watcher_->preview_chars());
+    }
     rooms_plane_.send(send.room, *r, c->user, send.id, std::move(send.body), send.quiet,
-                      [this, id, room = send.room, key = send.id, bytes, quiet = send.quiet](
+                      [this, id, room = send.room, key = send.id, bytes, quiet = send.quiet,
+                       preview = std::move(preview)](
                           std::expected<std::uint64_t, rt::RouteError> result) noexcept {
-                          sent(id, room, key, bytes, quiet, result);
+                          sent(id, room, key, bytes, quiet, preview, result);
                       });
 }
 
@@ -1044,7 +1111,7 @@ void ChatService::page_read(
 }
 
 void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageKey& key,
-                       std::size_t bytes, bool quiet,
+                       std::size_t bytes, bool quiet, std::string_view preview,
                        std::expected<std::uint64_t, rt::RouteError> result) noexcept {
     Client* c = find(id);
     if (c == nullptr) {
@@ -1064,7 +1131,7 @@ void ChatService::sent(ClientId id, const core::RoomId& room, const rt::MessageK
     }
     // A quiet message (a reaction, an edit) is owed to nobody (ADR-0128).
     if (message_watcher_ != nullptr && !quiet) {
-        message_watcher_->message(room, c->user, *result);
+        message_watcher_->message(room, c->user, *result, preview);
     }
     try {
         std::string out;
