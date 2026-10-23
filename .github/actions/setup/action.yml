@@ -18,6 +18,26 @@ inputs:
 runs:
   using: composite
   steps:
+    # The toolchain's .deb files are kept between runs, so a slow mirror costs a job the package
+    # index at most rather than every package. apt checks each one against the archive's signed
+    # index before installing it, so a restored file only saves a download: one the index does
+    # not name, an older version or a damaged file, is downloaded again. The key names the runner
+    # image and this file, which holds the package list; a miss is an install as before.
+    - name: Name the toolchain's package cache
+      id: apt-key
+      shell: bash
+      run: |
+        sudo install -d -o "$(id -u)" -g "$(id -g)" /var/cache/ulw-apt
+        list=$(sha256sum "$GITHUB_ACTION_PATH/action.yml" | cut -c1-16)
+        echo "key=apt-$ImageOS-$ImageVersion-$list" >> "$GITHUB_OUTPUT"
+        echo "prefix=apt-$ImageOS-" >> "$GITHUB_OUTPUT"
+    - name: Restore the toolchain's packages
+      id: apt-cache
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: /var/cache/ulw-apt
+        key: ${{ steps.apt-key.outputs.key }}
+        restore-keys: ${{ steps.apt-key.outputs.prefix }}
     # A mirror that stops answering held apt for a job's whole hour more than once: a fetch that
     # hears nothing for 30 s is dropped and retried, and an install that fails is tried again,
     # three times in all. A mirror that is slow but answering is waited for, however long.
@@ -25,7 +45,8 @@ runs:
       shell: bash
       run: |
         apt=(-o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o Acquire::Retries=3
-             -o DPkg::Lock::Timeout=120)
+             -o DPkg::Lock::Timeout=120 -o Dir::Cache::Archives=/var/cache/ulw-apt/
+             -o APT::Keep-Downloaded-Packages=true)
         for attempt in 1 2 3; do
           if sudo apt-get "${apt[@]}" update -qq &&
             sudo apt-get "${apt[@]}" install -y -qq --no-install-recommends \
@@ -33,11 +54,21 @@ runs:
               ninja-build ccache mold jq pkg-config \
               libssl-dev libcurl4-openssl-dev libpq-dev liburing-dev libjemalloc-dev zlib1g-dev \
               ffmpeg python3-yaml; then
+            # apt leaves its lock and partial downloads root's alone; the save reads as the runner.
+            sudo chown -R "$(id -u):$(id -g)" /var/cache/ulw-apt
             exit 0
           fi
           echo "apt attempt $attempt failed" >&2
         done
         exit 1
+    # Saved as soon as the install is done, so a job cut short later still leaves it. Jobs that
+    # finish the same install at once race to save one key: the first wins, the rest only warn.
+    - name: Save the toolchain's packages
+      if: steps.apt-cache.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: /var/cache/ulw-apt
+        key: ${{ steps.apt-key.outputs.key }}
     # The worker runs ffmpeg in a network namespace of its own (ADR-0025). The runners'
     # AppArmor policy refuses unprivileged user namespaces, and the worker refuses to start
     # without its sandbox, so its tests would only skip.
