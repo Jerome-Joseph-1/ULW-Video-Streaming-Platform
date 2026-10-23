@@ -3,11 +3,13 @@
 Changes to the Stable surfaces ([versioning.md](versioning.md)) that a client may have to act
 on, newest first. An entry says what changed, who is affected and what to do.
 
-## Unreleased
+## 2026-10-23: calls that last, read receipts, redaction, relations and captions (v1.3.0)
 
 <!-- apps/chat/src/envelope.cpp (write_message, write_call_status), rt/src/wire.hpp (kVersion), apps/chat/src/ring.cpp (Ringer::occupied, Ringer::snapshot), apps/chat/src/call.cpp (CallHandler::counted, CallHandler::current), apps/chat/src/chat_service.cpp (ChatService::subscribe, ChatService::call_status), apps/chat/src/service_api.cpp (signal_call, call_status), docs/adr/0112-a-message-carries-the-time-its-owner-sequenced-it.md, docs/adr/0113-a-call-lasts-while-someone-is-in-its-media-room.md, docs/adr/0114-the-rooms-call-is-read-whatever-its-id.md, docs/adr/0115-a-call-says-whom-it-rings-and-who-moderates-it.md, docs/adr/0119-one-visibility-for-many-videos.md, apps/chat/src/video_relay.cpp (VideoRelay), migrations/0023_video_events.sql, docs/adr/0120-video-events-on-the-notification-hook.md, core/src/video_access.cpp (access_of_anonymous), migrations/0024_public_videos.sql, docs/adr/0121-a-public-video-plays-without-a-token.md, apps/chat/src/session.cpp (Session::command), docs/adr/0122-ping-on-the-socket.md, apps/chat/src/service_api.cpp (set_role), docs/adr/0123-the-service-sets-a-members-role.md, docs/adr/0124-the-service-asks-who-is-connected.md, docs/adr/0125-a-hidden-socket-is-owed-pushes.md, docs/adr/0126-a-message-names-who-is-present.md, docs/adr/0127-relay-credentials-are-asked-for-again.md, migrations/0025_quiet_messages.sql, docs/adr/0128-a-quiet-message.md, apps/chat/src/call.cpp (CallHandler::took_room), apps/chat/src/call_bell.cpp (CallBell::replay), migrations/0026_call_rings.sql, docs/adr/0129-a-ring-outlives-its-owner.md, apps/chat/src/notify_sender.cpp (HookSender::start), docs/adr/0130-a-hook-batch-says-what-was-lost.md, apps/chat/src/call.cpp (CallHandler::counted), docs/adr/0131-a-direct-call-takes-two-devices-of-each-member.md, apps/chat/src/service_api.cpp (disconnect_user), docs/adr/0132-the-service-cuts-a-user-off.md, apps/chat/src/service_api.cpp (history), apps/chat/src/notify.cpp (Notifier::sequenced), docs/adr/0133-the-backend-reads-and-hears-every-message.md, apps/chat/src/chat_service.cpp (message_preview), docs/adr/0134-a-message-event-may-carry-a-preview.md, apps/chat/src/activity.cpp, apps/chat/src/envelope.cpp (write_activity, write_rooms), infra/postgres/src/message_sql.hpp (kRoomsFirst), docs/adr/0137-a-room-tells-its-members-it-moved-on.md, apps/chat/src/receipts.cpp, migrations/0029_read_marks.sql, docs/adr/0138-read-receipts-and-typing.md, apps/chat/src/chat_service.cpp (ChatService::redact, ChatService::on_redaction), apps/chat/src/service_api.cpp (redact_message), migrations/0027_redacted_messages.sql, docs/adr/0135-a-message-can-be-redacted.md, apps/chat/src/envelope.cpp (send_of, history_of, rel_counts_of), apps/chat/src/service_api.cpp (rel_counts), migrations/0028_message_relations.sql, docs/adr/0136-messages-relate-to-earlier-ones.md, apps/gateway/src/connection.cpp (start_caption), core/src/webvtt.cpp (check), core/src/hls.cpp (add_subtitles), migrations/0030_video_captions.sql, docs/adr/0139-a-video-carries-captions-in-webvtt.md -->
 
-Additive (versioning rule 1), with calls that last as long as someone is in them.
+Additive (versioning rule 1): calls that last as long as someone is in them, read receipts and
+typing, redaction, message relations, activity in rooms a socket has not joined, captions, and
+more of chat for the backend through the service API.
 
 | Before | Now |
 |---|---|
@@ -65,8 +67,9 @@ What to do:
   in this one release): roll it out with the chat Deployment set to `Recreate` (RUNBOOK.md,
   section 3). Migration 0023 adds `video_events` and a
   trigger on `videos`, 0024 lets a video be `public`, and 0025 adds `chat_messages.quiet`, 0026 `chat_call_rings`, 0027 `chat_messages.redacted`, 0028 the new, empty
-  `chat_message_relations` and 0029 `chat_read_marks`; all
-  run with the gateway as usual.
+  `chat_message_relations`, 0029 `chat_read_marks` and 0030 `video_captions`; all
+  run with the gateway as usual. On nodes that enforce AppArmor, the worker may run under its
+  own profile (RUNBOOK.md, step 2) instead of the host-wide user-namespace sysctl.
   Roll every gateway out before anyone sets `public`: an older one answers `500` for such a
   video.
 
