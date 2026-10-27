@@ -39,3 +39,26 @@ KEM key. The OpenMLS bridge (infra/e2ee/mls_ffi_bridge) and the browser client b
 (clients/web-mls) use only MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519, so neither decodes a \
 hybrid key. 0.0.10 fixes it but needs hpke-rs 0.8, which no openmls_rust_crypto release \
 accepts yet (0.6.0 pins hpke 0.7). Bump when openmls_rust_crypto takes hpke-rs 0.8."""
+
+[[IgnoredVulns]]
+id = "GHSA-qwgh-2vcv-g2f7"
+ignoreUntil = 2027-04-30T00:00:00Z
+reason = """block-buffer 0.10.4 leaves its cursor corrupt, and later reads and writes out of \
+bounds, if the block function it calls panics and the panic is caught. In the OpenMLS bridge \
+(infra/e2ee/mls_ffi_bridge) and the browser client built from it (clients/web-mls) it is \
+digest 0.10's buffer under sha2 0.10, hmac 0.12, curve25519-dalek 4 and the RustCrypto curves, \
+whose block functions are the hashes' compression functions and never panic, so the bridge's \
+catch_unwind around each FFI call never catches one mid-block. 0.12.1 fixes it but needs \
+digest 0.11, which ed25519-dalek 2 and curve25519-dalek 4, pinned by openmls_rust_crypto and \
+openmls_basic_credential 0.6.0, do not take. Bump when they do."""
+
+[[IgnoredVulns]]
+id = "RUSTSEC-2026-0387"
+ignoreUntil = 2027-04-30T00:00:00Z
+reason = """crypto-bigint 0.5.5 can branch on secret values in operations meant to be \
+constant-time. The OpenMLS bridge (infra/e2ee/mls_ffi_bridge) and the browser client built \
+from it (clients/web-mls) reach it only through elliptic-curve 0.13, for the P-256, P-384 and \
+secp256k1 curves openmls_rust_crypto and hpke-rs-rust-crypto compile in; both use only \
+MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519, whose secret keys are X25519 and Ed25519 \
+(curve25519-dalek), so no secret ever goes through it. 0.7.6 fixes it but elliptic-curve 0.13 \
+takes only 0.5. Bump when openmls_rust_crypto moves to elliptic-curve 0.14."""

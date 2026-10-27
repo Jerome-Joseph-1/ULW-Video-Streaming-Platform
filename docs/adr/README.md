@@ -143,3 +143,4 @@ Decisions, one per file, immutable; supersede rather than edit.
 | [0137](0137-a-room-tells-its-members-it-moved-on.md) | A room tells its members it moved on | Accepted |
 | [0138](0138-read-receipts-and-typing.md) | Read receipts and typing | Accepted |
 | [0139](0139-a-video-carries-captions-in-webvtt.md) | A video carries captions in WebVTT | Accepted |
+| [0140](0140-development-in-a-codespace-with-hosted-backing-services.md) | Development runs in a codespace, with hosted backing services optional | Accepted |

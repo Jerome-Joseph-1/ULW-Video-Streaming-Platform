@@ -18,6 +18,14 @@ store, image tags, TURN port, secret names), create the secrets, and
 [RUNBOOK](deploy/kubernetes/RUNBOOK.md) walks through it. Apps integrate against
 [`docs/integration/`](docs/integration/README.md).
 
+## Develop in the cloud (Windows, or any machine)
+
+Nothing to install locally: open the repository in a GitHub Codespace (**Code → Codespaces**),
+which builds [`.devcontainer/`](.devcontainer/devcontainer.json) with CI's toolchain, Docker,
+Postgres and MinIO, then `tools/dev/build.sh`, `tools/dev/up.sh` and `tools/dev/smoke.sh`.
+Neon, Cloudflare R2 and LiveKit Cloud can stand in for the local services, on their free tiers.
+[`docs/development/cloud-dev.md`](docs/development/cloud-dev.md) is the guide (ADR-0140).
+
 ## Build and test
 
 Needs GCC 14 or Clang 19 (Clang 18 lacks `std::expected` in libstdc++; ADR-0022), CMake 3.28+,
@@ -119,3 +127,4 @@ Layering, ports and adapters, enforced by `tools/check-boundaries.sh`:
 - [`deploy/kubernetes/`](deploy/kubernetes/RUNBOOK.md) the Kubernetes manifests and the operator's guide
 - [`docs/operations/`](docs/operations/soak.md) soak procedure and results
 - [`docs/operations/testing.md`](docs/operations/testing.md) mutation testing of the unit suites
+- [`docs/development/cloud-dev.md`](docs/development/cloud-dev.md) the cloud development environment: Codespaces and the hosted services

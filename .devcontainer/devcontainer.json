@@ -1,0 +1,72 @@
+// The development environment, for GitHub Codespaces or any Dev Containers host
+// (docs/development/cloud-dev.md, docs/adr/0140). Everything the build, the tests and a running
+// stack need is in here; the machine that opens it needs only a browser or VS Code.
+{
+  "name": "ULW",
+  "build": { "dockerfile": "Dockerfile" },
+  // A full build is about 650 C++ units: 4 cores keep it to minutes. The free Codespaces quota
+  // is counted in core-hours, so 4 cores gives half the hours 2 would.
+  "hostRequirements": { "cpus": 4, "memory": "16gb", "storage": "32gb" },
+  // Each feature is pinned by digest, as every image in this repository is (docs/adr/0072); the
+  // comment names the version that digest was.
+  "features": {
+    // 2.17.0. Docker inside the container: the backing services of deploy/local/compose.yaml
+    // and the kind sandbox (make e2e-up). It runs the container privileged, which also leaves
+    // io_uring and user namespaces (the worker's sandbox) to the kernel rather than to Docker's
+    // seccomp profile.
+    "ghcr.io/devcontainers/features/docker-in-docker@sha256:25b9f05705ffba7dbe503230ac76081419306f8c8bc88e0ce78c4ecd99a0c78c": {},
+    // 1.7.1. The Playwright suites (tests/e2e, tests/call) and clients/web-mls.
+    "ghcr.io/devcontainers/features/node@sha256:8c0de46939b61958041700ee89e3493f3b2e4131a06dc46b4d9423427d06e5f6": {
+      "version": "22"
+    },
+    // 1.4.0. The mock identity provider (deploy/local/mock-auth, go.mod's go 1.24).
+    "ghcr.io/devcontainers/features/go@sha256:3b2c7acfdb24de88292283d10eb7517ccc45f60ae22a97030f1cf4fbd03634f3": {
+      "version": "1.24"
+    },
+    // 1.6.0. rustup, with the release the OpenMLS bridge's rust-toolchain.toml names (keep the
+    // two in step; rustup would fetch that one anyway), and clippy, rustfmt and rust-analyzer.
+    "ghcr.io/devcontainers/features/rust@sha256:846c949f52c9dea98d4f90a11957cbf152fb3f6e8a70ddd7cb83014a7d1d0c98": {
+      "version": "1.94.1",
+      "profile": "minimal"
+    }
+  },
+  // io_uring rings are charged to RLIMIT_MEMLOCK, and ctest runs many at once (ci.yml lifts it
+  // the same way).
+  "runArgs": ["--ulimit", "memlock=-1:-1"],
+  "remoteUser": "vscode",
+  "postCreateCommand": ".devcontainer/post-create.sh",
+  "postStartCommand": ".devcontainer/post-start.sh",
+  // Services a browser on the developer's own machine reaches through the Codespaces forwarder
+  // (tools/dev/up.sh). Private by default: only the codespace's owner, signed in to GitHub.
+  "forwardPorts": [8080, 8081],
+  "portsAttributes": {
+    "8080": { "label": "gateway_server", "onAutoForward": "silent" },
+    "8081": { "label": "chat_server", "onAutoForward": "silent" },
+    "55432": { "label": "Postgres (local)", "onAutoForward": "ignore" },
+    "9000": { "label": "MinIO (local)", "onAutoForward": "ignore" }
+  },
+  "customizations": {
+    "codespaces": {
+      "openFiles": ["docs/development/cloud-dev.md"]
+    },
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cmake-tools",
+        "llvm-vs-code-extensions.vscode-clangd",
+        "ms-python.python",
+        "golang.go",
+        "rust-lang.rust-analyzer",
+        "ms-azuretools.vscode-docker"
+      ],
+      "settings": {
+        "cmake.useCMakePresets": "always",
+        "cmake.configureOnOpen": false,
+        // clangd reads the dev preset's compile database; the Microsoft C++ extension's
+        // IntelliSense would compete with it.
+        "clangd.arguments": ["--compile-commands-dir=build/dev", "--header-insertion=never"],
+        "C_Cpp.intelliSenseEngine": "disabled",
+        "files.eol": "\n"
+      }
+    }
+  }
+}

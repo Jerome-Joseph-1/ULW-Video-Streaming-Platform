@@ -1,0 +1,17 @@
+# Laid over deploy/local/compose.yaml in the development container (post-start.sh,
+# tools/dev/services.sh): the local Postgres and MinIO keep their data on named volumes, which
+# live on the codespace's disk and so survive a stop, a rebuild of the services and a restart of
+# the codespace. Only deleting the codespace (or `tools/dev/services.sh reset`) removes them.
+# The base file keeps MinIO on tmpfs for the test suites, which make and drop their own buckets.
+services:
+  postgres:
+    volumes:
+      - ulw-pg-data:/var/lib/postgresql/data
+  minio:
+    tmpfs: !reset []
+    volumes:
+      - ulw-minio-data:/data
+
+volumes:
+  ulw-pg-data:
+  ulw-minio-data:
