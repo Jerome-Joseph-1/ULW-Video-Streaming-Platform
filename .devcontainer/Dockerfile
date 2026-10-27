@@ -26,3 +26,8 @@ RUN apt-get update -q \
 # CMake's presets name no compiler except `coverage` and `fuzz`; these make gcc-14 the default
 # for the others, as CI's CC and CXX do.
 ENV CC=gcc-14 CXX=g++-14
+
+# The base image's non-root user, as devcontainer.json's remoteUser; it has sudo for what needs
+# root (post-start.sh's sysctls). Features still install as root, which the Dev Containers
+# tooling arranges itself.
+USER vscode
